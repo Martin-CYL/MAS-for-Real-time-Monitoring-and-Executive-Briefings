@@ -6,14 +6,11 @@ import {
   truncateChatBrowserNotificationMessage,
 } from "./chatBrowserNotifications"
 
-const originalNotification = globalThis.Notification
+const originalNotification = Object.getOwnPropertyDescriptor(globalThis, "Notification")
 
 afterEach(() => {
-  Object.defineProperty(globalThis, "Notification", {
-    configurable: true,
-    writable: true,
-    value: originalNotification,
-  })
+  if (originalNotification) Object.defineProperty(globalThis, "Notification", originalNotification)
+  else Reflect.deleteProperty(globalThis, "Notification")
 })
 
 describe("chat browser notifications", () => {

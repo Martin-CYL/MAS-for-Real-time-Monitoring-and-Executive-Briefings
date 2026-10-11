@@ -4,14 +4,14 @@ import { fetchVisualizationHeights, recordVisualizationHeight, rememberedVisuali
 const URL_A = "/api/chats/chat-1/media/visualization-abc.html"
 
 describe("the heights a browser has measured visualizations at", () => {
-  const original = { localStorage: globalThis.localStorage, fetch: globalThis.fetch }
+  const original = { localStorage: Object.getOwnPropertyDescriptor(globalThis, "localStorage"), fetch: globalThis.fetch }
   let stored: Map<string, string>
   let requests: Array<{ url: string; method: string; body: unknown }>
 
   beforeEach(() => {
     stored = new Map()
     requests = []
-    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: {
       getItem: (key: string) => stored.get(key) ?? null,
       setItem: (key: string, value: string) => { stored.set(key, value) },
     } })
@@ -21,7 +21,8 @@ describe("the heights a browser has measured visualizations at", () => {
     }) as unknown as typeof fetch
   })
   afterEach(() => {
-    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: original.localStorage })
+    if (original.localStorage) Object.defineProperty(globalThis, "localStorage", original.localStorage)
+    else Reflect.deleteProperty(globalThis, "localStorage")
     globalThis.fetch = original.fetch
   })
 
@@ -57,7 +58,7 @@ describe("the heights a browser has measured visualizations at", () => {
     expect(rememberedVisualizationHeights("/api/chats/c/media/visualization-0.html")).toEqual([])
     expect(rememberedVisualizationHeights("/api/chats/c/media/visualization-204.html")).toEqual([[736, 400]])
     expect(Object.keys(JSON.parse(stored.get("nex-visualization-heights")!))).toHaveLength(200)
-    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: { getItem: () => { throw new Error("denied") }, setItem: () => { throw new Error("denied") } } })
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: { getItem: () => { throw new Error("denied") }, setItem: () => { throw new Error("denied") } } })
     expect(rememberedVisualizationHeights(URL_A)).toEqual([])
     expect(() => rememberVisualizationHeights(URL_A, [[736, 400]])).not.toThrow()
   })

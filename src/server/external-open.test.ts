@@ -1,4 +1,5 @@
-import { describe, expect, test } from "bun:test"
+import { describe, expect, spyOn, test } from "bun:test"
+import * as processUtils from "./process-utils"
 import { buildDefaultOpenCommand, buildEditorCommand, buildPreviewCommand, buildTerminalCommand, tokenizeCommandTemplate } from "./external-open"
 
 describe("tokenizeCommandTemplate", () => {
@@ -154,8 +155,23 @@ describe("buildTerminalCommand", () => {
   })
 
   test("defaults to Terminal.app on macOS when no emulator is named", () => {
-    // The behaviour the menu had before terminals were detected at all.
-    expect(buildTerminalCommand({ localPath: "/repo", platform: "darwin" }))
-      .toEqual({ command: "open", args: ["-a", "Terminal", "/repo"] })
+    const installed = spyOn(processUtils, "canOpenMacApp").mockReturnValue(true)
+    try {
+      expect(buildTerminalCommand({ localPath: "/repo", platform: "darwin" }))
+        .toEqual({ command: "open", args: ["-a", "Terminal", "/repo"] })
+      expect(installed).toHaveBeenCalledWith("Terminal")
+    } finally {
+      installed.mockRestore()
+    }
+  })
+
+  test("reports an unavailable default macOS terminal", () => {
+    const installed = spyOn(processUtils, "canOpenMacApp").mockReturnValue(false)
+    try {
+      expect(() => buildTerminalCommand({ localPath: "/repo", platform: "darwin" }))
+        .toThrow("Terminal is not installed")
+    } finally {
+      installed.mockRestore()
+    }
   })
 })

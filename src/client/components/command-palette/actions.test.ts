@@ -192,7 +192,7 @@ describe("getSettingsPaletteEntries", () => {
 
     // Sections
     expect(ids).toContain("settings-section-general")
-    expect(ids).not.toContain("settings-section-changelog")
+    expect(ids).toContain("settings-section-changelog")
     expect(ids).not.toContain("settings-row-defaultEditor")
     expect(ids).not.toContain("settings-row-applicationUpdate")
     expect(ids).toContain("settings-row-language")

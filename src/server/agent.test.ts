@@ -668,7 +668,7 @@ describe("AgentCoordinator codex integration", () => {
     expect(store.chat.sessionToken).toBe("thread-1")
   })
 
-  test("maps codex model options into session and turn settings", async () => {
+  test("preserves codex effort while ignoring requests for fast mode", async () => {
     const sessionCalls: Array<{ chatId: string; sessionToken: string | null; serviceTier?: string }> = []
     const turnCalls: Array<{ effort?: string; serviceTier?: string }> = []
 
@@ -743,8 +743,8 @@ describe("AgentCoordinator codex integration", () => {
 
     await waitFor(() => store.turnFinishedCount === 1)
 
-    expect(sessionCalls).toEqual([{ chatId: "chat-1", sessionToken: null, serviceTier: "fast" }])
-    expect(turnCalls).toEqual([{ effort: "xhigh", serviceTier: "fast" }])
+    expect(sessionCalls).toEqual([{ chatId: "chat-1", sessionToken: null, serviceTier: undefined }])
+    expect(turnCalls).toEqual([{ effort: "xhigh", serviceTier: undefined }])
   })
 
   test("approving synthetic codex ExitPlanMode starts a hidden follow-up turn and can clear context", async () => {

@@ -24,7 +24,7 @@ describe("Nex ordinary-user surface", () => {
   test("settings navigation and search agree in both languages", () => {
     for (const locale of ["en", "zh-CN"] as const) {
       useLocaleStore.getState().setLocale(locale)
-      expect(visibleSettingsSections().map(section => section.id)).toEqual(["general"])
+      expect(visibleSettingsSections().map(section => section.id)).toEqual(["general", "changelog"])
       const ids = listAllSettingsRowDefs().map(row => row.id)
       expect(ids).toContain("language")
       expect(ids).toContain("theme")

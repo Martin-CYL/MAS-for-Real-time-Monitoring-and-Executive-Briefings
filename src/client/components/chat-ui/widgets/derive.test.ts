@@ -103,7 +103,7 @@ describe("deriveSubagentDetails", () => {
   test("reads the task off the spawn call and counts the agent's own steps", () => {
     const child = (entry: TranscriptEntry, parent: string): TranscriptEntry => ({ ...entry, parentToolUseId: parent })
     const entries: TranscriptEntry[] = [
-      toolCall("Agent", "call-1", { subagent_type: "general-purpose", description: "Audit durable.ts turn engine", prompt: "Read CLAUDE.md first." }),
+      toolCall("Agent", "call-1", { subagent_type: "general-purpose", description: "Audit durable.ts turn engine", prompt: "Read AGENTS.md first." }),
       child(toolCall("Read", "r1", { file_path: "/repo/src/worker/durable.ts" }), "call-1"),
       child({ _id: "t1", createdAt: 3, kind: "assistant_text", text: "Looking at runTurn." }, "call-1"),
       child(toolCall("Grep", "g1", { pattern: "alarm" }), "call-1"),
@@ -113,7 +113,7 @@ describe("deriveSubagentDetails", () => {
     const details = deriveSubagentDetails(entries, new Map([["agent-a", "call-1"]])).get("agent-a")
     expect(details?.description).toBe("Audit durable.ts turn engine")
     expect(details?.subagentType).toBe("general-purpose")
-    expect(details?.prompt).toBe("Read CLAUDE.md first.")
+    expect(details?.prompt).toBe("Read AGENTS.md first.")
     expect(details?.toolCalls).toBe(2)
     expect(details?.messages).toBe(1)
     expect(details?.latestTool?.toolKind).toBe("grep")

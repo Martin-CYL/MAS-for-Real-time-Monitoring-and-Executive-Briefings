@@ -1,0 +1,558 @@
+import { randomUUID } from "node:crypto"
+import { watch, type FSWatcher } from "node:fs"
+import { mkdir, readFile, writeFile } from "node:fs/promises"
+import { homedir } from "node:os"
+import path from "node:path"
+import { getSettingsFilePath, LOG_PREFIX } from "../shared/branding"
+import {
+  DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES,
+  MAX_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES,
+  MIN_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES,
+} from "../shared/transcript-window"
+import { getDefaultEditorCommandTemplate, isEditorPreset } from "../shared/editor-presets"
+import { formatDisplayPath } from "./paths"
+import {
+  mergeProviderDefaultsPatch,
+  normalizeProviderDefaults,
+  type ProviderPreferenceInput,
+} from "../shared/provider-preferences"
+import {
+  DEFAULT_NEW_PROJECTS_DIRECTORY,
+  type AppSettingsPatch,
+  type AppSettingsSnapshot,
+  type AppThemePreference,
+  type ChatBrowserNotificationPreference,
+  type ChatSoundId,
+  type ChatSoundPreference,
+  type DefaultProviderPreference,
+  type EditorPreset,
+  type PaneVisibilityScope,
+  type SubmitWhileRunning,
+  type TerminalPreset,
+} from "../shared/types"
+
+interface AppSettingsFile {
+  analyticsEnabled?: unknown
+  analyticsUserId?: unknown
+  browserSettingsMigrated?: unknown
+  theme?: unknown
+  chatSoundPreference?: unknown
+  chatSoundId?: unknown
+  chatBrowserNotificationPreference?: unknown
+  submitWhileRunning?: unknown
+  terminal?: {
+    scrollbackLines?: unknown
+    minColumnWidth?: unknown
+    webglRenderer?: unknown
+  }
+  editor?: {
+    preset?: unknown
+    commandTemplate?: unknown
+  }
+  transcript?: {
+    windowAssistantMessages?: unknown
+  }
+  paneVisibility?: {
+    widgets?: unknown
+    terminal?: unknown
+  }
+  defaultProvider?: unknown
+  providerDefaults?: {
+    claude?: ProviderPreferenceInput
+    codex?: ProviderPreferenceInput
+    cursor?: ProviderPreferenceInput
+    grok?: ProviderPreferenceInput
+    pi?: ProviderPreferenceInput
+  }
+  newSidebarEnabled?: unknown
+  projectIconsInChats?: unknown
+  chatTabsEnabled?: unknown
+  widgetsPeekEnabled?: unknown
+  newProjectsDirectory?: unknown
+  setupShown?: unknown
+  setupCompleted?: unknown
+  setupDismissed?: unknown
+}
+
+// devbox and the installed-app lists are server-runtime facts, not settings state.
+interface AppSettingsState extends Omit<AppSettingsSnapshot, "devbox" | "installedEditors" | "installedTerminals"> {
+  analyticsUserId: string
+}
+
+interface SnapshotExtras {
+  devbox: boolean
+  installedEditors: EditorPreset[] | null
+  installedTerminals: TerminalPreset[] | null
+}
+
+interface NormalizedAppSettings {
+  payload: AppSettingsState
+  warning: string | null
+  shouldWrite: boolean
+}
+
+const DEFAULT_TERMINAL_SCROLLBACK = 1_000
+const MIN_TERMINAL_SCROLLBACK = 500
+const MAX_TERMINAL_SCROLLBACK = 5_000
+const DEFAULT_TERMINAL_MIN_COLUMN_WIDTH = 450
+const MIN_TERMINAL_MIN_COLUMN_WIDTH = 250
+const MAX_TERMINAL_MIN_COLUMN_WIDTH = 900
+const DEFAULT_EDITOR_PRESET: EditorPreset = "cursor"
+const DEFAULT_CHAT_SOUND_PREFERENCE: ChatSoundPreference = "always"
+const DEFAULT_CHAT_SOUND_ID: ChatSoundId = "funk"
+// Off by default: turning it on triggers the browser's permission prompt,
+// which should only ever happen because the user asked for it.
+const DEFAULT_CHAT_BROWSER_NOTIFICATION_PREFERENCE: ChatBrowserNotificationPreference = "never"
+// Queue by default: interrupting a running turn is the rarer, more disruptive
+// intent, so it is the one you reach for deliberately.
+const DEFAULT_SUBMIT_WHILE_RUNNING: SubmitWhileRunning = "queue"
+
+function createAnalyticsUserId() {
+  return `anon_${randomUUID()}`
+}
+
+function clampNumber(value: unknown, fallback: number, min: number, max: number) {
+  const numberValue = typeof value === "number" ? value : Number(value)
+  if (!Number.isFinite(numberValue)) return fallback
+  return Math.min(max, Math.max(min, Math.round(numberValue)))
+}
+
+function normalizeTheme(value: unknown): AppThemePreference {
+  return value === "light" || value === "dark" || value === "system" ? value : "system"
+}
+
+function normalizeChatSoundPreference(value: unknown): ChatSoundPreference {
+  return value === "never" || value === "unfocused" || value === "always" ? value : DEFAULT_CHAT_SOUND_PREFERENCE
+}
+
+function normalizeChatSoundId(value: unknown): ChatSoundId {
+  switch (value) {
+    case "blow":
+    case "bottle":
+    case "frog":
+    case "funk":
+    case "glass":
+    case "ping":
+    case "pop":
+    case "purr":
+    case "tink":
+      return value
+    default:
+      return DEFAULT_CHAT_SOUND_ID
+  }
+}
+
+function normalizeChatBrowserNotificationPreference(value: unknown): ChatBrowserNotificationPreference {
+  return value === "never" || value === "unfocused" || value === "always"
+    ? value
+    : DEFAULT_CHAT_BROWSER_NOTIFICATION_PREFERENCE
+}
+
+function normalizeSubmitWhileRunning(value: unknown): SubmitWhileRunning {
+  return value === "steer" ? "steer" : DEFAULT_SUBMIT_WHILE_RUNNING
+}
+
+// Per chat by default: a pane you opened for one chat's work shouldn't follow
+// you into every other chat in the project.
+function normalizePaneVisibilityScope(value: unknown): PaneVisibilityScope {
+  return value === "project" ? "project" : "chat"
+}
+
+function normalizeDefaultProvider(value: unknown): DefaultProviderPreference {
+  return value === "claude" || value === "codex" || value === "cursor" || value === "grok" || value === "pi" || value === "last_used"
+    ? value
+    : "last_used"
+}
+
+function normalizeEditorPreset(value: unknown): EditorPreset {
+  return isEditorPreset(value) ? value : DEFAULT_EDITOR_PRESET
+}
+
+function normalizeEditorCommandTemplate(value: unknown, preset: EditorPreset) {
+  const trimmed = typeof value === "string" ? value.trim() : ""
+  return trimmed || getDefaultEditorCommandTemplate(preset)
+}
+
+function toFilePayload(state: AppSettingsState) {
+  return {
+    analyticsEnabled: state.analyticsEnabled,
+    analyticsUserId: state.analyticsUserId,
+    browserSettingsMigrated: state.browserSettingsMigrated,
+    theme: state.theme,
+    chatSoundPreference: state.chatSoundPreference,
+    chatSoundId: state.chatSoundId,
+    chatBrowserNotificationPreference: state.chatBrowserNotificationPreference,
+    submitWhileRunning: state.submitWhileRunning,
+    terminal: state.terminal,
+    editor: state.editor,
+    transcript: state.transcript,
+    paneVisibility: state.paneVisibility,
+    defaultProvider: state.defaultProvider,
+    providerDefaults: state.providerDefaults,
+    newSidebarEnabled: state.newSidebarEnabled,
+    ...(state.projectIconsInChats === false ? { projectIconsInChats: false } : {}),
+    ...(state.chatTabsEnabled === true ? { chatTabsEnabled: true } : {}),
+    ...(state.widgetsPeekEnabled === true ? { widgetsPeekEnabled: true } : {}),
+    newProjectsDirectory: state.newProjectsDirectory,
+    setupShown: state.setupShown,
+    setupCompleted: state.setupCompleted,
+    setupDismissed: state.setupDismissed,
+  }
+}
+
+function toSnapshot(
+  state: AppSettingsState,
+  extras: SnapshotExtras = { devbox: false, installedEditors: null, installedTerminals: null }
+): AppSettingsSnapshot {
+  return {
+    devbox: extras.devbox,
+    installedEditors: extras.installedEditors,
+    installedTerminals: extras.installedTerminals,
+    analyticsEnabled: state.analyticsEnabled,
+    browserSettingsMigrated: state.browserSettingsMigrated,
+    theme: state.theme,
+    chatSoundPreference: state.chatSoundPreference,
+    chatSoundId: state.chatSoundId,
+    chatBrowserNotificationPreference: state.chatBrowserNotificationPreference,
+    submitWhileRunning: state.submitWhileRunning,
+    terminal: state.terminal,
+    editor: state.editor,
+    transcript: state.transcript,
+    paneVisibility: state.paneVisibility,
+    defaultProvider: state.defaultProvider,
+    providerDefaults: state.providerDefaults,
+    newSidebarEnabled: state.newSidebarEnabled,
+    ...(state.projectIconsInChats === false ? { projectIconsInChats: false } : {}),
+    ...(state.chatTabsEnabled === true ? { chatTabsEnabled: true } : {}),
+    ...(state.widgetsPeekEnabled === true ? { widgetsPeekEnabled: true } : {}),
+    newProjectsDirectory: state.newProjectsDirectory,
+    setupShown: state.setupShown,
+    setupCompleted: state.setupCompleted,
+    setupDismissed: state.setupDismissed,
+    warning: state.warning,
+    filePathDisplay: state.filePathDisplay,
+  }
+}
+
+function normalizeAppSettings(
+  value: unknown,
+  filePath = getSettingsFilePath(homedir())
+): NormalizedAppSettings {
+  const source = value && typeof value === "object" && !Array.isArray(value)
+    ? value as AppSettingsFile
+    : null
+  const warnings: string[] = []
+
+  if (value !== undefined && value !== null && !source) {
+    warnings.push("Settings file must contain a JSON object")
+  }
+
+  // Nex does not send anonymous product analytics, including legacy opt-ins.
+  const analyticsEnabled = false
+  if (source?.analyticsEnabled !== undefined && typeof source.analyticsEnabled !== "boolean") {
+    warnings.push("analyticsEnabled must be a boolean")
+  }
+
+  const rawAnalyticsUserId = typeof source?.analyticsUserId === "string" ? source.analyticsUserId.trim() : ""
+  if (source?.analyticsUserId !== undefined && typeof source.analyticsUserId !== "string") {
+    warnings.push("analyticsUserId must be a string")
+  }
+  const analyticsUserId = rawAnalyticsUserId || createAnalyticsUserId()
+  if (!rawAnalyticsUserId && source?.analyticsUserId !== undefined) {
+    warnings.push("analyticsUserId must be a non-empty string")
+  }
+
+  // New Sidebar ships enabled; an explicit false opts back into the legacy sidebar.
+  const newSidebarEnabled = typeof source?.newSidebarEnabled === "boolean"
+    ? source.newSidebarEnabled
+    : true
+  if (source?.newSidebarEnabled !== undefined && typeof source.newSidebarEnabled !== "boolean") {
+    warnings.push("newSidebarEnabled must be a boolean")
+  }
+
+  const rawNewProjectsDirectory = typeof source?.newProjectsDirectory === "string"
+    ? source.newProjectsDirectory.trim()
+    : ""
+  const newProjectsDirectory = rawNewProjectsDirectory || process.env.NEX_PROJECTS_DIR?.trim() || DEFAULT_NEW_PROJECTS_DIRECTORY
+  if (source?.newProjectsDirectory !== undefined && !rawNewProjectsDirectory) {
+    warnings.push("newProjectsDirectory must be a non-empty string")
+  }
+
+  const editorPreset = normalizeEditorPreset(source?.editor?.preset)
+  const state: AppSettingsState = {
+    analyticsEnabled,
+    analyticsUserId,
+    browserSettingsMigrated: source?.browserSettingsMigrated === true,
+    theme: normalizeTheme(source?.theme),
+    chatSoundPreference: normalizeChatSoundPreference(source?.chatSoundPreference),
+    chatSoundId: normalizeChatSoundId(source?.chatSoundId),
+    chatBrowserNotificationPreference: normalizeChatBrowserNotificationPreference(source?.chatBrowserNotificationPreference),
+    submitWhileRunning: normalizeSubmitWhileRunning(source?.submitWhileRunning),
+    terminal: {
+      scrollbackLines: clampNumber(source?.terminal?.scrollbackLines, DEFAULT_TERMINAL_SCROLLBACK, MIN_TERMINAL_SCROLLBACK, MAX_TERMINAL_SCROLLBACK),
+      minColumnWidth: clampNumber(source?.terminal?.minColumnWidth, DEFAULT_TERMINAL_MIN_COLUMN_WIDTH, MIN_TERMINAL_MIN_COLUMN_WIDTH, MAX_TERMINAL_MIN_COLUMN_WIDTH),
+      webglRenderer: source?.terminal?.webglRenderer === true,
+    },
+    editor: {
+      preset: editorPreset,
+      commandTemplate: normalizeEditorCommandTemplate(source?.editor?.commandTemplate, editorPreset),
+    },
+    transcript: {
+      windowAssistantMessages: clampNumber(
+        source?.transcript?.windowAssistantMessages,
+        DEFAULT_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES,
+        MIN_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES,
+        MAX_TRANSCRIPT_WINDOW_ASSISTANT_MESSAGES
+      ),
+    },
+    paneVisibility: {
+      widgets: normalizePaneVisibilityScope(source?.paneVisibility?.widgets),
+      terminal: normalizePaneVisibilityScope(source?.paneVisibility?.terminal),
+    },
+    defaultProvider: normalizeDefaultProvider(source?.defaultProvider ?? process.env.NEX_DEFAULT_PROVIDER),
+    providerDefaults: normalizeProviderDefaults(source?.providerDefaults),
+    newSidebarEnabled,
+    ...(source?.projectIconsInChats === false ? { projectIconsInChats: false } : {}),
+    ...(source?.chatTabsEnabled === true ? { chatTabsEnabled: true } : {}),
+    ...(source?.widgetsPeekEnabled === true ? { widgetsPeekEnabled: true } : {}),
+    newProjectsDirectory,
+    // Onboarding markers default to false so a machine that has never run the
+    // wizard still gets it; once set they stay set for every browser.
+    setupShown: source?.setupShown === true,
+    setupCompleted: source?.setupCompleted === true,
+    setupDismissed: source?.setupDismissed === true,
+    warning: null,
+    filePathDisplay: formatDisplayPath(filePath),
+  }
+
+  const shouldWrite = JSON.stringify(source ? toComparablePayload(source) : null) !== JSON.stringify(toFilePayload(state))
+  state.warning = warnings.length > 0
+    ? `Some settings were reset to defaults: ${warnings.join("; ")}`
+    : null
+
+  return {
+    payload: state,
+    warning: state.warning,
+    shouldWrite,
+  }
+}
+
+function toComparablePayload(source: AppSettingsFile) {
+  return {
+    analyticsEnabled: source.analyticsEnabled,
+    analyticsUserId: typeof source.analyticsUserId === "string" ? source.analyticsUserId.trim() : source.analyticsUserId,
+    browserSettingsMigrated: source.browserSettingsMigrated,
+    theme: source.theme,
+    chatSoundPreference: source.chatSoundPreference,
+    chatSoundId: source.chatSoundId,
+    chatBrowserNotificationPreference: source.chatBrowserNotificationPreference,
+    submitWhileRunning: source.submitWhileRunning,
+    terminal: source.terminal,
+    editor: source.editor,
+    transcript: source.transcript,
+    paneVisibility: source.paneVisibility,
+    defaultProvider: source.defaultProvider,
+    providerDefaults: source.providerDefaults,
+    newSidebarEnabled: source.newSidebarEnabled,
+    projectIconsInChats: source.projectIconsInChats,
+    chatTabsEnabled: source.chatTabsEnabled,
+    widgetsPeekEnabled: source.widgetsPeekEnabled,
+    newProjectsDirectory: typeof source.newProjectsDirectory === "string"
+      ? source.newProjectsDirectory.trim()
+      : source.newProjectsDirectory,
+    setupShown: source.setupShown,
+    setupCompleted: source.setupCompleted,
+    setupDismissed: source.setupDismissed,
+  }
+}
+
+function applyPatch(state: AppSettingsState, patch: AppSettingsPatch): AppSettingsState {
+  return normalizeAppSettings({
+    ...toFilePayload(state),
+    ...patch,
+    terminal: {
+      ...state.terminal,
+      ...patch.terminal,
+    },
+    editor: {
+      ...state.editor,
+      ...patch.editor,
+    },
+    transcript: {
+      ...state.transcript,
+      ...patch.transcript,
+    },
+    paneVisibility: {
+      ...state.paneVisibility,
+      ...patch.paneVisibility,
+    },
+    providerDefaults: mergeProviderDefaultsPatch(state.providerDefaults, patch.providerDefaults),
+  }, state.filePathDisplay).payload
+}
+
+export async function readAppSettingsSnapshot(filePath = getSettingsFilePath(homedir())) {
+  try {
+    const text = await readFile(filePath, "utf8")
+    if (!text.trim()) {
+      const normalized = normalizeAppSettings(undefined, filePath)
+      return {
+        ...toSnapshot(normalized.payload),
+        warning: "Settings file was empty. Using defaults.",
+      } satisfies AppSettingsSnapshot
+    }
+
+    return toSnapshot(normalizeAppSettings(JSON.parse(text), filePath).payload)
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return toSnapshot(normalizeAppSettings(undefined, filePath).payload)
+    }
+    if (error instanceof SyntaxError) {
+      return {
+        ...toSnapshot(normalizeAppSettings(undefined, filePath).payload),
+        warning: "Settings file is invalid JSON. Using defaults.",
+      } satisfies AppSettingsSnapshot
+    }
+    throw error
+  }
+}
+
+export class AppSettingsManager {
+  readonly filePath: string
+  private watcher: FSWatcher | null = null
+  private state: AppSettingsState
+  private readonly listeners = new Set<(snapshot: AppSettingsSnapshot) => void>()
+  /** Server-computed snapshot fields — never read from or written to the file. */
+  private extras: SnapshotExtras
+
+  constructor(filePath = getSettingsFilePath(homedir()), extras: { devbox?: boolean } = {}) {
+    this.filePath = filePath
+    this.state = normalizeAppSettings(undefined, filePath).payload
+    this.extras = { devbox: extras.devbox === true, installedEditors: null, installedTerminals: null }
+  }
+
+  async initialize() {
+    await mkdir(path.dirname(this.filePath), { recursive: true })
+    await this.reload({ persistNormalized: true })
+    this.startWatching()
+  }
+
+  dispose() {
+    this.watcher?.close()
+    this.watcher = null
+    this.listeners.clear()
+  }
+
+  getSnapshot() {
+    return toSnapshot(this.state, this.extras)
+  }
+
+  /**
+   * Publish the editor-detection result. Notifies like any other change, so
+   * the menus ungrey themselves as soon as the probe lands; the snapshot
+   * dedupe upstream drops the push when the list is unchanged.
+   */
+  setInstalledEditors(installedEditors: EditorPreset[]) {
+    this.publishExtras({ installedEditors })
+  }
+
+  /** Publish the terminal-detection result; same shape as the editor one. */
+  setInstalledTerminals(installedTerminals: TerminalPreset[]) {
+    this.publishExtras({ installedTerminals })
+  }
+
+  private publishExtras(patch: Partial<SnapshotExtras>) {
+    this.extras = { ...this.extras, ...patch }
+    const snapshot = this.getSnapshot()
+    for (const listener of this.listeners) {
+      listener(snapshot)
+    }
+  }
+
+  getState() {
+    return this.state
+  }
+
+  onChange(listener: (snapshot: AppSettingsSnapshot) => void) {
+    this.listeners.add(listener)
+    return () => {
+      this.listeners.delete(listener)
+    }
+  }
+
+  async reload(options?: { persistNormalized?: boolean }) {
+    const nextState = await this.readState(options)
+    this.setState(nextState)
+  }
+
+  async write(value: { analyticsEnabled: boolean }) {
+    return this.writePatch({ analyticsEnabled: value.analyticsEnabled })
+  }
+
+  async writePatch(patch: AppSettingsPatch) {
+    const nextState = {
+      ...applyPatch(this.state, patch),
+      analyticsEnabled: false,
+      warning: null,
+      filePathDisplay: formatDisplayPath(this.filePath),
+    }
+    await mkdir(path.dirname(this.filePath), { recursive: true })
+    await writeFile(this.filePath, `${JSON.stringify(toFilePayload(nextState), null, 2)}\n`, "utf8")
+    this.setState(nextState)
+    return toSnapshot(nextState, this.extras)
+  }
+
+  private async readState(options?: { persistNormalized?: boolean }) {
+    const file = Bun.file(this.filePath)
+
+    try {
+      const text = await file.text()
+      const hasText = text.trim().length > 0
+      const normalized = normalizeAppSettings(hasText ? JSON.parse(text) : undefined, this.filePath)
+      if (options?.persistNormalized && (!hasText || normalized.shouldWrite)) {
+        await writeFile(this.filePath, `${JSON.stringify(toFilePayload(normalized.payload), null, 2)}\n`, "utf8")
+      }
+      return {
+        ...normalized.payload,
+        warning: !hasText ? "Settings file was empty. Using defaults." : normalized.warning,
+      } satisfies AppSettingsState
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT" && !(error instanceof SyntaxError)) {
+        throw error
+      }
+
+      const normalized = normalizeAppSettings(undefined, this.filePath)
+      if (options?.persistNormalized) {
+        await writeFile(this.filePath, `${JSON.stringify(toFilePayload(normalized.payload), null, 2)}\n`, "utf8")
+      }
+      return {
+        ...normalized.payload,
+        warning: error instanceof SyntaxError ? "Settings file is invalid JSON. Using defaults." : null,
+      } satisfies AppSettingsState
+    }
+  }
+
+  private setState(state: AppSettingsState) {
+    this.state = state
+    const snapshot = toSnapshot(state, this.extras)
+    for (const listener of this.listeners) {
+      listener(snapshot)
+    }
+  }
+
+  private startWatching() {
+    this.watcher?.close()
+    try {
+      this.watcher = watch(path.dirname(this.filePath), { persistent: false }, (_eventType, filename) => {
+        if (filename && filename !== path.basename(this.filePath)) {
+          return
+        }
+        void this.reload().catch((error: unknown) => {
+          console.warn(`${LOG_PREFIX} Failed to reload settings:`, error)
+        })
+      })
+    } catch (error) {
+      console.warn(`${LOG_PREFIX} Failed to watch settings file:`, error)
+      this.watcher = null
+    }
+  }
+}

@@ -1,0 +1,100 @@
+import path from "node:path"
+
+export const CLI_CHILD_MODE_ENV_VAR = "NEX_CLI_MODE"
+export const CLI_CHILD_MODE = "child"
+export const CLI_STARTUP_UPDATE_RESTART_EXIT_CODE = 75
+export const CLI_UI_UPDATE_RESTART_EXIT_CODE = 76
+export const CLI_CHILD_COMMAND_ENV_VAR = "NEX_CLI_CHILD_COMMAND"
+export const CLI_CHILD_ARGS_ENV_VAR = "NEX_CLI_CHILD_ARGS"
+export const CLI_SUPPRESS_OPEN_ONCE_ENV_VAR = "NEX_SUPPRESS_OPEN_ONCE"
+
+export function shouldRestartCliProcess(code: number | null, signal: NodeJS.Signals | null) {
+  return signal === null && (code === CLI_STARTUP_UPDATE_RESTART_EXIT_CODE || code === CLI_UI_UPDATE_RESTART_EXIT_CODE)
+}
+
+export function isUiUpdateRestart(code: number | null, signal: NodeJS.Signals | null) {
+  return signal === null && code === CLI_UI_UPDATE_RESTART_EXIT_CODE
+}
+
+/**
+ * Argv the supervisor uses when it RESPAWNS a child after an update restart.
+ * A `nex pair <code>` launch falls through into a normal run once paired —
+ * replaying the original argv would re-redeem the single-use pairing code
+ * (and fail with "invalid code"). Respawns continue as a plain run; the
+ * sticky cloud.json brings the machine back online.
+ */
+export function sanitizeRestartArgv(argv: string[]) {
+  return argv[0] === "pair" ? [] : argv
+}
+
+const INSPECT_FLAG = /^--inspect(-wait|-brk)?(=.*)?$/
+
+/**
+ * Splits the flags meant for Bun out of the `nex` argv. The supervisor
+ * passes them to the bun that runs the server child, so the debugger and the
+ * profiler see the server and not the supervisor that only restarts it.
+ *
+ * `--inspect[-wait|-brk][=<port|host:port>]` passes through as is. Bun prints
+ * the URL to open (debug.bun.sh) for the debugger, CPU profiles and heap
+ * snapshots. `--profile` writes a CPU profile (plus a markdown summary) and a
+ * heap snapshot into `profileDir` when the server exits.
+ */
+export function splitBunRuntimeFlags(argv: string[], profileDir: string, cwd: string) {
+  const bunArgs: string[] = []
+  const rest: string[] = []
+  for (const arg of argv) {
+    if (INSPECT_FLAG.test(arg)) {
+      bunArgs.push(arg)
+    } else if (arg === "--profile") {
+      bunArgs.push(
+        "--cpu-prof",
+        "--cpu-prof-md",
+        `--cpu-prof-dir=${profileDir}`,
+        "--heap-prof",
+        // Bun 1.3.10 joins --heap-prof-dir onto the cwd even when it is
+        // absolute, so hand it the path relative to the cwd.
+        `--heap-prof-dir=${path.relative(cwd, profileDir) || "."}`,
+      )
+    } else {
+      rest.push(arg)
+    }
+  }
+  return { bunArgs, argv: rest }
+}
+
+/**
+ * The child command with Bun flags in front of the script. The usual child is
+ * the `nex` shebang script, which can't take them, so it becomes
+ * `bun <flags> <script>`. An override that already runs bun (`bun run dev`)
+ * gets them right after `bun`.
+ */
+export function withBunRuntimeFlags(
+  child: { command: string; args: string[] },
+  bunArgs: string[],
+  runtime: { execPath: string; script: string | undefined; overridden: boolean },
+) {
+  if (bunArgs.length === 0) return child
+  if (runtime.overridden) {
+    if (path.basename(child.command) !== "bun") {
+      throw new Error(`--inspect and --profile need the server child to run under bun, not ${child.command}`)
+    }
+    return { command: child.command, args: [...bunArgs, ...child.args] }
+  }
+  if (!runtime.script) throw new Error("Can't find the nex script to run under bun")
+  return { command: runtime.execPath, args: [...bunArgs, runtime.script] }
+}
+
+export function parseChildArgsEnv(value: string | undefined) {
+  if (!value) return []
+
+  try {
+    const parsed = JSON.parse(value) as unknown
+    if (!Array.isArray(parsed) || !parsed.every((entry) => typeof entry === "string")) {
+      throw new Error("child args must be an array of strings")
+    }
+    return parsed
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    throw new Error(`Invalid ${CLI_CHILD_ARGS_ENV_VAR}: ${message}`)
+  }
+}

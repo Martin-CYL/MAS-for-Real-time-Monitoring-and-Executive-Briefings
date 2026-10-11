@@ -1,0 +1,310 @@
+.chart-card {
+  display: flex;
+  width: 100%;
+  max-width: none;
+  flex-direction: column;
+  gap: 12px;
+  overflow: hidden;
+  border: 1px solid hsl(var(--border));
+  border-radius: 12px;
+  background: hsl(var(--card));
+  color: hsl(var(--card-foreground));
+}
+
+.chart-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 16px 16px 0;
+}
+
+.chart-card-header h3 {
+  margin: 0;
+  color: hsl(var(--foreground));
+  font-family: inherit;
+  font-size: 18px;
+  font-weight: 500;
+  letter-spacing: -0.025em;
+  line-height: 1.16;
+}
+
+.chart-card-header p {
+  margin: 2px 0 0;
+  color: hsl(var(--muted-foreground));
+  font-size: 14px;
+}
+
+.chart-body {
+  display: flex;
+  height: auto;
+  min-height: 0;
+  flex-direction: column;
+  padding: 4px 16px 8px;
+  color: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+
+.chart-body .recharts-text {
+  fill: hsl(var(--muted-foreground));
+  font-size: 12px;
+}
+
+.chart-render-area {
+  width: 100%;
+  aspect-ratio: 1.5 / 1;
+  min-height: 0;
+  flex: 0 0 auto;
+}
+
+.chart-empty {
+  display: flex;
+  height: 100%;
+  align-items: center;
+  color: hsl(var(--muted-foreground));
+  font-size: 14px;
+}
+
+.chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0;
+  padding: 3px 16px 0;
+}
+
+.chart-legend button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: transparent;
+  color: hsl(var(--muted-foreground));
+  padding: 6px 8px;
+  border-radius: 6px;
+  font-size: 12px;
+  transition: opacity 150ms ease, background-color 150ms ease, color 150ms ease;
+}
+
+.chart-legend button:hover {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+  opacity: 1;
+}
+
+.chart-legend button.muted {
+  opacity: 0.4;
+}
+
+.chart-legend i {
+  width: 10px;
+  height: 10px;
+  /* A quarter of the base: a 10px swatch at the full radius is a dot, and the
+     marks it stands for are rectangles. */
+  border-radius: calc(12px / 4);
+}
+
+.chart-tooltip {
+  min-width: 164px;
+  border: 1px solid hsl(var(--border));
+  border-radius: 12px;
+  background: hsl(var(--popover));
+  padding: 8px 10px;
+  color: hsl(var(--popover-foreground));
+  box-shadow: 0 4px 16px hsl(0 0% 0% / 0.16);
+  font-size: 12px;
+}
+
+.chart-tooltip-label {
+  margin-bottom: 6px;
+  font-weight: 500;
+}
+
+.chart-tooltip-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.chart-tooltip-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+
+.chart-tooltip-name {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+}
+
+.chart-tooltip-name i {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: calc(12px / 4);
+}
+
+.chart-tooltip-value {
+  color: hsl(var(--foreground));
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-data-table {
+  min-height: 0;
+  max-height: 32vh;
+  flex: 0 0 auto;
+  overflow: visible;
+  border: 1px solid hsl(var(--border));
+  border-radius: 12px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chart-data-scroll {
+  max-height: inherit;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: visible;
+  border-radius: inherit;
+}
+
+.chart-data-inner {
+  display: flex;
+  min-width: max-content;
+  align-items: flex-start;
+}
+
+.chart-data-table table {
+  table-layout: fixed;
+  border-collapse: collapse;
+  border-spacing: 0;
+}
+
+.chart-data-table th,
+.chart-data-table td {
+  box-sizing: border-box;
+  height: 33px;
+  min-height: 33px;
+  border-bottom: 1px solid color-mix(in srgb, hsl(var(--border)) 70%, transparent);
+  padding: 8px 12px;
+  text-align: left;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.chart-data-table tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.chart-data-table th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: hsl(var(--muted));
+  color: hsl(var(--muted-foreground));
+  font-weight: 500;
+}
+
+.chart-data-series {
+  position: sticky;
+  left: 0;
+  z-index: 6;
+  border-right: 1px solid hsl(var(--border));
+  background: hsl(var(--muted));
+}
+
+.chart-data-series table {
+  width: 100%;
+}
+
+.chart-data-series td {
+  padding: 0;
+}
+
+.chart-data-series button {
+  display: flex;
+  width: 100%;
+  height: 32px;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: hsl(var(--foreground));
+  padding: 8px 12px;
+  text-align: left;
+  transition: opacity 150ms ease, background-color 150ms ease, color 150ms ease;
+}
+
+.chart-data-series .chart-series-aggregate-cell {
+  height: 33px;
+  padding: 8px 12px;
+  text-align: left;
+}
+
+.chart-data-series button:hover {
+  background: hsl(var(--accent));
+  color: hsl(var(--accent-foreground));
+  opacity: 1;
+}
+
+.chart-data-series button.muted {
+  opacity: 0.4;
+}
+
+.chart-data-series button span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.chart-data-series i {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 auto;
+  border-radius: calc(12px / 4);
+}
+
+.chart-column-resizer {
+  position: absolute;
+  top: 0;
+  right: -4px;
+  bottom: 0;
+  width: 8px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.chart-data-values td {
+  color: hsl(var(--foreground));
+}
+
+.chart-data-values th,
+.chart-data-values td {
+  border-left: 0;
+}
+
+.chart-data-values td > span {
+  display: block;
+  line-height: 16px;
+}
+
+.chart-aggregate-row,
+.chart-aggregate-column {
+  background: hsl(var(--muted));
+}
+
+.chart-aggregate-column {
+  border-left: 1px solid hsl(var(--border));
+  padding-right: 12px;
+  text-align: right !important;
+}
+
+.chart-legend button:focus-visible, .chart-data-series button:focus-visible { outline: 2px solid hsl(var(--ring)); outline-offset: -2px; }

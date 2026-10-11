@@ -1,0 +1,993 @@
+import { handleSharedTranscript } from "./share-http"
+import { homedir } from "node:os"
+import { PerformanceLog } from "./performance-log"
+import path from "node:path"
+import { stat } from "node:fs/promises"
+import { APP_NAME, APP_VERSION, getDataDir, LOG_PREFIX } from "../shared/branding"
+import type { ChatAttachment } from "../shared/types"
+import type { ShareMode } from "../shared/share"
+import { createAuthManager } from "./auth"
+import { EventStore } from "./event-store"
+import { AgentCoordinator } from "./agent"
+import { CodexAppServerManager } from "./codex-app-server"
+import { NoopAnalyticsReporter } from "./analytics"
+import { AppSettingsManager } from "./app-settings"
+import { refreshInstalledEditors } from "./editor-detection"
+import { refreshInstalledTerminals } from "./terminal-detection"
+import { UsageLimitsManager } from "./usage-limits"
+import { DiffStore } from "./diff-store"
+import { WorktreeProbe } from "./worktree-probe"
+import { TurnFileTracker } from "./worktree-snapshot"
+import { backfillTouchedFileBases } from "./touched-file-backfill"
+import { resumeInterruptedTurns } from "./resume-turns"
+import { ChatOrchestrator } from "./orchestrator"
+import { createChatCommands } from "./chat-commands"
+import { discoverProjects, type DiscoveredProject } from "./discovery"
+import { KeybindingsManager } from "./keybindings"
+import { PROJECT_ICON_URL_PREFIX, ProjectIcons, resolveProjectIconPath } from "./project-icons"
+import { clearGitHubRepoCache } from "./github"
+import { readLlmProviderSnapshot, validateLlmProviderCredentials, writeLlmProviderSnapshot } from "./llm-provider"
+import { handleTranscribe } from "./transcribe"
+import { handleChatWindow } from "./chat-window-route"
+import { handleVisualizationHeights } from "./visualization-heights"
+import { applyPiFaveModels } from "./provider-catalog"
+import { createProcessAuthDeps, ProviderAuthManager } from "./provider-auth"
+import { fetchLatestPackageVersion } from "./cli-runtime"
+import { getMachineDisplayName } from "./machine-name"
+import { PortTunnelManager } from "./port-tunnels"
+import { TerminalManager } from "./terminal-manager"
+import { createWsRouter, type ClientState } from "./ws-router"
+import { instanceFingerprint } from "./instance"
+import { deleteProjectUpload, inferAttachmentContentType, inferProjectFileContentType, persistProjectUpload } from "./uploads"
+import { getProjectUploadDir } from "./paths"
+import { inheritShellPath } from "./process-utils"
+
+const MAX_UPLOAD_FILES = 50
+const MAX_UPLOAD_SIZE_BYTES = 100 * 1024 * 1024
+const STALE_EMPTY_CHAT_PRUNE_INTERVAL_MS = 60 * 1000
+const STALE_CHAT_AUTO_ARCHIVE_INTERVAL_MS = 6 * 60 * 60 * 1000
+const STALE_CHAT_DELETE_INTERVAL_MS = 24 * 60 * 60 * 1000
+
+async function withOriginAgentCluster(response: Response | Promise<Response> | undefined) {
+  const resolved = await response
+  // Chrome groups localhost ports into one site. Origin-keying reduces the
+  // chance that a busy preview shares Nex's renderer.
+  resolved?.headers.set("Origin-Agent-Cluster", "?1")
+  return resolved
+}
+
+export async function persistUploadedFiles(args: {
+  projectId: string
+  localPath: string
+  files: File[]
+  persistUpload?: typeof persistProjectUpload
+}): Promise<ChatAttachment[]> {
+  const persistUpload = args.persistUpload ?? persistProjectUpload
+  const attachments: ChatAttachment[] = []
+
+  try {
+    for (const file of args.files) {
+      const bytes = new Uint8Array(await file.arrayBuffer())
+      const attachment = await persistUpload({
+        projectId: args.projectId,
+        localPath: args.localPath,
+        fileName: file.name,
+        bytes,
+        fallbackMimeType: file.type || undefined,
+      })
+      attachments.push(attachment)
+    }
+  } catch (error) {
+    await Promise.allSettled(
+      attachments.map((attachment) => deleteProjectUpload({
+        localPath: args.localPath,
+        storedName: path.basename(attachment.absolutePath),
+      }))
+    )
+    throw error
+  }
+
+  return attachments
+}
+
+export interface StartNexServerOptions {
+  port?: number
+  host?: string
+  openBrowser?: boolean
+  share?: ShareMode
+  dataDir?: string
+  password?: string | null
+  strictPort?: boolean
+  /**
+   * When true, the auth layer trusts X-Forwarded-Proto for CSRF origin
+   * checks, redirect URLs, and the Secure cookie flag. The hostname still
+   * comes from the request URL / Host header. Only enable when the server is
+   * reachable solely through a trusted reverse proxy such as cloudflared.
+   */
+  trustProxy?: boolean
+  onMigrationProgress?: (message: string) => void
+}
+
+export async function startNexServer(options: StartNexServerOptions = {}) {
+  const port = options.port ?? 3210
+  const hostname = options.host ?? "127.0.0.1"
+  const strictPort = options.strictPort ?? false
+  // Runs alongside the store setup below (~0.5 s for a zsh with nvm) and is
+  // awaited before anything can start an agent.
+  const shellPathReady = inheritShellPath()
+  const auth = options.password ? createAuthManager(options.password, { trustProxy: options.trustProxy ?? false }) : null
+  const diagnostics = new PerformanceLog(options.dataDir ?? getDataDir(homedir()), undefined, APP_VERSION)
+  const store = new EventStore(options.dataDir, diagnostics)
+  const diffStore = new DiffStore(store.dataDir)
+  const machineDisplayName = getMachineDisplayName()
+  await store.initialize()
+  await diffStore.initialize()
+  await store.migrateLegacyTranscripts(options.onMigrationProgress)
+  // Not awaited: this streams every transcript once per data dir, which on a
+  // machine with a few 100 MB chats takes longer than a boot should. The
+  // store queues each rewrite behind appends, so serving can start now.
+  void store.slimTranscripts({ onProgress: options.onMigrationProgress }).catch((error) => {
+    console.warn(`${LOG_PREFIX} transcript slim failed:`, error)
+  })
+  let discoveredProjects: DiscoveredProject[] = []
+
+  async function refreshDiscovery() {
+    discoveredProjects = await discoverProjects()
+    return discoveredProjects
+  }
+
+  await refreshDiscovery()
+
+  let server: ReturnType<typeof Bun.serve<ClientState>>
+  let router: ReturnType<typeof createWsRouter>
+  // Feeds the sidebar's muted "relevant to uncommitted work" dot. Derived and
+  // in-memory; see worktree-probe.ts for why there's no `git status` sweep.
+  const worktreeProbe = new WorktreeProbe(
+    () => store.state,
+    () => {
+      void router.broadcastSidebar()
+    }
+  )
+  const projectIcons = new ProjectIcons(
+    store.dataDir,
+    () => [...store.state.projectsById.values()].filter((project) => !project.deletedAt).map((project) => project.localPath),
+    () => {
+      void router.broadcastSidebar()
+    }
+  )
+  // Free updates: `performRefresh` already stats every dirty file, so the
+  // client's active project stays current at no extra git cost — and the dot
+  // clears the instant a commit goes through Nex's git panel.
+  diffStore.onWorkingTreeProbe = (projectId, probe) => {
+    worktreeProbe.recordExternalProbe(projectId, probe)
+  }
+  // Snapshot the worktree either side of a turn and record what changed, so
+  // the sidebar can ask "did this chat touch a file that's still uncommitted?"
+  // instead of comparing timestamps. See worktree-snapshot.ts.
+  const turnFiles = new TurnFileTracker({
+    resolveChatPath: (chatId) => {
+      const chat = store.state.chatsById.get(chatId)
+      const project = chat ? store.state.projectsById.get(chat.projectId) : undefined
+      return project?.localPath ?? null
+    },
+    recordFiles: (chatId, files) => store.recordFilesTouched(chatId, files),
+  })
+  store.onTurnStarted = (chatId) => {
+    turnFiles.beginTurn(chatId)
+    orchestrator.handleTurnStarted(chatId)
+  }
+  // A finished turn is the likeliest moment for the dirty set to have changed,
+  // so probe that one project then — after recording the turn's own files, so
+  // the broadcast that follows already reflects them.
+  store.onTurnEnded = (chatId) => {
+    void turnFiles.endTurn(chatId).finally(() => worktreeProbe.refreshForChat(chatId))
+  }
+  const terminals = new TerminalManager()
+  const portTunnels = new PortTunnelManager({
+    log: (message) => console.log(`${LOG_PREFIX} ${message}`),
+  })
+  const keybindings = new KeybindingsManager()
+  const appSettings = new AppSettingsManager(path.join(store.dataDir, "settings.json"))
+  await appSettings.initialize()
+  // Which editors and terminals this machine has, for the "Open in…" menus.
+  // Deliberately not awaited: it shells out per app, and the menus render
+  // fine (nothing greyed out) until the result lands.
+  void refreshInstalledEditors(appSettings)
+  void refreshInstalledTerminals(appSettings)
+  await keybindings.initialize()
+  const analytics = NoopAnalyticsReporter
+  const codexManager = new CodexAppServerManager()
+  const agent = new AgentCoordinator({
+    store,
+    analytics,
+    codexManager,
+    onStateChange: (chatId?: string, options?: { immediate?: boolean }) => {
+      if (chatId) {
+        if (options?.immediate) {
+          void router.broadcastChatStateImmediately(chatId)
+          return
+        }
+        router.scheduleChatStateBroadcast(chatId)
+        return
+      }
+      router.scheduleBroadcast()
+    },
+  })
+  // The agents' side of chat management: sub-chats, their reports, schedules.
+  // Its pushes go through `router`, which exists by the time anything can fire.
+  // One set of chat actions for both callers: the router runs them for the
+  // user, the orchestrator for an agent.
+  const chatCommands = createChatCommands({ store, agent, analytics })
+  const orchestrator = new ChatOrchestrator({
+    store,
+    agent,
+    commands: chatCommands,
+    push: (change) => {
+      void router.broadcastChatChange(change)
+    },
+    onError: (message) => console.warn(`${LOG_PREFIX} ${message}`),
+  })
+  agent.orchestration = orchestrator
+  agent.onChatSettled = (chatId) => orchestrator.handleChatSettled(chatId)
+  agent.onChatStopped = (chatId) => orchestrator.handleChatStopped(chatId)
+  const usageLimits = new UsageLimitsManager(path.join(store.dataDir, "usage-limits.json"), {
+    fetchClaudeUsage: () => agent.fetchClaudeUsage(),
+    fetchCodexRateLimits: () => agent.fetchCodexRateLimits(),
+    fetchGrokUsage: () => agent.fetchGrokUsage(),
+  })
+  await usageLimits.initialize()
+  agent.setClaudeRateLimitListener((info) => usageLimits.recordClaudeRateLimitPush(info))
+  codexManager.setRateLimitsListener((snapshot) => usageLimits.recordCodexRateLimitPush(snapshot))
+
+  const providerAuth = new ProviderAuthManager({
+    ...createProcessAuthDeps(),
+    readLlmProvider: readLlmProviderSnapshot,
+    writeLlmProvider: writeLlmProviderSnapshot,
+    fetchLatestNpmVersion: fetchLatestPackageVersion,
+    trackEvent: analytics.track.bind(analytics),
+    onSignedIn: (service) => {
+      // A fresh sign-in unlocks usage limits (claude/codex empty-state cards
+      // flip from auth → usage) and the live Cursor/Codex model catalogs.
+      void usageLimits.refresh({ force: true }).catch(() => undefined)
+      if (service === "cursor") {
+        void agent.refreshCursorModelCatalog()
+      }
+      if (service === "grok") {
+        void agent.refreshGrokModelCatalog()
+      }
+      if (service === "codex") {
+        void agent.refreshCodexModelCatalog()
+      }
+      if (service === "gh") {
+        // Never let a cached "unauthenticated" repo list outlive the sign-in
+        // (clone palette / home repos section fetch through this cache).
+        clearGitHubRepoCache()
+      }
+    },
+  })
+
+  router = createWsRouter({
+    diagnostics,
+    store,
+    diffStore,
+    worktreeProbe,
+    projectIcons,
+    agent,
+    chatCommands,
+    terminals,
+    portTunnels,
+    keybindings,
+    appSettings,
+    analytics,
+    usageLimits,
+    llmProvider: {
+      read: readLlmProviderSnapshot,
+      write: writeLlmProviderSnapshot,
+      validate: validateLlmProviderCredentials,
+    },
+    refreshDiscovery,
+    refreshInstalledApps: () => {
+      void refreshInstalledEditors(appSettings)
+      void refreshInstalledTerminals(appSettings)
+    },
+    getDiscoveredProjects: () => discoveredProjects,
+    machineDisplayName,
+    updateManager: null,
+    providerAuth,
+  })
+  // Overlay the account's live Cursor and Codex model lists on the static
+  // catalog (no-op when the CLI is missing or logged out); broadcasts on change.
+  void agent.refreshCursorModelCatalog()
+  void agent.refreshCodexModelCatalog()
+  void agent.refreshGrokModelCatalog()
+  // Seed the pi provider's model picker from saved fave models before the
+  // first snapshots go out.
+  void readLlmProviderSnapshot()
+    .then((snapshot) => {
+      if (applyPiFaveModels(snapshot.faveModels)) {
+        return router.broadcastSnapshots()
+      }
+    })
+    .catch(() => undefined)
+
+  // Chat garbage collection, three tiers measured against the user's latest
+  // chat activity: empty drafts are hard-deleted after 5 idle minutes, chats
+  // 30+ days behind are auto-archived, and 90+ days behind are hard-deleted.
+  const runPruneStaleEmptyChats = () => {
+    void router.pruneStaleEmptyChats()
+      .then((prunedChatIds) => {
+        if (prunedChatIds.length > 0) {
+          return router.broadcastSnapshots()
+        }
+      })
+  }
+  const runAutoArchiveStaleChats = () => {
+    void router.autoArchiveStaleChats()
+      .then((archivedChatIds) => {
+        if (archivedChatIds.length > 0) {
+          return router.broadcastSnapshots()
+        }
+      })
+  }
+  const runDeleteStaleChats = () => {
+    void router.deleteStaleChats()
+      .then((deletedChatIds) => {
+        if (deletedChatIds.length > 0) {
+          return router.broadcastSnapshots()
+        }
+      })
+  }
+
+  // All three run once at startup — a long-idle instance gets cleaned
+  // immediately, not minutes or hours later. Lifecycle order: prune empties,
+  // hard-delete 90d+ (so they aren't pointlessly archived first), then
+  // archive 30d+. One broadcast at the end covers all changes.
+  const runStartupGc = async () => {
+    const pruned = await router.pruneStaleEmptyChats().catch(() => [])
+    const deleted = await router.deleteStaleChats().catch(() => [])
+    const archived = await router.autoArchiveStaleChats().catch(() => [])
+    if (pruned.length + deleted.length + archived.length > 0) {
+      await router.broadcastSnapshots()
+    }
+  }
+  await shellPathReady
+  // After the shell path: an overdue schedule or a report held over from the
+  // last run starts an agent straight away.
+  orchestrator.start()
+  // Chats that were mid-turn when Nex last exited pick up where they left
+  // off. Not awaited — each resume starts a harness process, and boot should
+  // not wait on them; chained onto the GC sweep so a chat about to be archived
+  // or deleted for staleness isn't resumed on its way out.
+  void runStartupGc()
+    .then(() => resumeInterruptedTurns({
+      store,
+      agent,
+      onError: (chatId, error) => {
+        console.warn(`${LOG_PREFIX} could not resume chat ${chatId} after restart:`, error)
+      },
+    }))
+    .then(async (resumedChatIds) => {
+      if (resumedChatIds.length > 0) {
+        console.log(`${LOG_PREFIX} resumed ${resumedChatIds.length} chat(s) interrupted by the last shutdown`)
+        await router.broadcastSnapshots()
+      }
+    })
+    .catch((error) => {
+      console.warn(`${LOG_PREFIX} resuming interrupted chats failed:`, error)
+    })
+
+  // Then keep sweeping for the lifetime of the (potentially months-long)
+  // process: empties every minute, deletes daily, archives every 6 hours.
+  const staleEmptyChatPruneInterval = setInterval(runPruneStaleEmptyChats, STALE_EMPTY_CHAT_PRUNE_INTERVAL_MS)
+  const staleChatAutoArchiveInterval = setInterval(runAutoArchiveStaleChats, STALE_CHAT_AUTO_ARCHIVE_INTERVAL_MS)
+  const staleChatDeleteInterval = setInterval(runDeleteStaleChats, STALE_CHAT_DELETE_INTERVAL_MS)
+  worktreeProbe.start()
+  projectIcons.start()
+  // Claims recorded before base blobs never expire on their own, so a chat
+  // whose work shipped months ago keeps returning to Relevant on someone
+  // else's edit. Dating them is two git calls per affected chat and only
+  // happens once, so it runs in the background rather than delaying boot.
+  void backfillTouchedFileBases(store, { onProgress: (message) => console.log(message) })
+    .then((result) => {
+      if (result.chats > 0) void router.broadcastSidebar()
+    })
+    .catch((error) => {
+      console.warn(`${LOG_PREFIX} touched-file backfill failed:`, error)
+    })
+
+  const distDir = path.join(import.meta.dir, "..", "..", "dist", "client")
+
+  const MAX_PORT_ATTEMPTS = 20
+  let actualPort = port
+
+  for (let attempt = 0; attempt < MAX_PORT_ATTEMPTS; attempt++) {
+    try {
+      server = Bun.serve<ClientState>({
+        port: actualPort,
+        hostname,
+        // Bun's default is 10s, which reaps tunneled requests riding out a
+        // Cloudflare edge blip (and coincides exactly with the tunnel
+        // supervisor's self-ping timeout). 60s stays under Cloudflare's
+        // ~100s origin read timeout so the edge gives up first.
+        idleTimeout: 60,
+        // Backstop: a request Bun idle-timed-out can leave its async fetch
+        // handler rejecting later on a dead socket. Without this handler
+        // that rejection escapes and can take the process down.
+        error(err) {
+          console.error(`${LOG_PREFIX} http handler error:`, err)
+          return new Response("Internal server error", { status: 500 })
+        },
+        async fetch(req, serverInstance) {
+          const url = new URL(req.url)
+          const sharedResponse = await handleSharedTranscript(req, store.dataDir)
+          if (sharedResponse) return withOriginAgentCluster(sharedResponse)
+          if (url.pathname.startsWith("/api/cloud/") || url.pathname.startsWith("/__cloud")) return new Response("Not found", { status: 404 })
+
+          const upgradeWebSocket = () => {
+            const upgraded = serverInstance.upgrade(req, {
+              data: {
+                subscriptions: new Map(),
+                snapshotSignatures: new Map(),
+              },
+            })
+            return upgraded ? undefined : new Response("WebSocket upgrade failed", { status: 400 })
+          }
+
+          if (url.pathname === "/auth/status") {
+            return withOriginAgentCluster(auth
+              ? auth.handleStatus(req)
+              : Response.json({ enabled: false, authenticated: true }))
+          }
+
+          if (url.pathname === "/auth/logout") {
+            if (req.method !== "POST") {
+              return withOriginAgentCluster(new Response(null, { status: 405, headers: { Allow: "POST" } }))
+            }
+
+            return withOriginAgentCluster(auth
+              ? auth.handleLogout(req)
+              : Response.json({ ok: true }))
+          }
+
+          // Proxied requests skip password auth: the the retired hosted service proxy already
+          // gated them by account session before forwarding.
+          if (auth) {
+            if (url.pathname === "/auth/login") {
+              if (req.method === "GET") {
+                return withOriginAgentCluster(auth.redirectToApp(req))
+              }
+              if (req.method === "POST") {
+                return withOriginAgentCluster(auth.handleLogin(req, "/"))
+              }
+              return withOriginAgentCluster(new Response(null, { status: 405, headers: { Allow: "GET, POST" } }))
+            }
+
+            if (url.pathname === "/ws") {
+              // A valid cloud connect token is an alternative WS credential
+              // (minted through the proxied /api/cloud/ws-endpoint call).
+              {
+                if (!auth.validateOrigin(req)) {
+                  return withOriginAgentCluster(new Response("Forbidden", { status: 403 }))
+                }
+                if (!auth.isAuthenticated(req)) {
+                  return withOriginAgentCluster(new Response("Unauthorized", { status: 401 }))
+                }
+              }
+            } else if (url.pathname.startsWith("/api/") && !auth.isAuthenticated(req)) {
+              return withOriginAgentCluster(Response.json({ error: "Unauthorized" }, { status: 401 }))
+            }
+          }
+
+          if (url.pathname === "/ws") {
+            return withOriginAgentCluster(upgradeWebSocket())
+          }
+
+          if (url.pathname === "/api/diagnostics/client") {
+            if (req.method !== "POST") return new Response(null, { status: 405 })
+            if (!req.headers.get("content-type")?.startsWith("application/json")) return new Response(null, { status: 415 })
+            const reader = req.body?.getReader()
+            if (!reader) return new Response(null, { status: 400 })
+            let bytes = 0
+            const chunks: Uint8Array[] = []
+            try {
+              while (true) {
+                const { done, value } = await reader.read()
+                if (done) break
+                bytes += value.length
+                if (bytes > 8192) {
+                  await reader.cancel()
+                  return new Response(null, { status: 413 })
+                }
+                chunks.push(value)
+              }
+              const summary = JSON.parse(Buffer.concat(chunks).toString("utf8"))
+              diagnostics.mergeClientSummary(summary?.metrics, typeof summary?.clientId === "string" ? summary.clientId : undefined)
+              return new Response(null, { status: 204 })
+            } catch {
+              return new Response(null, { status: 400 })
+            } finally { reader.releaseLock() }
+          }
+
+          if (url.pathname === "/health") {
+            // `instance` lets a second `nex` invocation detect that this
+            // data dir is already being served (single-instance guard). Only
+            // exposed on local/proxied requests — the raw-tunnel /health
+            // above stays minimal.
+            return withOriginAgentCluster(Response.json({ ok: true, port: actualPort, instance: instanceFingerprint(store.dataDir) }))
+          }
+
+          const uploadResponse = await handleProjectUpload(req, url, store)
+          if (uploadResponse) {
+            return withOriginAgentCluster(uploadResponse)
+          }
+
+          const transcribeResponse = await handleTranscribe(req, url, readLlmProviderSnapshot)
+          if (transcribeResponse) {
+            return withOriginAgentCluster(transcribeResponse)
+          }
+
+          const deleteUploadResponse = await handleProjectUploadDelete(req, url, store)
+          if (deleteUploadResponse) {
+            return withOriginAgentCluster(deleteUploadResponse)
+          }
+
+          const attachmentContentResponse = await handleAttachmentContent(req, url, store)
+          if (attachmentContentResponse) {
+            return withOriginAgentCluster(attachmentContentResponse)
+          }
+
+          const visualizationHeightsResponse = await handleVisualizationHeights(req, url, store)
+          if (visualizationHeightsResponse) {
+            return withOriginAgentCluster(visualizationHeightsResponse)
+          }
+
+          const transcriptMediaResponse = await handleTranscriptMediaContent(req, url, store)
+          if (transcriptMediaResponse) {
+            return withOriginAgentCluster(transcriptMediaResponse)
+          }
+
+          const projectIconResponse = await handleProjectIcon(req, url, store.dataDir)
+          if (projectIconResponse) {
+            return withOriginAgentCluster(projectIconResponse)
+          }
+
+          const projectFileContentResponse = await handleProjectFileContent(req, url, store)
+          if (projectFileContentResponse) {
+            return withOriginAgentCluster(projectFileContentResponse)
+          }
+
+          const chatWindowResponse = await handleChatWindow(req, url, { store, agent, appSettings })
+          if (chatWindowResponse) {
+            return withOriginAgentCluster(chatWindowResponse)
+          }
+
+          return withOriginAgentCluster(serveStatic(distDir, url.pathname))
+        },
+        websocket: {
+          // Negotiated per connection: browsers opt in and get 8-12x smaller
+          // snapshots over the tunnel; the iOS app's URLSession never offers
+          // it and keeps raw frames. The router compresses only frames worth
+          // it (see `send` in ws-router.ts), so localhost pays close to nothing.
+          //
+          // Server-to-client only. With decompression on, in any mode, Safari
+          // never settled the socket while Chrome was fine: Bun cannot inflate
+          // the frames WebKit sends (the handshake was not the problem; the
+          // "dedicated" reply is a bare `permessage-deflate` and Safari still
+          // failed). Client frames are commands and pings, a few hundred
+          // bytes, so nothing is lost by taking them raw. "dedicated" rather
+          // than the shared compressor: one deflate context per socket, a few
+          // hundred KB each, and a reply Safari accepts.
+          perMessageDeflate: { compress: "dedicated", decompress: "disable" },
+          open(ws) {
+            router.handleOpen(ws)
+          },
+          message(ws, raw) {
+            void router.handleMessage(ws, raw).catch(error => {
+              diagnostics.record("socket_handler_errors")
+              console.error("[ws-router] Handler failed:", error instanceof Error ? error.message : String(error))
+            })
+          },
+          close(ws) {
+            router.handleClose(ws)
+          },
+        },
+      })
+      break
+    } catch (err: unknown) {
+      const isAddrInUse =
+        err instanceof Error && "code" in err && (err as NodeJS.ErrnoException).code === "EADDRINUSE"
+      if (!isAddrInUse || strictPort || attempt === MAX_PORT_ATTEMPTS - 1) {
+        throw err
+      }
+      console.log(`Port ${actualPort} is in use, trying ${actualPort + 1}...`)
+      actualPort++
+    }
+  }
+
+  diagnostics.start(() => ({
+    ...store.getResourceCounts(),
+    ...router.getResourceCounts(),
+    ...agent.getResourceCounts(),
+    ...terminals.getResourceCounts(),
+    ...diffStore.getResourceCounts(),
+  }))
+
+  const shutdown = async () => {
+    clearInterval(staleEmptyChatPruneInterval)
+    clearInterval(staleChatAutoArchiveInterval)
+    clearInterval(staleChatDeleteInterval)
+    worktreeProbe.stop()
+    projectIcons.stop()
+    // Cancels every in-flight turn *and* marks its chat, so the next boot
+    // restarts the work instead of leaving it interrupted (see resume-turns.ts).
+    orchestrator.dispose()
+    try { await agent.interruptForShutdown() } finally { agent.dispose() }
+    router.dispose()
+    providerAuth.dispose()
+    usageLimits.dispose()
+    appSettings.dispose()
+    keybindings.dispose()
+    terminals.closeAll()
+    portTunnels.stopAll()
+    await store.compact()
+    await diagnostics.stop()
+    server.stop(true)
+  }
+
+  return {
+    port: actualPort,
+    store,
+    diffStore,
+    updateManager: null,
+    analytics,
+    stop: shutdown,
+    /** For the single-instance lock's status (instance-socket.ts), which the
+     *  Mac app's quit dialog shows. */
+    state: () => ({ runningChats: agent.activeTurns.size, cloud: false }),
+  }
+}
+
+function describeUploadError(error: unknown) {
+  if (!(error instanceof Error)) {
+    return String(error)
+  }
+  const cause = error.cause === undefined ? "" : `\ncause: ${String(error.cause)}`
+  return `${error.name}: ${error.message}${cause}\n${error.stack ?? "(no stack)"}`
+}
+
+async function handleProjectUpload(req: Request, url: URL, store: EventStore) {
+  if (req.method !== "POST") {
+    return null
+  }
+
+  const match = url.pathname.match(/^\/api\/projects\/([^/]+)\/uploads$/)
+  if (!match) {
+    return null
+  }
+
+  const project = store.getProject(match[1])
+  if (!project) {
+    return Response.json({ error: "Project not found" }, { status: 404 })
+  }
+
+  // Parsing is its own failure mode, so it gets its own report. A drag-sourced
+  // File on iOS is backed by a temporary drag-session file. If the system
+  // releases it before the client reads it, Safari sends a multipart header
+  // with an empty body (Content-Length: 0) and parsing throws here. The
+  // client copies dropped files into memory during the drop event to avoid
+  // this; see src/client/lib/snapshotDroppedFiles.ts.
+  let formData: FormData
+  try {
+    formData = await req.formData()
+  } catch (error) {
+    return Response.json({
+      error: "The server could not read the upload request body.",
+      stage: "parse-form-data",
+      detail: describeUploadError(error),
+      contentType: req.headers.get("content-type"),
+      contentLength: req.headers.get("content-length"),
+    }, { status: 400 })
+  }
+
+  const files = formData
+    .getAll("files")
+    .filter((value): value is File => value instanceof File)
+
+  if (files.length === 0) {
+    return Response.json({
+      error: "No files uploaded",
+      stage: "read-files",
+      detail: `The request parsed, but it carried no file parts.\nform fields: ${[...new Set(formData.keys())].join(", ") || "(none)"}`,
+      contentLength: req.headers.get("content-length"),
+    }, { status: 400 })
+  }
+
+  // The client reports each file's size before sending it. A shortfall here
+  // means the body was truncated in transit, which the parser cannot see.
+  const clientSizes = formData.getAll("clientFileSizes")
+  if (clientSizes.length === files.length) {
+    const truncated = files
+      .map((file, index) => ({ file, expected: Number(clientSizes[index]) }))
+      .filter((entry) => Number.isFinite(entry.expected) && entry.expected !== entry.file.size)
+    if (truncated.length > 0) {
+      return Response.json({
+        error: "The uploaded file arrived incomplete.",
+        stage: "size-mismatch",
+        detail: truncated
+          .map((entry) => `${entry.file.name}: client sent ${entry.expected} bytes, server received ${entry.file.size} bytes`)
+          .join("\n"),
+        contentLength: req.headers.get("content-length"),
+      }, { status: 400 })
+    }
+  }
+
+  if (files.length > MAX_UPLOAD_FILES) {
+    return Response.json({ error: `You can upload up to ${MAX_UPLOAD_FILES} files at a time.` }, { status: 400 })
+  }
+
+  for (const file of files) {
+    if (file.size > MAX_UPLOAD_SIZE_BYTES) {
+      return Response.json(
+        { error: `File "${file.name}" exceeds the ${Math.floor(MAX_UPLOAD_SIZE_BYTES / (1024 * 1024))} MB limit.` },
+        { status: 413 }
+      )
+    }
+  }
+
+  try {
+    const attachments = await persistUploadedFiles({
+      projectId: project.id,
+      localPath: project.localPath,
+      files,
+    })
+    return Response.json({ attachments })
+  } catch (error) {
+    console.error("[uploads] Upload failed:", error)
+    return Response.json({
+      error: "The server could not save the uploaded files.",
+      stage: "persist",
+      detail: describeUploadError(error),
+      files: files.map((file) => ({ name: file.name, size: file.size, type: file.type })),
+    }, { status: 500 })
+  }
+}
+
+async function handleAttachmentContent(req: Request, url: URL, store: EventStore) {
+  const match = url.pathname.match(/^\/api\/projects\/([^/]+)\/uploads\/([^/]+)\/content$/)
+  if (!match) {
+    return null
+  }
+
+  if (req.method !== "GET") {
+    return new Response(null, {
+      status: 405,
+      headers: {
+        Allow: "GET",
+      },
+    })
+  }
+
+  const project = store.getProject(match[1])
+  if (!project) {
+    return Response.json({ error: "Project not found" }, { status: 404 })
+  }
+
+  const storedName = decodeURIComponent(match[2])
+  if (!storedName || storedName.includes("/") || storedName.includes("\\") || storedName === "." || storedName === "..") {
+    return Response.json({ error: "Invalid attachment path" }, { status: 400 })
+  }
+
+  const filePath = path.join(getProjectUploadDir(project.localPath), storedName)
+  const file = Bun.file(filePath)
+  try {
+    const info = await stat(filePath)
+    if (!info.isFile()) {
+      return Response.json({ error: "Attachment not found" }, { status: 404 })
+    }
+  } catch {
+    return Response.json({ error: "Attachment not found" }, { status: 404 })
+  }
+
+  return new Response(file, {
+    headers: {
+      "Content-Type": inferAttachmentContentType(storedName, file.type),
+    },
+  })
+}
+
+/**
+ * Images the store moved out of tool results (`transcript-media.ts`). The
+ * name embeds the entry id and never changes, so the browser may cache it
+ * for as long as it likes.
+ */
+async function handleTranscriptMediaContent(req: Request, url: URL, store: EventStore) {
+  const match = url.pathname.match(/^\/api\/chats\/([^/]+)\/media\/([^/]+)$/)
+  if (!match) {
+    return null
+  }
+
+  if (req.method !== "GET") {
+    return new Response(null, { status: 405, headers: { Allow: "GET" } })
+  }
+
+  const filePath = store.resolveTranscriptMediaPath(url.pathname)
+  if (!filePath) {
+    return Response.json({ error: "Media not found" }, { status: 404 })
+  }
+
+  const file = Bun.file(filePath)
+  try {
+    const info = await stat(filePath)
+    if (!info.isFile()) {
+      return Response.json({ error: "Media not found" }, { status: 404 })
+    }
+  } catch {
+    return Response.json({ error: "Media not found" }, { status: 404 })
+  }
+
+  return new Response(file, {
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Content-Type-Options": "nosniff",
+      ...(!/^(image\/(png|jpeg|gif|webp|avif)|video\/(mp4|webm|quicktime|ogg))$/.test(file.type)
+        ? { "Content-Disposition": "attachment", "Content-Security-Policy": "sandbox; default-src 'none'" } : {}),
+      "Cache-Control": "private, max-age=31536000, immutable",
+    },
+  })
+}
+
+/**
+ * A project's stored icon (`project-icons.ts`). The name carries a hash of
+ * the source file's path, size and time, so a changed icon is a new URL and
+ * this one never changes.
+ */
+async function handleProjectIcon(req: Request, url: URL, dataDir: string) {
+  if (!url.pathname.startsWith(PROJECT_ICON_URL_PREFIX)) {
+    return null
+  }
+
+  if (req.method !== "GET") {
+    return new Response(null, { status: 405, headers: { Allow: "GET" } })
+  }
+
+  const filePath = resolveProjectIconPath(dataDir, url.pathname)
+  const file = filePath ? Bun.file(filePath) : null
+  if (!file || !(await file.exists())) {
+    return Response.json({ error: "Icon not found" }, { status: 404 })
+  }
+
+  return new Response(file, {
+    headers: {
+      "Content-Type": file.type || "application/octet-stream",
+      "X-Content-Type-Options": "nosniff",
+      // An SVG is a copy of a file from the project. Drawn by an <img> it
+      // can't run script; opened in a tab of its own it could, so it is
+      // sandboxed there.
+      "Content-Security-Policy": "sandbox; default-src 'none'; style-src 'unsafe-inline'",
+      "Cache-Control": "private, max-age=31536000, immutable",
+    },
+  })
+}
+
+async function handleProjectFileContent(req: Request, url: URL, store: EventStore) {
+  const match = url.pathname.match(/^\/api\/projects\/([^/]+)\/files\/([^/]+)\/content$/)
+  if (!match) {
+    return null
+  }
+
+  if (req.method !== "GET") {
+    return new Response(null, {
+      status: 405,
+      headers: {
+        Allow: "GET",
+      },
+    })
+  }
+
+  const project = store.getProject(match[1])
+  if (!project) {
+    return Response.json({ error: "Project not found" }, { status: 404 })
+  }
+
+  const relativePath = path.posix.normalize(decodeURIComponent(match[2]).replaceAll("\\", "/"))
+  if (!relativePath || relativePath === "." || relativePath.startsWith("../") || relativePath.includes("/../") || path.posix.isAbsolute(relativePath)) {
+    return Response.json({ error: "Invalid project file path" }, { status: 400 })
+  }
+
+  const filePath = path.resolve(project.localPath, relativePath)
+  const projectRoot = path.resolve(project.localPath)
+  if (filePath !== projectRoot && !filePath.startsWith(`${projectRoot}${path.sep}`)) {
+    return Response.json({ error: "Invalid project file path" }, { status: 400 })
+  }
+
+  const file = Bun.file(filePath)
+  try {
+    const info = await stat(filePath)
+    if (!info.isFile()) {
+      return Response.json({ error: "File not found" }, { status: 404 })
+    }
+  } catch {
+    return Response.json({ error: "File not found" }, { status: 404 })
+  }
+
+  return new Response(file, {
+    headers: {
+      "Content-Type": inferProjectFileContentType(relativePath, file.type),
+    },
+  })
+}
+
+async function handleProjectUploadDelete(req: Request, url: URL, store: EventStore) {
+  if (req.method !== "DELETE") {
+    return null
+  }
+
+  const match = url.pathname.match(/^\/api\/projects\/([^/]+)\/uploads\/([^/]+)$/)
+  if (!match) {
+    return null
+  }
+
+  const project = store.getProject(match[1])
+  if (!project) {
+    return Response.json({ error: "Project not found" }, { status: 404 })
+  }
+
+  const storedName = decodeURIComponent(match[2])
+  if (!storedName || storedName.includes("/") || storedName.includes("\\") || storedName === "." || storedName === "..") {
+    return Response.json({ error: "Invalid attachment path" }, { status: 400 })
+  }
+
+  const deleted = await deleteProjectUpload({
+    localPath: project.localPath,
+    storedName,
+  })
+
+  return Response.json({ ok: deleted })
+}
+
+async function serveStatic(distDir: string, pathname: string) {
+  const requestedPath = pathname === "/" ? "/index.html" : pathname
+  const filePath = path.join(distDir, requestedPath)
+  const indexPath = path.join(distDir, "index.html")
+
+  const file = Bun.file(filePath)
+  if (await file.exists()) {
+    return new Response(file, {
+      headers: getStaticHeaders(requestedPath),
+    })
+  }
+
+  const indexFile = Bun.file(indexPath)
+  if (await indexFile.exists()) {
+    return new Response(indexFile, {
+      headers: {
+        "Content-Type": "text/html; charset=utf-8",
+        "Cache-Control": "no-store",
+      },
+    })
+  }
+
+  return new Response(
+    `${APP_NAME} client bundle not found. Run \`bun run build\` inside workbench/ first.`,
+    { status: 503 }
+  )
+}
+
+function getStaticHeaders(requestedPath: string) {
+  if (requestedPath.endsWith(".html")) {
+    return {
+      "Cache-Control": "no-store",
+    }
+  }
+
+  // Vite emits content-hashed filenames under /assets/ — safe to cache
+  // forever. Matters most in cloud mode, where every uncached asset request
+  // pays proxy + D1 + tunnel latency on top of the local read.
+  if (requestedPath.startsWith("/assets/")) {
+    return {
+      "Cache-Control": "public, max-age=31536000, immutable",
+    }
+  }
+
+  return undefined
+}

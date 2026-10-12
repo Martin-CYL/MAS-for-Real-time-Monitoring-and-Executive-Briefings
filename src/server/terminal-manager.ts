@@ -443,7 +443,11 @@ export class TerminalManager {
         session.terminal.write(filteredData.slice(cursor, ctrlCIndex))
       }
 
-      signalTerminalProcessGroup(session.process, "SIGINT")
+      // Linux shells put foreground jobs in a different process group.
+      // Let the PTY line discipline deliver SIGINT to its foreground group;
+      // signaling the shell's group alone leaves the actual job running.
+      if (process.platform === "linux") session.terminal.write("\x03")
+      else signalTerminalProcessGroup(session.process, "SIGINT")
       cursor = ctrlCIndex + 1
     }
   }

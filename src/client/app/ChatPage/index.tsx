@@ -40,7 +40,10 @@ import { snapshotDroppedFiles } from "../../lib/snapshotDroppedFiles"
 import { useRightSidebarStore, useWidgetsOpen } from "../../stores/rightSidebarStore"
 import { ViewerLayer, usePresentedViewer, useViewerShown } from "../../components/viewer/ViewerLayer"
 import { resolveViewerSplitMove, viewerPaneState, type ViewerPaneState } from "../../lib/viewer-split"
-import { opensInViewer, projectRelativePath } from "../../components/viewer/localLinks"
+import { fileDeliveryKind, projectFileUrl } from "../../../shared/file-delivery"
+import { downloadFile } from "../../lib/fileDelivery"
+import { ProjectFileLinkContext } from "../../components/messages/shared"
+import { projectRelativePath } from "../../components/viewer/localLinks"
 import type { OpenLocalLinkTarget } from "../../components/messages/shared"
 import { shouldOpenLocalFileLinkInEditor } from "../../lib/pathUtils"
 import { getChatViewer, openViewer, useChatViewer, useViewerStore, viewerWidthClass } from "../../stores/viewerStore"
@@ -567,20 +570,26 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
     setViewerChat(state.activeChatId)
   }, [setViewerChat, state.activeChatId])
   const projectLocalPath = state.runtime?.localPath ?? state.navbarLocalPath ?? null
-  // A file link that would open in the editor (or a CSV that would open in
-  // Numbers) opens in the viewer instead, when it's a file in this project
-  // (the only files the viewer can read); the editor is a button away there.
-  // Anything else, and an explicit choice from a link's context menu, goes
-  // where it always did.
+  // Web clients receive files over authenticated HTTP; never open a desktop
+  // application on the server for an ordinary transcript link.
   const handleOpenLocalLink = useCallback<NexState["handleOpenLocalLink"]>((target, action = "open_editor", editor) => {
-    if (projectId && opensInViewer(target.path, action) && !editor && target.trigger !== "contextmenu") {
-      const path = projectRelativePath(projectLocalPath, target.path)
-      if (path) {
-        openViewer({ kind: "file", projectId, path, ...(target.line ? { line: target.line } : {}) })
-        return Promise.resolve()
-      }
+    if (editor && SHOW_DEVELOPER_UI) return state.handleOpenLocalLink(target, action, editor)
+    const path = projectRelativePath(projectLocalPath, target.path)
+    if (!projectId || !path) {
+      window.alert(t("This file is outside the current workspace."))
+      return Promise.resolve()
     }
-    return state.handleOpenLocalLink(target, action, editor)
+    const kind = fileDeliveryKind(path)
+    const url = projectFileUrl(projectId, path)
+    const name = path.split("/").pop() ?? path
+    if (kind === "text") {
+      openViewer({ kind: "file", projectId, path, ...(target.line ? { line: target.line } : {}) })
+    } else if (kind === "pdf" || kind === "image") {
+      openViewer({ kind: "attachment", attachment: { url, name, mimeType: kind === "pdf" ? "application/pdf" : `image/${name.split(".").pop()?.toLowerCase()}`, size: null } })
+    } else {
+      downloadFile(url, name)
+    }
+    return Promise.resolve()
   }, [projectId, projectLocalPath, state.handleOpenLocalLink])
   // A file link inside the viewer (a markdown preview's) follows the same
   // rule as one in the transcript.
@@ -1706,6 +1715,7 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
   )
 
   return (
+    <ProjectFileLinkContext.Provider value={{ projectId: projectId ?? null, localPath: projectLocalPath }}>
     <ChatReferenceProvider value={chatReferenceActions}>
       <ChatSchedulesProvider value={chatSchedules}>
       <div ref={layoutRootRef} className="flex-1 flex flex-col min-w-0 relative">
@@ -1721,5 +1731,6 @@ export function ChatPage({ view = "transcript" }: { view?: ChatPageView }) {
       </div>
       </ChatSchedulesProvider>
     </ChatReferenceProvider>
+    </ProjectFileLinkContext.Provider>
   )
 }

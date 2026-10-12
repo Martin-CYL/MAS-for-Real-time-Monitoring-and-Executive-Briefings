@@ -81,13 +81,25 @@ export function parseLocalFileLink(target: string | undefined | null): ParsedLoc
       if (url.origin !== window.location.origin || !url.pathname.startsWith("/")) {
         return null
       }
-      return parseAbsoluteFileTarget(`${url.pathname}${url.hash}`)
+      if (isAppRoute(url.pathname)) return null
+      return decodeFileTarget(parseAbsoluteFileTarget(`${url.pathname}${url.hash}`))
     } catch {
       return null
     }
   }
 
-  return parseAbsoluteFileTarget(trimmed)
+  if (isAppRoute(trimmed)) return null
+  return decodeFileTarget(parseAbsoluteFileTarget(trimmed))
+}
+
+function isAppRoute(value: string) {
+  return /^\/(?:api|auth|chat|share|settings|assets|projects)(?:[/?#]|$)/.test(value) || value === "/"
+}
+
+function decodeFileTarget(value: ParsedFileTarget | null): ParsedFileTarget | null {
+  if (!value) return null
+  // Decode once, after separating line anchors. A literal percent sign is valid in filenames.
+  try { return { ...value, path: decodeURIComponent(value.path) } } catch { return value }
 }
 
 /**

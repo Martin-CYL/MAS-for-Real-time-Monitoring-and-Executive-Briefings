@@ -45,7 +45,7 @@ export function buildNexSystemInstructions(agentId: string, options?: { tools?: 
   return [
     buildNexAttributionInstructions(agentId),
     NEX_CHAT_LINK_INSTRUCTIONS,
-    ...(options?.tools === false ? [] : [NEX_ORCHESTRATION_INSTRUCTIONS, NEX_VISUALIZATION_INSTRUCTIONS]),
+    ...(options?.tools === false ? [] : [NEX_ORCHESTRATION_INSTRUCTIONS, NEX_VISUALIZATION_INSTRUCTIONS, "# File delivery\nAfter generating a deliverable file (PDF, document, spreadsheet, image, or archive), call send_attachments with its local path. Only announce that it is ready after the tool succeeds. Do not invent download URLs or hard-code localhost addresses. Attachments are delivered to the user through the browser."]),
   ].join("\n\n")
 }
 

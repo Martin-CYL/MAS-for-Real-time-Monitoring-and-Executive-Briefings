@@ -1,6 +1,7 @@
 import { t, getLocale } from "../../i18n/translate"
 import { useLocale } from "../../i18n/useTranslation"
-import { ArrowDown, ArrowUp, ChevronsUpDown, ExternalLink, File, FileImage, FileJson, FileText, FileVideo, Link2, Sheet } from "lucide-react"
+import { downloadFile } from "../../lib/fileDelivery"
+import { ArrowDown, Download, ArrowUp, ChevronsUpDown, ExternalLink, File, FileImage, FileJson, FileText, FileVideo, Link2, Sheet } from "lucide-react"
 import { memo, startTransition, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react"
 import { cn } from "../../lib/utils"
 import { formatAttachmentSize } from "../messages/AttachmentCard"
@@ -110,6 +111,18 @@ export function AttachmentViewer({ attachment, onClose }: { attachment: ViewerAt
   useLocale()
   const kind = previewKind(attachment)
   const content = useTextContent(attachment, kind)
+  const [binaryError, setBinaryError] = useState(false)
+  useEffect(() => {
+    setBinaryError(false)
+    if (kind !== "pdf" && kind !== "image") return
+    let active = true
+    // Check the authenticated endpoint without buffering the whole document.
+    void fetch(attachment.url).then(async response => {
+      if (active) setBinaryError(!response.ok)
+      await response.body?.cancel()
+    }).catch(() => { if (active) setBinaryError(true) })
+    return () => { active = false }
+  }, [attachment.url, kind])
   const [view, setView] = useState<RenderView>("rendered")
   const Icon = KIND_ICONS[kind]
   // What was left out leads the subtitle, before type and size, rather than
@@ -137,13 +150,14 @@ export function AttachmentViewer({ attachment, onClose }: { attachment: ViewerAt
       ) : undefined}
       toolbar={(
         <>
+          <ViewerIconButton label={t("Download")} onClick={() => downloadFile(attachment.url, attachment.name)}><Download /></ViewerIconButton>
           <ViewerIconButton label={t("Copy link")} onClick={() => void navigator.clipboard?.writeText(absoluteUrl(attachment.url))}><Link2 /></ViewerIconButton>
           <ViewerIconButton label={t("Open in new tab")} onClick={() => window.open(absoluteUrl(attachment.url), "_blank", "noopener,noreferrer")}><ExternalLink /></ViewerIconButton>
         </>
       )}
       bodyClassName={kind === "image" || kind === "video" ? "bg-muted/30" : undefined}
     >
-      {hasRenderedView(attachment) ? (
+      {binaryError ? <div className="p-6 text-destructive">{t("File unavailable. It may have been moved or deleted; check that you are signed in.")}</div> : hasRenderedView(attachment) ? (
         <ViewerPanes
           value={view}
           panes={{

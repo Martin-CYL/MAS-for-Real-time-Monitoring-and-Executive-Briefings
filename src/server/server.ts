@@ -1,3 +1,4 @@
+import { confinedFile, fileDeliveryHeaders } from "./file-delivery"
 import { handleSharedTranscript } from "./share-http"
 import { homedir } from "node:os"
 import { PerformanceLog } from "./performance-log"
@@ -788,10 +789,10 @@ async function handleAttachmentContent(req: Request, url: URL, store: EventStore
     return Response.json({ error: "Attachment not found" }, { status: 404 })
   }
 
-  return new Response(file, {
-    headers: {
-      "Content-Type": inferAttachmentContentType(storedName, file.type),
-    },
+  const safePath = await confinedFile(getProjectUploadDir(project.localPath), filePath)
+  if (!safePath) return Response.json({ error: "Attachment not found" }, { status: 404 })
+  return new Response(Bun.file(safePath), {
+    headers: fileDeliveryHeaders(storedName, inferAttachmentContentType(storedName, file.type), url.searchParams.get("download") === "1"),
   })
 }
 
@@ -810,7 +811,8 @@ async function handleTranscriptMediaContent(req: Request, url: URL, store: Event
     return new Response(null, { status: 405, headers: { Allow: "GET" } })
   }
 
-  const filePath = store.resolveTranscriptMediaPath(url.pathname)
+  let filePath: string | null
+  try { filePath = store.resolveTranscriptMediaPath(url.pathname) } catch { return Response.json({ error: "Invalid attachment path" }, { status: 400 }) }
   if (!filePath) {
     return Response.json({ error: "Media not found" }, { status: 404 })
   }
@@ -825,15 +827,12 @@ async function handleTranscriptMediaContent(req: Request, url: URL, store: Event
     return Response.json({ error: "Media not found" }, { status: 404 })
   }
 
-  return new Response(file, {
-    headers: {
-      "Content-Type": file.type || "application/octet-stream",
-      "X-Content-Type-Options": "nosniff",
-      ...(!/^(image\/(png|jpeg|gif|webp|avif)|video\/(mp4|webm|quicktime|ogg))$/.test(file.type)
-        ? { "Content-Disposition": "attachment", "Content-Security-Policy": "sandbox; default-src 'none'" } : {}),
-      "Cache-Control": "private, max-age=31536000, immutable",
-    },
-  })
+  const safePath = await confinedFile(path.dirname(filePath), filePath)
+  if (!safePath) return Response.json({ error: "Attachment not found" }, { status: 404 })
+  const name = path.basename(filePath).replace(/^attachment-[0-9a-f-]{36}-/, "")
+  const headers = fileDeliveryHeaders(name, file.type || "application/octet-stream", url.searchParams.get("download") === "1")
+  if (/^video\/(mp4|webm|quicktime|ogg)$/.test(file.type) && url.searchParams.get("download") !== "1") headers["Content-Disposition"] = "inline"
+  return new Response(Bun.file(safePath), { headers })
 }
 
 /**
@@ -889,7 +888,14 @@ async function handleProjectFileContent(req: Request, url: URL, store: EventStor
     return Response.json({ error: "Project not found" }, { status: 404 })
   }
 
-  const relativePath = path.posix.normalize(decodeURIComponent(match[2]).replaceAll("\\", "/"))
+  let decoded: string
+  try { decoded = decodeURIComponent(match[2]).replaceAll("\\", "/") } catch {
+    return Response.json({ error: "Invalid project file path" }, { status: 400 })
+  }
+  if (decoded.includes("\0") || decoded.split("/").includes("..")) {
+    return Response.json({ error: "Invalid project file path" }, { status: 400 })
+  }
+  const relativePath = path.posix.normalize(decoded)
   if (!relativePath || relativePath === "." || relativePath.startsWith("../") || relativePath.includes("/../") || path.posix.isAbsolute(relativePath)) {
     return Response.json({ error: "Invalid project file path" }, { status: 400 })
   }
@@ -900,20 +906,11 @@ async function handleProjectFileContent(req: Request, url: URL, store: EventStor
     return Response.json({ error: "Invalid project file path" }, { status: 400 })
   }
 
-  const file = Bun.file(filePath)
-  try {
-    const info = await stat(filePath)
-    if (!info.isFile()) {
-      return Response.json({ error: "File not found" }, { status: 404 })
-    }
-  } catch {
-    return Response.json({ error: "File not found" }, { status: 404 })
-  }
-
+  const safePath = await confinedFile(projectRoot, filePath)
+  if (!safePath) return Response.json({ error: "File has been moved or deleted, or is outside this workspace." }, { status: 404 })
+  const file = Bun.file(safePath)
   return new Response(file, {
-    headers: {
-      "Content-Type": inferProjectFileContentType(relativePath, file.type),
-    },
+    headers: fileDeliveryHeaders(relativePath, inferProjectFileContentType(relativePath, file.type), url.searchParams.get("download") === "1"),
   })
 }
 

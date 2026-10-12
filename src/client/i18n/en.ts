@@ -1,5 +1,7 @@
 // English source strings are stable message IDs. Do not translate user content.
 export const en = {
+  "File unavailable. It may have been moved or deleted; check that you are signed in.": "File unavailable. It may have been moved or deleted; check that you are signed in.",
+  "This file is outside the current workspace.": "This file is outside the current workspace.",
   "Wait for the current task to finish before changing models.": "Wait for the current task to finish before changing models.",
   "The selected reasoning effort is unavailable for this model.": "The selected reasoning effort is unavailable for this model.",
   "The selected model is unavailable. Please choose another model.": "The selected model is unavailable. Please choose another model.",

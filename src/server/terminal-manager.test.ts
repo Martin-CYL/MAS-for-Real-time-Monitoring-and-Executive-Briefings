@@ -103,11 +103,15 @@ describeIfSupported("TerminalManager", () => {
     const { manager, getOutput } = await createSession(terminalId)
 
     try {
-      manager.write(terminalId, `python3 -c "import time; print('__NEX_SLEEP__', flush=True); time.sleep(30)"\r`)
+      manager.write(terminalId, `python3 -c "import time; print('__NEX_' + 'SLEEP__', flush=True); time.sleep(30)"\r`)
       await waitFor(() => getOutput().includes("__NEX_SLEEP__"), COMMAND_TIMEOUT_MS)
 
+      // Wait for a real subprocess marker, not PTY command echo, then for
+      // the shell prompt before sending input that SIGINT could otherwise flush.
+      const beforeInterrupt = getOutput().length
       manager.write(terminalId, "\x03")
-      manager.write(terminalId, "printf '__NEX_AFTER_INT__\\n'\r")
+      await waitFor(() => getOutput().slice(beforeInterrupt).includes("__NEX_PROMPT__"), COMMAND_TIMEOUT_MS)
+      manager.write(terminalId, "printf '__NEX_%s__\\n' AFTER_INT\r")
 
       await waitFor(() => getOutput().includes("__NEX_AFTER_INT__"), COMMAND_TIMEOUT_MS)
 

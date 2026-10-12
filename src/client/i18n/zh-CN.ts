@@ -1,6 +1,8 @@
 import type { MessageKey } from "./types"
 
 export const zhCN = {
+  "File unavailable. It may have been moved or deleted; check that you are signed in.": "文件无法访问，可能已移动或删除；请确认已登录。",
+  "This file is outside the current workspace.": "该文件不在当前工作区内。",
   "Wait for the current task to finish before changing models.": "请等待当前任务结束后再修改模型。",
   "The selected reasoning effort is unavailable for this model.": "当前模型不支持所选思考强度。",
   "The selected model is unavailable. Please choose another model.": "所选模型不可用，请选择其他模型。",

@@ -107,3 +107,12 @@ describe("shouldOpenLocalFileLinkInEditor", () => {
     expect(shouldOpenLocalFileLinkInEditor("/Users/jake/Projects/nex/archive.zip")).toBe(false)
   })
 })
+
+test("decodes file URLs once and leaves application routes alone", () => {
+  expect(parseLocalFileLink("/workspace/" + encodeURIComponent("今日 新闻 100% #1.pdf"))?.path).toBe("/workspace/今日 新闻 100% #1.pdf")
+  expect(parseLocalFileLink("/workspace/literal%2520.pdf")?.path).toBe("/workspace/literal%20.pdf")
+  expect(parseLocalFileLink("/workspace/100%.pdf")?.path).toBe("/workspace/100%.pdf")
+  for (const href of ["/api/projects/p/files/a.pdf/content?download=1", "/chat/123", "/settings", "/auth/login", "/share/abc", "/"]) {
+    expect(parseLocalFileLink(href)).toBeNull()
+  }
+})

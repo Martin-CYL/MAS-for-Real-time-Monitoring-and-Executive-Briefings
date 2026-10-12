@@ -41,6 +41,8 @@ import {
 } from "lucide-react"
 import { CopyButton } from "../ui/copy-button"
 import { cn } from "../../lib/utils"
+import { fileDeliveryKind, projectFileUrl } from "../../../shared/file-delivery"
+import { projectRelativePath } from "../viewer/localLinks"
 import { parseLocalFileLink } from "../../lib/pathUtils"
 import { useTranscriptRenderOptions } from "./render-context"
 
@@ -55,6 +57,8 @@ export type OpenLocalLinkTarget = {
 type OpenLocalLinkHandler = (target: OpenLocalLinkTarget) => void
 
 const defaultOpenLocalLink: OpenLocalLinkHandler = () => {}
+
+export const ProjectFileLinkContext = createContext<{ projectId: string | null; localPath: string | null }>({ projectId: null, localPath: null })
 
 const OpenLocalLinkContext = createContext<OpenLocalLinkHandler>(defaultOpenLocalLink)
 
@@ -361,6 +365,7 @@ export function createMarkdownComponents(options?: {
     ...markdownComponents,
     a: ({ children, href, onClick, ...props }: ComponentPropsWithoutRef<"a">) => {
       const contextOpenLocalLink = useContext(OpenLocalLinkContext)
+      const fileProject = useContext(ProjectFileLinkContext)
       const onOpenLocalLink = options?.onOpenLocalLink ?? contextOpenLocalLink
       const renderOptions = useTranscriptRenderOptions()
       const inRouter = useInRouterContext()
@@ -397,6 +402,9 @@ export function createMarkdownComponents(options?: {
         )
       }
       const parsedLocalLink = parseLocalFileLink(href)
+      const relativeFile = parsedLocalLink ? projectRelativePath(fileProject.localPath, parsedLocalLink.path) : null
+      const browserHref = relativeFile && fileProject.projectId
+        ? projectFileUrl(fileProject.projectId, relativeFile, fileDeliveryKind(relativeFile) === "download") : undefined
 
       if (parsedLocalLink && renderOptions.localLinkMode === "text") {
         return (
@@ -409,12 +417,13 @@ export function createMarkdownComponents(options?: {
       return (
         <a
           className="transition-all underline decoration-2 text-logo decoration-logo/50 hover:text-logo/70 dark:text-logo dark:decoration-logo/70 dark:hover:text-logo/60 dark:hover:decoration-logo/40 "
-          href={href}
+          href={browserHref ?? href}
           target={parsedLocalLink ? undefined : "_blank"}
           rel={parsedLocalLink ? undefined : "noopener noreferrer"}
           onClick={(event) => {
             onClick?.(event)
             if (event.defaultPrevented || !parsedLocalLink || onOpenLocalLink === defaultOpenLocalLink) return
+            if (browserHref && (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey)) return
             event.preventDefault()
             onOpenLocalLink({
               ...parsedLocalLink,
@@ -424,7 +433,7 @@ export function createMarkdownComponents(options?: {
             })
           }}
           onContextMenu={(event) => {
-            if (!parsedLocalLink || onOpenLocalLink === defaultOpenLocalLink) return
+            if (browserHref || !parsedLocalLink || onOpenLocalLink === defaultOpenLocalLink) return
             event.preventDefault()
             onOpenLocalLink({
               ...parsedLocalLink,

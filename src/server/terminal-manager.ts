@@ -358,14 +358,10 @@ export class TerminalManager {
       status: "running",
       exitCode: null,
       process: null,
-      terminal: new Bun.Terminal({
-        cols,
-        rows,
-        name: "xterm-256color",
-        data: (_terminal, data) => {
-          this.handlePtyOutput(session, data)
-        },
-      }),
+      get terminal() {
+        if (!this.process?.terminal) throw new Error("Terminal process has not started")
+        return this.process.terminal
+      },
       headless,
       serializeAddon,
       decoder,
@@ -378,10 +374,17 @@ export class TerminalManager {
       session.process = Bun.spawn([shell, ...resolveShellArgs(shell)], {
         cwd: args.projectPath,
         env: createTerminalEnv(),
-        terminal: session.terminal,
+        // Create the PTY with the child so Linux assigns a controlling terminal.
+        // A separately constructed Bun.Terminal loses foreground job control.
+        terminal: {
+          cols,
+          rows,
+          name: "xterm-256color",
+          data: (_terminal, data) => this.handlePtyOutput(session, data),
+        },
       })
     } catch (error) {
-      session.terminal.close()
+      session.process?.terminal?.close()
       session.serializeAddon.dispose()
       session.headless.dispose()
       throw error
@@ -443,7 +446,10 @@ export class TerminalManager {
         session.terminal.write(filteredData.slice(cursor, ctrlCIndex))
       }
 
-      signalTerminalProcessGroup(session.process, "SIGINT")
+      // The PTY delivers SIGINT to the foreground job, which may have a
+      // different process group from the shell. Raw-mode programs receive
+      // the byte directly, just as they would in a native terminal.
+      session.terminal.write("\x03")
       cursor = ctrlCIndex + 1
     }
   }

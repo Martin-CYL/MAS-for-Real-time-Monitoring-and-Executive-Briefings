@@ -2,7 +2,8 @@ import { SHOW_DEVELOPER_UI } from "../../config/productFeatures"
 import { t, getLocale } from "../../i18n/translate"
 import { useLocale } from "../../i18n/useTranslation"
 import { File as CodeFile, type FileOptions } from "@pierre/diffs/react"
-import { Code, FileCode, FileDiff, WrapText } from "lucide-react"
+import { downloadFile } from "../../lib/fileDelivery"
+import { Code, Download, FileCode, FileDiff, WrapText } from "lucide-react"
 import { useEffect, useMemo, useRef, useState } from "react"
 import { useTheme } from "../../hooks/useTheme"
 import { openViewer } from "../../stores/viewerStore"
@@ -92,6 +93,7 @@ export function FileViewer({
       ) : undefined}
       toolbar={(
         <>
+          <ViewerIconButton label={t("Download")} onClick={() => downloadFile(url, name)}><Download /></ViewerIconButton>
           {SHOW_DEVELOPER_UI && changed ? (
             <ViewerIconButton label={t("Show changes")} onClick={() => openViewer({ kind: "diff", projectId, path })}><FileDiff /></ViewerIconButton>
           ) : null}

@@ -46,7 +46,7 @@ export async function storeLocalAttachment(
     mimeType = (await fileTypeFromBuffer(header).catch(() => undefined))?.mime ?? Bun.file(source).type ?? "application/octet-stream"
   } finally { await handle.close() }
   const name = path.basename(source)
-  const storedName = `attachment-${crypto.randomUUID()}-${name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(-120)}`
+  const storedName = `attachment-${crypto.randomUUID()}-${Array.from(name.replace(/[\x00-\x1f\x7f/\\]/g, "_")).slice(-60).join("")}`
   const dir = getTranscriptMediaDir(context.dataDir, context.chatId)
   await mkdir(dir, { recursive: true })
   const destination = path.join(dir, storedName)

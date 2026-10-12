@@ -117,3 +117,16 @@ describe("markdownComponents", () => {
     expect(html).not.toContain('target="_blank"')
   })
 })
+
+test("project file links render real browser URLs for new tabs and preserve encoded filenames", () => {
+  const { ProjectFileLinkContext } = require("./shared")
+  const name = "报告 100% #1.pdf"
+  const html = renderToStaticMarkup(
+    <ProjectFileLinkContext.Provider value={{ projectId: "p", localPath: "/workspace/project" }}>
+      <TranscriptMarkdown text={`[PDF](/workspace/project/${encodeURIComponent(name)})\n\n[HTML](/workspace/project/report.html)\n\n[API](/api/projects/p/files/notes.txt/content)`} />
+    </ProjectFileLinkContext.Provider>
+  )
+  expect(html).toContain(`/api/projects/p/files/${encodeURIComponent(name)}/content`)
+  expect(html).toContain('/api/projects/p/files/report.html/content?download=1')
+  expect(html).toContain('href="/api/projects/p/files/notes.txt/content"')
+})

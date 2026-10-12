@@ -1,3 +1,4 @@
+import { fileDeliveryKind, fileDownloadUrl } from "../../../shared/file-delivery"
 import { t } from "../../i18n/translate"
 import { useLocale } from "../../i18n/useTranslation"
 import { readVisualizationArtifact, VISUALIZATION_TOOL_NAME } from "../../../shared/visualization"
@@ -38,6 +39,7 @@ function errorText(result: unknown): string {
  */
 function openInViewer(event: React.MouseEvent<HTMLAnchorElement>, attachment: DisplayAttachment) {
   if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+  if (attachment.kind === "file" && fileDeliveryKind(attachment.name) === "download") return
   event.preventDefault()
   openViewer({ kind: "attachment", attachment: viewerAttachmentFromDisplay(attachment) })
 }
@@ -81,7 +83,7 @@ export function AttachmentsCard({ attachments }: { attachments: DisplayAttachmen
               const imagePreview = attachment.kind === "image" && !failed
               const onError = () => setBroken(current => new Set(current).add(attachment.url))
               const imageLink = (
-                <a href={attachment.url} target="_blank" rel="noreferrer noopener" className="block" aria-label={t("Open {0}", { 0: attachment.name })} onClick={(event) => openInViewer(event, attachment)}>
+                <a href={attachment.kind === "file" && fileDeliveryKind(attachment.name) === "download" ? fileDownloadUrl(attachment.url) : attachment.url} target="_blank" rel="noreferrer noopener" className="block" aria-label={t("Open {0}", { 0: attachment.name })} onClick={(event) => openInViewer(event, attachment)}>
                   {/* Load on mount because the image's dimensions determine the preview width. Every image has the same height. Only a panorama wider than the cap is cropped. */}
                   <img src={attachment.url} alt={attachment.name} referrerPolicy="no-referrer" className="block h-56 w-auto max-w-[32rem] rounded-[10px] object-cover shadow-md" onError={onError} />
                 </a>
@@ -93,7 +95,7 @@ export function AttachmentsCard({ attachments }: { attachments: DisplayAttachmen
                   ) : attachment.kind === "video" && !failed ? (
                     <video src={attachment.url} controls preload="metadata" className={mediaClass} onError={onError} aria-label={attachment.name} />
                   ) : (
-                    <a href={attachment.url} target="_blank" rel="noreferrer noopener" onClick={(event) => openInViewer(event, attachment)} className="flex max-w-80 items-center gap-3 rounded-[10px] border border-border bg-muted dark:bg-card p-3 text-sm hover:border-muted-foreground/50">
+                    <a href={attachment.kind === "file" && fileDeliveryKind(attachment.name) === "download" ? fileDownloadUrl(attachment.url) : attachment.url} target="_blank" rel="noreferrer noopener" onClick={(event) => openInViewer(event, attachment)} className="flex max-w-80 items-center gap-3 rounded-[10px] border border-border bg-muted dark:bg-card p-3 text-sm hover:border-muted-foreground/50">
                       <FileText className="size-5 shrink-0 text-muted-foreground" />
                       <span className="min-w-0 truncate">{attachment.name}</span>
                       <ArrowUpRight className="size-4 shrink-0" />

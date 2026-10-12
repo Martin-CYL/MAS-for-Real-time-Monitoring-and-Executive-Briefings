@@ -53,6 +53,42 @@ describe("checkServerBundle", () => {
     expect(problems).toEqual([expect.stringContaining("contains the build machine's path")])
   })
 
+  test("short Docker roots do not match comments, regexes, globs or similar names", () => {
+    const text = `// src/server/app-settings.ts
+// node_modules/ajv/dist/vocabularies/applicator/index.js
+// build comment: /app/node_modules/example
+const browser = /applewebkit/;
+const regex = /[\"']app/;
+const glob = "**/app.json";
+const mime = "application/applefile";
+const other = "/application/data";
+const nested = "/opt/app/data";
+const url = "https://example.com/app/data";
+`
+    expect(checkServerBundle([{ path: "entry.js", text }], { ...OPTIONS, forbiddenPaths: ["/app"] }).problems).toEqual([])
+  })
+
+  for (const expression of [
+    '"/app"', "'/app/node_modules/pkg'", '`/app/data`', '`/app/${name}`',
+    '"file:///app/data"', '"file:///app"', '"file:///app/a%20b"',
+    String.raw`"\u002fapp\u002fdata"`,
+    String.raw`"\/app\/data"`,
+  ]) {
+    test(`rejects a build-root literal: ${expression}`, () => {
+      const text = `// src/server/entry.ts\nconst location = ${expression};\n`
+      const { problems } = checkServerBundle([{ path: "entry.js", text }], { ...OPTIONS, forbiddenPaths: ["/app/"] })
+      expect(problems).toHaveLength(1)
+      expect(problems[0]).toContain("entry.js:2:18")
+      expect(problems[0]).toContain("contains the build machine's path /app/")
+    })
+  }
+
+  test("checks literals in template expressions and normalizes Windows separators", () => {
+    const text = '// src/server/entry.ts\nconst x = `value: ${read("/app/data")}`;\nconst y = "C:\\\\build\\\\nex\\\\data";'
+    const { problems } = checkServerBundle([{ path: "entry.js", text }], { ...OPTIONS, forbiddenPaths: ["/app", "C:\\build\\nex"] })
+    expect(problems).toHaveLength(2)
+  })
+
   test("a runtime import of a package users won't have fails", () => {
     const text = `${CLEAN}\nimport { thing } from "left-pad/sub";\nconst x = await import("@scope/missing");\n`
     const { problems } = checkServerBundle([{ path: "chunk.js", text }], OPTIONS)

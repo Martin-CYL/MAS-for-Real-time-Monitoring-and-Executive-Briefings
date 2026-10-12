@@ -16,3 +16,9 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run check
       - run: bun test --timeout 15000
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production Docker image
+        run: docker build --tag nex-web:ci .

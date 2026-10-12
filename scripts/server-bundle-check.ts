@@ -1,4 +1,6 @@
 import { builtinModules } from "node:module"
+import { fileURLToPath } from "node:url"
+import * as ts from "typescript"
 
 /**
  * Reads the emitted server bundle (scripts/build-server.ts) and reports what
@@ -65,6 +67,34 @@ function matchesPrefix(name: string, prefixes: string[]) {
   return prefixes.some((prefix) => prefix.endsWith("*") ? name.startsWith(prefix.slice(0, -1)) : name === prefix)
 }
 
+/** Read literal values, not comments, regexes or arbitrary substrings of the bundle. */
+function findBuildPaths(file: BundleFile, forbiddenPaths: string[]): string[] {
+  const source = ts.createSourceFile(file.path, file.text, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS)
+  const found = new Map<string, string>()
+  const normalize = (value: string) => value.replaceAll("\\", "/").replace(/\/+$/, "")
+  function visit(node: ts.Node) {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)
+      || ts.isTemplateHead(node) || ts.isTemplateMiddle(node) || ts.isTemplateTail(node)) {
+      let value = node.text
+      if (value.startsWith("file:")) {
+        try { value = fileURLToPath(value) } catch { /* Not a valid file URL. */ }
+      }
+      value = normalize(value)
+      for (const forbidden of forbiddenPaths) {
+        const root = normalize(forbidden)
+        if (!root || found.has(forbidden)) continue
+        if (value === root || value.startsWith(`${root}/`)) {
+          const { line, character } = source.getLineAndCharacterOfPosition(node.getStart(source))
+          found.set(forbidden, `${file.path}:${line + 1}:${character + 1} contains the build machine's path ${forbidden}: ${JSON.stringify(node.text.slice(0, 180))}`)
+        }
+      }
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(source)
+  return [...found.values()]
+}
+
 export function checkServerBundle(files: BundleFile[], options: BundleCheckOptions): BundleCheckResult {
   const problems: string[] = []
   const inlined = new Set<string>()
@@ -78,11 +108,7 @@ export function checkServerBundle(files: BundleFile[], options: BundleCheckOptio
       if (name) inlined.add(name)
     }
 
-    for (const forbidden of options.forbiddenPaths) {
-      if (file.text.includes(forbidden)) {
-        problems.push(`${file.path} contains the build machine's path ${forbidden}: something located itself while bundling`)
-      }
-    }
+    problems.push(...findBuildPaths(file, options.forbiddenPaths))
 
     // Real module loads only: import declarations, re-exports, import(),
     // and Bun's __require shim. Plain require("…") text also shows up inside

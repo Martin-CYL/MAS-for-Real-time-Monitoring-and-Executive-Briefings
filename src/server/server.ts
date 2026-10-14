@@ -116,7 +116,7 @@ export async function startNexServer(options: StartNexServerOptions = {}) {
   // Runs alongside the store setup below (~0.5 s for a zsh with nvm) and is
   // awaited before anything can start an agent.
   const shellPathReady = inheritShellPath()
-  const auth = options.password ? createAuthManager(options.password, { trustProxy: options.trustProxy ?? false }) : null
+  const auth = options.password ? createAuthManager(options.password, { trustProxy: options.trustProxy ?? (process.env.NEX_TRUST_PROXY === "true") }) : null
   const diagnostics = new PerformanceLog(options.dataDir ?? getDataDir(homedir()), undefined, APP_VERSION)
   const store = new EventStore(options.dataDir, diagnostics)
   const diffStore = new DiffStore(store.dataDir)

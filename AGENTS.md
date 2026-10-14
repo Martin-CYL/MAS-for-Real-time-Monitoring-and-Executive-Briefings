@@ -5,6 +5,8 @@ Nex is a web workspace for research and executive briefings. The React frontend 
 - `bun run check`: TypeScript check and client, export-viewer, server builds.
 - `bun test --timeout 15000`: full unit/integration suite.
 - Before declaring code changes validated, run the full test suite and `bun run check`; targeted tests alone are insufficient. Add browser verification for user-facing behavior changes. Report Linux CI and Docker checks separately when they have not run.
+- For a bug fix, replay the original user scenario end to end after the fix and present the result for user acceptance before merging into `test`. Passing automated tests alone is not acceptance.
+- Merging into `main` requires the user's explicit confirmation for that merge. Prepare the PR and report validation results, then wait; do not merge `main` automatically.
 - `bun run dev`: local Vite and backend development.
 - `bun run start:production --host 127.0.0.1 --port 3210 --no-open`: built web server.
 

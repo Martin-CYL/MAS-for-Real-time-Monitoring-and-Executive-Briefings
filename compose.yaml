@@ -17,6 +17,8 @@ services:
       NEX_DEFAULT_PROVIDER: codex
       NEX_PROJECTS_DIR: /workspace/projects
       NODE_ENV: production
+      NEX_TRUST_PROXY: ${NEX_TRUST_PROXY:-false}
+      TZ: Asia/Hong_Kong
       NEX_PASSWORD: ${NEX_PASSWORD:-}
     volumes:
       - type: bind

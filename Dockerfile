@@ -33,3 +33,16 @@ USER 10001:10001
 EXPOSE 3210
 STOPSIGNAL SIGTERM
 CMD ["bun", "/app/dist/server/entry.js", "--host", "0.0.0.0", "--port", "3210", "--strict-port", "--no-open"]
+
+# Account gateway contains no Codex CLI, agent workspace or Docker socket.
+FROM bun-runtime AS gateway
+WORKDIR /app
+COPY --from=production-deps /app/node_modules ./node_modules
+COPY src/server/gateway ./gateway
+RUN mkdir -p /data && chown 10002:10002 /data
+USER 10002:10002
+ENV NEX_ACCOUNTS_DIR=/data HOST=0.0.0.0 PORT=3220
+EXPOSE 3220
+CMD ["bun", "/app/gateway/entry.ts"]
+
+FROM runtime AS production

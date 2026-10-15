@@ -36,6 +36,7 @@
   "dependencies": {
     "@mariozechner/pi-ai": "0.73.1",
     "@mariozechner/pi-coding-agent": "0.73.1",
+    "better-auth": "1.7.9",
     "cloudflared": "^0.7.1"
   },
   "devDependencies": {

@@ -1,0 +1,35 @@
+{
+  "schema_version": 1,
+  "reviewer": "fixture-human-reviewer",
+  "actor": "human",
+  "date_checked": "2030-01-02",
+  "report_sha256": "3954dc857d70be3961f492b4c9a45d87013bd5c1630122bac38ece767fa3a37f",
+  "ledger_sha256": "94302655cb262f98b20b770db5d2cf9d3abd2ccda6a086fc0371789c3040bc73",
+  "coverage": {
+    "complete": false,
+    "notes": "法律主张被驳回；继续查未标注事实。"
+  },
+  "claims": [
+    {
+      "claim_id": "C001",
+      "disposition": "supported",
+      "source_url": "https://fixture.invalid/source",
+      "support_quote": "演示芯片在合成测试中完成 12 次运算。",
+      "anchor": "合成来源第 1 段",
+      "rationale": "合成来源明确给出同一测试条件下的运算次数。"
+    },
+    {
+      "claim_id": "C002",
+      "disposition": "unsupported",
+      "source_url": "https://fixture.invalid/source",
+      "support_quote": "本页面仅介绍合成芯片测试，不载有任何法律规定。",
+      "anchor": "合成来源第 2 段",
+      "rationale": "来源没有任何法律文本、管辖范围或生效日期，不能支持全球证券禁令；作者 supported 标签不可信。"
+    }
+  ],
+  "signoff": {
+    "reviewer": "fixture-human-reviewer",
+    "date": "2030-01-02",
+    "decision": "hold"
+  }
+}

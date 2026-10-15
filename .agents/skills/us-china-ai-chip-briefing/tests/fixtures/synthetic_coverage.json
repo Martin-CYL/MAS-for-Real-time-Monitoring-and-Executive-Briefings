@@ -1,0 +1,15 @@
+{
+  "_fixture": "SYNTHETIC coverage sweep for tests and format illustration only; not real events.",
+  "window": {"start": "2030-01-01", "end": "2030-01-02"},
+  "outlets_searched": ["Fixture Wire", "Fixture Daily (Chinese)", "Fixture Government Register"],
+  "candidates": [
+    {"event": "演示芯片合成测试结果", "date": "2030-01-01", "side": "cn", "url": "https://fixture.invalid/source", "decision": "included", "claim_ids": ["C001"]},
+    {"event": "Fixture agency proposes new rule", "date": "2030-01-01", "side": "us", "decision": "excluded", "reason": "Proposal only; no comment period opened"},
+    {"event": "Fixture model release", "date": "2030-01-02", "side": "cn", "decision": "appendix", "reason": "Incremental update"},
+    {"event": "Fixture export case", "date": "2030-01-02", "side": "us", "decision": "excluded", "reason": "Duplicate of earlier case; no new filing"},
+    {"event": "Fixture packaging plant", "date": "2030-01-01", "side": "other", "decision": "excluded", "reason": "Outside US-China scope"},
+    {"event": "Fixture bond report", "date": "2030-01-02", "side": "cn", "decision": "excluded", "reason": "Single anonymous report; no terms"},
+    {"event": "Fixture summit", "date": "2030-01-02", "side": "both", "decision": "background", "reason": "Scheduled, not yet held"},
+    {"event": "Fixture chip launch", "date": "2030-01-01", "side": "us", "decision": "excluded", "reason": "Marketing announcement without specifications"}
+  ]
+}

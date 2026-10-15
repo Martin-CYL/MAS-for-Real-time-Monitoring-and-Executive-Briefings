@@ -1,0 +1,6 @@
+{
+  "_comment": "Used only to flag mislabelled sources (e.g. a news site marked official_document). Add hosts as needed. Matching includes subdomains. Not a list of trusted sources.",
+  "official_suffixes": [".gov", ".mil", ".gov.cn", ".gov.hk", ".gov.uk", ".gov.tw", ".go.jp", ".go.kr", ".gov.sg", ".europa.eu", ".gc.ca", ".gov.au"],
+  "official_hosts": ["federalregister.gov", "govinfo.gov", "congress.gov", "mofcom.gov.cn", "customs.gov.cn", "miit.gov.cn", "cac.gov.cn", "xinhuanet.com", "news.cn", "hkexnews.hk", "sec.gov", "regulations.justia.com"],
+  "news_hosts": ["reuters.com", "bloomberg.com", "ft.com", "wsj.com", "nytimes.com", "cnbc.com", "apnews.com", "scmp.com", "theinformation.com", "nikkei.com", "asia.nikkei.com", "caixinglobal.com", "caixin.com", "theedgemalaysia.com", "asiatimes.com", "aljazeera.com", "economist.com", "spglobal.com", "yahoo.com", "finance.yahoo.com", "natlawreview.com", "techcrunch.com", "theverge.com", "tomshardware.com", "digitimes.com", "36kr.com", "jiemian.com", "thepaper.cn", "yicaiglobal.com"]
+}

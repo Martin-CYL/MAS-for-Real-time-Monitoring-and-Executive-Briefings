@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "fixture": true,
+  "author": "fixture-author",
+  "report_date": "2030-01-02",
+  "claims": [
+    {
+      "id": "C001",
+      "text": "演示芯片在合成测试中完成 12 次运算。",
+      "kinds": [
+        "technical"
+      ],
+      "author_status": "supported",
+      "event_date": "2030-01-01",
+      "uncertainty": "仅用于测试，不可当作新闻事实。",
+      "sources": [
+        {
+          "url": "https://fixture.invalid/source",
+          "publication_date": "2030-01-01",
+          "date_checked": "2030-01-02",
+          "quote": "演示芯片在合成测试中完成 12 次运算。",
+          "anchor": "合成来源第 1 段",
+          "evidence_type": "other",
+          "source_role": "primary",
+          "access_status": "opened",
+          "notes": "FICTIONAL FIXTURE; this URL has no live evidence."
+        }
+      ]
+    },
+    {
+      "id": "C002",
+      "text": "所有芯片企业自 2030 年 1 月 2 日起均受全球证券交易禁令约束。",
+      "kinds": [
+        "legal",
+        "list"
+      ],
+      "author_status": "supported",
+      "event_date": "2030-01-02",
+      "uncertainty": "故意伪造法律结论，用于反例测试；作者标签有误。",
+      "sources": [
+        {
+          "url": "https://fixture.invalid/source",
+          "publication_date": "2030-01-01",
+          "date_checked": "2030-01-02",
+          "quote": "本页面仅介绍合成芯片测试，不载有任何法律规定。",
+          "anchor": "合成来源第 2 段",
+          "evidence_type": "other",
+          "source_role": "primary",
+          "access_status": "opened",
+          "notes": "FICTIONAL FIXTURE; this URL has no live evidence."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,209 @@
+{
+  "schema_version": 1,
+  "generated_at": "2026-10-14T18:48:09.695745+00:00",
+  "report_sha256": "3954dc857d70be3961f492b4c9a45d87013bd5c1630122bac38ece767fa3a37f",
+  "ledger_sha256": "94302655cb262f98b20b770db5d2cf9d3abd2ccda6a086fc0371789c3040bc73",
+  "validation_clock": "2030-01-02T18:00:00+00:00",
+  "clock_mode": "injected fixture/test clock",
+  "network": true,
+  "network_mode": "mock",
+  "checks": {
+    "report": [
+      {
+        "status": "FAIL",
+        "code": "DATE_CONFLICT",
+        "message": "Report-date mismatch: {'masthead': '2030-01-02', 'issue': '2030-01-03', 'footer': '2030-01-02', 'title': '2030-01-02', 'annotation:line2': '2030-01-02'}"
+      },
+      {
+        "status": "UNVERIFIED",
+        "code": "FIRST_USE",
+        "message": "XYZ: explain at first visible use; later glossary does not count",
+        "line": 4,
+        "term": "XYZ"
+      },
+      {
+        "status": "FAIL",
+        "code": "FIGURE_DUPLICATE",
+        "message": "Duplicate figure labels: [1, 1, 3]"
+      },
+      {
+        "status": "FAIL",
+        "code": "FIGURE_SEQUENCE",
+        "message": "Expected labels in order 1..3; found [1, 1, 3]"
+      },
+      {
+        "status": "FAIL",
+        "code": "SECTION_MISSING",
+        "message": "Required section missing: three headline judgments (\"本期三个判断\")",
+        "field": "本期三个判断"
+      },
+      {
+        "status": "FAIL",
+        "code": "SECTION_MISSING",
+        "message": "Required section missing: event status table (<table> under \"事件状态 / MONITORING STATUS\")",
+        "field": "事件状态表"
+      },
+      {
+        "status": "FAIL",
+        "code": "SECTION_MISSING",
+        "message": "Required section missing: management view (\"管理层参考\")",
+        "field": "管理层参考"
+      },
+      {
+        "status": "FAIL",
+        "code": "STATUS_LABELS_MISSING",
+        "message": "No template status labels (class \"st confirmed|reported|pending\"); custom badges are not checked against the legend"
+      },
+      {
+        "status": "PASS",
+        "code": "MECHANICAL_COMPLETE",
+        "message": "Mechanical scan completed; missing facts and semantic status require reviewer"
+      }
+    ],
+    "links": [
+      {
+        "status": "UNVERIFIED",
+        "code": "BLOCKED",
+        "message": "HTTP response only; source support not checked",
+        "url": "https://fixture.invalid/blocked",
+        "http_status": 403,
+        "final_url": "https://fixture.invalid/blocked",
+        "redirects": [],
+        "transport": "direct"
+      },
+      {
+        "status": "FAIL",
+        "code": "BROKEN",
+        "message": "HTTP response only; source support not checked",
+        "url": "https://fixture.invalid/dead",
+        "http_status": 404,
+        "final_url": "https://fixture.invalid/dead",
+        "redirects": [],
+        "transport": "direct"
+      },
+      {
+        "status": "PASS",
+        "code": "REACHABLE",
+        "message": "HTTP response only; source support not checked",
+        "url": "https://fixture.invalid/source",
+        "http_status": 200,
+        "final_url": "https://fixture.invalid/source",
+        "redirects": [],
+        "transport": "direct"
+      }
+    ],
+    "quotes": [
+      {
+        "status": "FAIL",
+        "code": "QUOTE_NOT_FOUND",
+        "message": "Page fetched (HTTP 200) but the recorded quote is not on it (best match 5%). Quote may be invented or from another page",
+        "claim_id": "C001",
+        "url": "https://fixture.invalid/source"
+      },
+      {
+        "status": "FAIL",
+        "code": "QUOTE_NOT_FOUND",
+        "message": "Page fetched (HTTP 200) but the recorded quote is not on it (best match 0%). Quote may be invented or from another page",
+        "claim_id": "C002",
+        "url": "https://fixture.invalid/source"
+      }
+    ],
+    "evidence": [
+      {
+        "status": "UNVERIFIED",
+        "code": "DATE_UNKNOWN",
+        "message": "Date is unknown; obtain it from the source or keep UNVERIFIED",
+        "field": "cutoff"
+      },
+      {
+        "status": "UNVERIFIED",
+        "code": "DATE_ORDER_AMBIGUOUS",
+        "message": "2030-01-02 and 2030-01-02 overlap at recorded precision; add source-backed time/offset if ordering matters",
+        "field": "review.signoff.date"
+      },
+      {
+        "status": "PASS",
+        "code": "DATE_SCAN_COMPLETE",
+        "message": "Cross-field date scan completed; future event_date is allowed, unknown precision is not manufactured",
+        "runtime": "2030-01-02T18:00:00+00:00",
+        "timezone": "UTC (legacy date-only convention)"
+      },
+      {
+        "status": "UNVERIFIED",
+        "code": "SYNTHETIC_FIXTURE",
+        "message": "Synthetic fixture; not a news report or release candidate"
+      },
+      {
+        "status": "PASS",
+        "code": "TRACEABILITY_SCAN",
+        "message": "Traceability scan executed; author labels and quotations are not proof"
+      },
+      {
+        "status": "UNVERIFIED",
+        "code": "PRIMARY_LEGAL_SOURCE",
+        "message": "Legal/list conclusion needs applicable original instrument or list record",
+        "claim_id": "C002"
+      },
+      {
+        "status": "PASS",
+        "code": "RECORDED_SOURCE_REVIEW",
+        "message": "Independent source review recorded; semantic truth depends on reviewer",
+        "claim_id": "C001",
+        "reviewer": "fixture-human-reviewer"
+      },
+      {
+        "status": "FAIL",
+        "code": "CLAIM_UNSUPPORTED",
+        "message": "来源没有任何法律文本、管辖范围或生效日期，不能支持全球证券禁令；作者 supported 标签不可信。",
+        "claim_id": "C002"
+      },
+      {
+        "status": "UNVERIFIED",
+        "code": "COVERAGE_REVIEW",
+        "message": "Human must check all material facts, including facts without claim markers"
+      },
+      {
+        "status": "UNVERIFIED",
+        "code": "HUMAN_SIGNOFF",
+        "message": "Final human sign-off pending; no automatic VERIFIED label"
+      }
+    ],
+    "coverage": [
+      {
+        "status": "UNVERIFIED",
+        "code": "COVERAGE_SWEEP_MISSING",
+        "message": "No coverage.json: nobody can tell which major events were considered and left out"
+      }
+    ]
+  },
+  "risk": {
+    "C001": {
+      "score": 10,
+      "reasons": [
+        "QUOTE_NOT_FOUND"
+      ],
+      "quote_state": "NOT_FOUND",
+      "tier": "high"
+    },
+    "C002": {
+      "score": 15,
+      "reasons": [
+        "legal",
+        "list",
+        "QUOTE_NOT_FOUND"
+      ],
+      "quote_state": "NOT_FOUND",
+      "tier": "high"
+    }
+  },
+  "excluded": [],
+  "outcome": "FAIL",
+  "readiness": "BLOCKED",
+  "categories": {
+    "rule_violation": 11,
+    "author_fix": 2,
+    "source_access": 1,
+    "evidence_gap": 4,
+    "signoff": 2
+  }
+}

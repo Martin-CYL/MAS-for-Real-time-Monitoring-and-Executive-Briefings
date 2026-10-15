@@ -1,9 +1,0 @@
-dev.nexbriefing.vip {
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:3211
-}
-
-nexbriefing.vip {
-    encode zstd gzip
-    reverse_proxy 127.0.0.1:3210
-}

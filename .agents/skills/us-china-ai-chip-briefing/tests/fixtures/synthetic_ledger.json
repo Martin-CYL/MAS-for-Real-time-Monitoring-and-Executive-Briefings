@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "fixture": true,
+  "author": "fixture-author",
+  "report_date": "2030-01-02",
+  "claims": [
+    {
+      "id": "C001",
+      "text": "演示芯片在合成测试中完成 12 次运算。",
+      "kinds": [
+        "technical"
+      ],
+      "author_status": "supported",
+      "event_date": "2030-01-01",
+      "uncertainty": "仅用于测试，不可当作新闻事实。",
+      "sources": [
+        {
+          "url": "https://fixture.invalid/source",
+          "publication_date": "2030-01-01",
+          "date_checked": "2030-01-02",
+          "quote": "演示芯片在合成测试中完成 12 次运算。",
+          "anchor": "合成来源第 1 段",
+          "evidence_type": "other",
+          "source_role": "primary",
+          "access_status": "opened",
+          "notes": "FICTIONAL FIXTURE; this URL has no live evidence."
+        }
+      ]
+    }
+  ]
+}

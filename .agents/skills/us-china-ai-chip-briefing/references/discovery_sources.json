@@ -1,0 +1,238 @@
+{
+  "_comment": "Discovery starting points for scripts/discover.py. Guidance, not a whitelist: open queries search the whole index, and anything the feeds return is scored on content, not on who published it. Add or remove entries freely. Feeds that refuse access are recorded as blocked and skipped; nothing here bypasses a paywall or access check.",
+  "official_api": [
+    {
+      "id": "fr-bis",
+      "side": "us",
+      "name": "Federal Register: BIS documents",
+      "kind": "fr_api",
+      "params": {
+        "conditions[agencies][]": "industry-and-security-bureau"
+      }
+    },
+    {
+      "id": "fr-terms",
+      "side": "us",
+      "name": "Federal Register: term search",
+      "kind": "fr_api",
+      "terms": [
+        "semiconductor",
+        "export controls China",
+        "entity list",
+        "artificial intelligence",
+        "integrated circuits",
+        "outbound investment"
+      ]
+    },
+    {
+      "id": "doj",
+      "side": "us",
+      "name": "DOJ press releases API",
+      "kind": "doj_api",
+      "pages": 4
+    }
+  ],
+  "official_listing": [
+    {
+      "id": "bis-news",
+      "side": "us",
+      "name": "BIS news",
+      "url": "https://www.bis.gov/news-updates"
+    },
+    {
+      "id": "treasury",
+      "side": "us",
+      "name": "Treasury press releases",
+      "url": "https://home.treasury.gov/news/press-releases"
+    },
+    {
+      "id": "ofac",
+      "side": "us",
+      "name": "OFAC recent actions",
+      "url": "https://ofac.treasury.gov/recent-actions"
+    },
+    {
+      "id": "ustr",
+      "side": "us",
+      "name": "USTR press releases",
+      "url": "https://ustr.gov/about-us/policy-offices/press-office/press-releases"
+    },
+    {
+      "id": "mofcom",
+      "side": "cn",
+      "name": "MOFCOM home (news, policies, spokesperson)",
+      "url": "https://www.mofcom.gov.cn/",
+      "keep_all": true
+    },
+    {
+      "id": "mofcom-xwfb",
+      "side": "cn",
+      "name": "MOFCOM 新闻发布",
+      "url": "https://www.mofcom.gov.cn/xwfb/index.html",
+      "keep_all": true
+    },
+    {
+      "id": "govcn",
+      "side": "cn",
+      "name": "State Council 最新政策",
+      "url": "https://www.gov.cn/zhengce/zuixin/",
+      "keep_all": true
+    },
+    {
+      "id": "govcn-home",
+      "side": "cn",
+      "name": "State Council home",
+      "url": "https://www.gov.cn/",
+      "keep_all": true
+    },
+    {
+      "id": "miit",
+      "side": "cn",
+      "name": "MIIT home",
+      "url": "https://www.miit.gov.cn/",
+      "keep_all": true
+    },
+    {
+      "id": "cac",
+      "side": "cn",
+      "name": "CAC home",
+      "url": "https://www.cac.gov.cn/",
+      "keep_all": true
+    }
+  ],
+  "rss": [
+    {
+      "id": "ft-tech",
+      "side": "other",
+      "name": "Financial Times technology",
+      "url": "https://www.ft.com/technology?format=rss"
+    },
+    {
+      "id": "scmp-tech",
+      "side": "cn",
+      "name": "SCMP big tech",
+      "url": "https://www.scmp.com/rss/320663/feed"
+    },
+    {
+      "id": "nikkei",
+      "side": "other",
+      "name": "Nikkei Asia",
+      "url": "https://asia.nikkei.com/rss/feed/nar"
+    },
+    {
+      "id": "nvidia",
+      "side": "us",
+      "name": "NVIDIA newsroom",
+      "url": "https://nvidianews.nvidia.com/rss.xml"
+    },
+    {
+      "id": "amd",
+      "side": "us",
+      "name": "AMD press releases",
+      "url": "https://ir.amd.com/news-events/press-releases/rss"
+    },
+    {
+      "id": "techcrunch",
+      "side": "us",
+      "name": "TechCrunch",
+      "url": "https://techcrunch.com/feed/"
+    }
+  ],
+  "news_search": {
+    "_comment": "Run through Google News RSS (date-bounded with after:/before:) and Bing News RSS. Results are discovery metadata: titles, publishers and dates as reported by the feed. Aggregator links must be resolved to the original before any claim.",
+    "themes_en": [
+      "chip export controls China",
+      "semiconductor China US",
+      "AI chips China",
+      "entity list Commerce China",
+      "Nvidia China",
+      "Huawei Ascend",
+      "SMIC",
+      "rare earths export China",
+      "China AI model release",
+      "chip smuggling indictment",
+      "TSMC China",
+      "ASML China",
+      "HBM memory China",
+      "AI data center China financing"
+    ],
+    "themes_zh": [
+      "芯片 出口管制",
+      "半导体 美国 中国",
+      "人工智能 大模型 发布",
+      "商务部 出口管制",
+      "工信部 人工智能",
+      "华为 昇腾",
+      "中芯国际",
+      "稀土 出口"
+    ],
+    "outlets": [
+      "reuters.com",
+      "bloomberg.com",
+      "ft.com",
+      "wsj.com",
+      "nikkei.com",
+      "caixinglobal.com",
+      "scmp.com",
+      "apnews.com",
+      "cnbc.com"
+    ],
+    "outlet_query": "China (chip OR semiconductor OR AI OR \"export controls\")",
+    "open_en": [
+      "China technology",
+      "US China trade",
+      "export controls",
+      "semiconductor",
+      "artificial intelligence regulation"
+    ],
+    "open_zh": [
+      "中美 科技",
+      "人工智能",
+      "半导体"
+    ],
+    "official_domains_zh": {
+      "_comment": "Fallback for official sites whose listings are script-rendered or unreachable: a news-index search restricted to the official domain. Results are leads; open the official page itself for evidence.",
+      "domains": [
+        "www.gov.cn",
+        "mofcom.gov.cn",
+        "miit.gov.cn",
+        "cac.gov.cn",
+        "ndrc.gov.cn",
+        "customs.gov.cn",
+        "samr.gov.cn",
+        "csrc.gov.cn"
+      ],
+      "query": "人工智能 OR 芯片 OR 半导体 OR 出口管制 OR 算力 OR 稀土"
+    },
+    "official_domains_en": {
+      "domains": [
+        "commerce.gov",
+        "bis.gov",
+        "whitehouse.gov",
+        "ustr.gov",
+        "treasury.gov",
+        "fcc.gov",
+        "sec.gov",
+        "justice.gov"
+      ],
+      "query": "China (chip OR semiconductor OR \"export controls\" OR AI)"
+    }
+  },
+  "lexicon": {
+    "topic": {
+      "export control|export controls|entity list|sanction|licen[cs]e|smuggl|diversion|tariff|outbound investment|CFIUS|national security": 3,
+      "chip|chips|semiconductor|GPU|accelerator|HBM|DRAM|NAND|memory chip|foundry|wafer|lithography|EUV|DUV|EDA|packaging|fab\\b": 3,
+      "artificial intelligence|\\bAI\\b|large language model|LLM|open-weight|frontier model|data cent(er|re)|compute": 2,
+      "rare earth|gallium|germanium|critical mineral": 2,
+      "出口管制|实体清单|制裁|许可|走私|关税|两用物项|不可靠实体": 3,
+      "芯片|半导体|晶圆|光刻|存储|算力|集成电路|封装|GPU": 3,
+      "人工智能|大模型|智能体|数据中心": 2,
+      "稀土|镓|锗": 2
+    },
+    "china": "China|Chinese|Beijing|Shanghai|Shenzhen|Hong Kong|Huawei|SMIC|Alibaba|Tencent|Baidu|ByteDance|DeepSeek|Cambricon|CXMT|YMTC|Moonshot|Zhipu|MiniMax|Xiaomi|中国|中方|北京|华为|中芯|阿里|腾讯|百度|字节|寒武纪|长鑫|长江存储",
+    "us": "\\bU\\.?S\\.?\\b|United States|American|Washington|Commerce Department|BIS|Trump|Congress|Nvidia|AMD|Intel|Qualcomm|Micron|Applied Materials|Lam Research|KLA|OpenAI|Google|Microsoft|Meta|Amazon|Anthropic|美国|美方|华盛顿|商务部工业与安全局",
+    "third": "TSMC|ASML|Samsung|SK Hynix|Arm\\b|Tokyo Electron|台积电|阿斯麦|三星|海力士",
+    "strong_publishers": "Reuters|Bloomberg|Financial Times|\\bFT\\b|Wall Street Journal|WSJ|Associated Press|\\bAP\\b|Nikkei|South China Morning Post|SCMP|Caixin|财新|Yicai|第一财经|CNBC|The Information|Semiconductor Engineering|EE Times|TechCrunch|Xinhua|新华|人民日报|央视|21世纪经济报道|澎湃|界面|财联社|Tom.s Hardware|TrendForce|DigiTimes|Federal Register|ft\\.com|reuters\\.com|bloomberg\\.com|scmp\\.com|nikkei\\.com|caixin|gov\\.cn",
+    "weak_publishers": "Stocktwits|BigGo|CryptoRank|Crypto|Benzinga|TradingView|GuruFocus|MarketBeat|Seeking Alpha|Investing\\.com|Yahoo|AInvest|Finimize|Intelligent Living|news\\.lavx|Digital Watch|Mexico Business"
+  }
+}

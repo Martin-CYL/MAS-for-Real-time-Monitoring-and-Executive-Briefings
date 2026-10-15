@@ -1,17 +1,12 @@
-# Nex development notes
+# Project instructions for Codex
 
-Nex is a web workspace for research and executive briefings. The React frontend and Bun server communicate over a WebSocket. AgentCoordinator and provider adapters translate agent events into shared transcript snapshots. Codex App Server is the primary configured backend; other adapters remain for compatibility.
-
-- `bun run check`: TypeScript check and client, export-viewer, server builds.
-- `bun test --timeout 15000`: full unit/integration suite.
-- Before declaring code changes validated, run the full test suite and `bun run check`; targeted tests alone are insufficient. Add browser verification for user-facing behavior changes. Report Linux CI and Docker checks separately when they have not run.
-- For a bug fix, replay the original user scenario end to end after the fix and present the result for user acceptance before merging into `test`. Passing automated tests alone is not acceptance.
-- Merging into `main` requires the user's explicit confirmation for that merge. Prepare the PR and report validation results, then wait; do not merge `main` automatically.
-- `bun run dev`: local Vite and backend development.
-- `bun run start:production --host 127.0.0.1 --port 3210 --no-open`: built web server.
-
-Production application data lives in `~/.nex`; the dev profile uses `~/.nex-dev`. Codex state stays in `CODEX_HOME` or `~/.codex`. Do not check credentials, runtime state or user messages into Git. Preserve the upstream LICENSE and attribution in README.md.
-
-There is no desktop application, npm release workflow, automatic application updater or hosted cloud pairing service. Hidden Git/terminal/provider code remains in use by underlying workflows. Keep the existing bilingual UI and local read-only sharing behavior. The core app is a single-workspace service. Optional account-gateway deployments run a separate app container and data directories for each invited user; see docs/accounts.md.
-
-Docker validation is deferred until server deployment. Do not infer that the image works from successful local web tests. Do not modify Skills as part of repository cleanup.
+- Project purpose: improve the reusable `us-china-ai-chip-briefing` workflow and its automated quality checks, not polish one dated report.
+- Read `TASK_FOR_CODEX.md` for the current work item, and consult `.agents/skills/us-china-ai-chip-briefing/SKILL.md` plus its references and scripts when relevant.
+- `examples/V17_reference_2026-10-09.html` is a **historical visual and regression reference**, not current news or an authoritative legal source. Do not overwrite it.
+- Preserve the reporting scope: material US-China AI/semiconductor technology developments AND policy/finance/reputation impacts. Avoid mandatory news categories and issue-specific permanent rules.
+- Treat link checks, acronym checks, and format checks as mechanical QA, not as proof of factual correctness. Never claim a claim has been verified without source-specific evidence.
+- All checks should report PASS / FAIL / UNVERIFIED distinctly. Do not silently pass blocked links or unsupported legal assertions.
+- Add regression tests for each checker you change; run them, and report failures and limitations.
+- Work only with public information; no bank internal or personal data, no external side effects beyond permitted public-source requests.
+- Second round: editorial lessons live in `references/editorial-rules.md`; case follow-ups in `references/active_cases.md`; every report needs `coverage.json` (see `references/coverage.md`). Keep these general; never hard-code a company, list or date into checker logic.
+- **Single base:** this merged package (round 3) is the only base. Do not start from an older zip. Keep every existing check (quote/snapshot, risk tiers, sign-off form, coverage sweep, active cases, editorial rules, date checks, safe network layer) unless a task explicitly says to remove one, and add a regression test for any change.

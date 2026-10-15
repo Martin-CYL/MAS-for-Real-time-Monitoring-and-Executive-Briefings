@@ -2,9 +2,9 @@ import { create } from "zustand"
 import type { Locale } from "../i18n/types"
 
 export const LOCALE_STORAGE_KEY = "nex.locale"
-export const DEFAULT_LOCALE: Locale = "zh-CN"
+export const DEFAULT_LOCALE: Locale = "en"
 export function normalizeLocale(value: unknown): Locale {
-  return value === "en" ? "en" : DEFAULT_LOCALE
+  return value === "en" || value === "zh-CN" ? value : DEFAULT_LOCALE
 }
 function readLocale(): Locale {
   try {

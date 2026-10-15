@@ -12,11 +12,12 @@ import { SETTINGS_ROWS, SETTINGS_SECTIONS } from "../app/settings/registry"
 afterEach(() => useLocaleStore.setState({ locale: "en" }))
 
 describe("Nex locale", () => {
-  test("Chinese default and invalid saved preferences", () => {
-    expect(DEFAULT_LOCALE).toBe("zh-CN")
-    expect(normalizeLocale(null)).toBe("zh-CN")
-    expect(normalizeLocale("unsupported")).toBe("zh-CN")
+  test("English default preserves valid saved preferences", () => {
+    expect(DEFAULT_LOCALE).toBe("en")
+    expect(normalizeLocale(null)).toBe("en")
+    expect(normalizeLocale("unsupported")).toBe("en")
     expect(normalizeLocale("en")).toBe("en")
+    expect(normalizeLocale("zh-CN")).toBe("zh-CN")
   })
   test("catalogues have matching keys and translated placeholders reference valid arguments", () => {
     expect(Object.keys(zhCN).sort()).toEqual(Object.keys(en).sort())
@@ -58,6 +59,6 @@ describe("Nex locale", () => {
     handleLocaleStorage({key:LOCALE_STORAGE_KEY,newValue:"en"})
     expect(useLocaleStore.getState().locale).toBe("en")
     handleLocaleStorage({key:null,newValue:null})
-    expect(useLocaleStore.getState().locale).toBe("zh-CN")
+    expect(useLocaleStore.getState().locale).toBe("en")
   })
 })

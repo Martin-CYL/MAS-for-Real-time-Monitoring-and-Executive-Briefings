@@ -239,8 +239,8 @@ describe("provider catalog normalization", () => {
     expect(applyCodexModels(listed)).toBe(true)
 
     const codex = SERVER_PROVIDERS.find((provider) => provider.id === "codex")
-    // Nex's default survives because the account still has it.
-    expect(codex?.defaultModel).toBe("gpt-5.6-sol")
+    // If the Nex default is absent, use the account default or first model.
+    expect(codex?.defaultModel).toBe("gpt-6-astra")
     expect(codex?.models).toEqual([
       {
         id: "gpt-6-astra",
@@ -349,7 +349,7 @@ describe("provider catalog normalization", () => {
   })
 
   test("normalizes server model ids through the shared alias catalog", () => {
-    expect(normalizeServerModel("codex")).toBe("gpt-5.6-sol")
+    expect(normalizeServerModel("codex")).toBe("gpt-6-sol")
     expect(normalizeServerModel("claude", "fable")).toBe("fable")
     expect(normalizeServerModel("claude", "opus")).toBe("opus")
     // Version-pinned ids persisted by older Nex versions fold into the alias.

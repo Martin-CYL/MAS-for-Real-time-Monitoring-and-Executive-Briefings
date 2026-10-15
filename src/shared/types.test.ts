@@ -67,7 +67,7 @@ describe("shared model normalization", () => {
   })
 
   test("normalizes legacy Codex aliases and defaults to the latest catalog model", () => {
-    expect(normalizeCodexModelId()).toBe("gpt-5.6-sol")
+    expect(normalizeCodexModelId()).toBe("gpt-6-sol")
     expect(normalizeCodexModelId("gpt-5.6")).toBe("gpt-5.6-sol")
     expect(normalizeCodexModelId("gpt-5.6-terra")).toBe("gpt-5.6-terra")
     expect(normalizeCodexModelId("gpt-5.6-luna")).toBe("gpt-5.6-luna")
@@ -75,7 +75,7 @@ describe("shared model normalization", () => {
     // The real list is runtime-discovered (app-server model/list), so an id
     // the static catalog lacks passes through instead of clamping.
     expect(normalizeCodexModelId("gpt-6-astra")).toBe("gpt-6-astra")
-    expect(normalizeCodexModelId("  ")).toBe("gpt-5.6-sol")
+    expect(normalizeCodexModelId("  ")).toBe("gpt-6-sol")
   })
 
   test("normalizes Codex efforts against a live model list when given one", () => {

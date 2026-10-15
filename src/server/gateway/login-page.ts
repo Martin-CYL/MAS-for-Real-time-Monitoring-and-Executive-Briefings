@@ -5,7 +5,7 @@ export function loginPage(reset = false): Response {
   ${reset ? '' : '<label for="email">邮箱 / Email</label><input id="email" type="email" autocomplete="username" required>'}
   <label for="password">${reset ? '新密码 / New password' : '密码 / Password'}</label><input id="password" type="password" autocomplete="${reset ? 'new-password' : 'current-password'}" minlength="12" maxlength="128" required>
   ${reset ? '<label for="confirm">确认密码 / Confirm password</label><input id="confirm" type="password" autocomplete="new-password" minlength="12" maxlength="128" required>' : ''}
-  <button>${reset ? '保存密码 / Save password' : '登录 / Sign in'}</button><p id="message" role="status"></p></form><small>${reset ? '链接有效期为一小时，仅可使用一次。密码至少 12 位。' : '仅限受邀用户。忘记密码？请联系管理员获取一次性设置链接。'}<br>${reset ? 'This link expires in one hour and can be used once.' : 'Invitation only. Contact the administrator to reset your password.'}</small></main><script>
+  <button>${reset ? '保存密码 / Save password' : '登录 / Sign in'}</button><p id="message" role="status"></p></form><small>${reset ? '链接有效期为一小时，仅可使用一次。密码至少 12 位。' : '仅限受邀用户。'}<br>${reset ? 'This link expires in one hour and can be used once.' : 'Invitation only.'}</small></main><script>
   const reset=${reset};const form=document.querySelector('form'),button=document.querySelector('button'),message=document.querySelector('#message');
   form.addEventListener('submit',async e=>{e.preventDefault();message.textContent='';const password=document.querySelector('#password').value;
   if(reset&&password!==document.querySelector('#confirm').value){message.textContent='两次密码不一致 / Passwords do not match';return}

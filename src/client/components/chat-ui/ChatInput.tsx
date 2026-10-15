@@ -1,3 +1,4 @@
+import { isImeKey } from "../../lib/ime-composition"
 import type { NexSocket } from "../../app/socket"
 import { NexModelControls } from "./NexModelControls"
 import { SHOW_DEVELOPER_UI } from "../../config/productFeatures"
@@ -305,6 +306,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [pendingSignInProvider, unauthenticatedHarnesses, composer])
   const [value, setValue] = useState(() => (chatId ? getDraft(chatId) : ""))
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const composingRef = useRef(false)
   const isStandalone = useIsStandalone()
   // Leading/trailing gutter *inside* the controls scroller, standing in for the
   // horizontal padding its wrapper can't have. Standalone keeps the same 32px
@@ -928,6 +930,9 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }
 
   function handleKeyDown(event: React.KeyboardEvent) {
+    // Do not preventDefault: Enter/arrows must still reach the IME.
+    if (isImeKey(event.nativeEvent, composingRef.current)) return
+
     if (skillMenuOpen) {
       // Best match renders at the bottom: ArrowUp walks toward worse matches,
       // ArrowDown back toward the input.
@@ -1236,6 +1241,9 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 setCaretPosition(event.currentTarget.selectionStart ?? 0)
               }}
               onPaste={handlePaste}
+              onCompositionStart={() => { composingRef.current = true }}
+              onCompositionEnd={() => { composingRef.current = false }}
+              onBlur={() => { composingRef.current = false }}
               onKeyDown={handleKeyDown}
               disabled={disabled}
               className="min-w-0 flex-1 text-base p-3 md:p-4 !pr-2 md:pl-6 resize-none max-h-[200px] outline-none bg-transparent border-0 shadow-none placeholder:truncate"

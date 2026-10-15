@@ -111,7 +111,9 @@ export function ResultMessage({ message, nextPromptTimestamp, nextPromptOrigin }
 
   const label = nextPromptTimestamp
     ? formatPromptBoundary(nextPromptTimestamp, nextPromptOrigin)
-    : t("{0} · Worked for {1}", { 0: formatPromptTimestamp(message.timestamp), 1: formatDuration(message.durationMs) })
+    : !Number.isFinite(message.durationMs) || message.durationMs <= 0
+      ? formatPromptTimestamp(message.timestamp)
+      : t("{0} · Worked for {1}", { 0: formatPromptTimestamp(message.timestamp), 1: formatDuration(message.durationMs) })
 
   return <TimeBoundary label={label} />
 }

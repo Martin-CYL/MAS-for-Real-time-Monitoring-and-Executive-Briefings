@@ -95,6 +95,7 @@ interface PendingRequest<TResult> {
 }
 
 interface PendingTurn {
+  startedAt: number
   turnId: string | null
   model: string
   planMode: boolean
@@ -808,11 +809,13 @@ function itemToToolResults(item: ThreadItem): TranscriptEntry[] {
 
 export class CodexAppServerManager {
   private readonly sessions = new Map<string, SessionContext>()
+  private readonly now: () => number
   private readonly spawnProcess: SpawnCodexAppServer
   private onRateLimits: ((snapshot: CodexRateLimitSnapshot) => void) | null = null
   private onTaskActivity: ((chatId: string, update: SubagentActivityUpdate) => void) | null = null
 
-  constructor(args: { spawnProcess?: SpawnCodexAppServer } = {}) {
+  constructor(args: { spawnProcess?: SpawnCodexAppServer; now?: () => number } = {}) {
+    this.now = args.now ?? (() => performance.now())
     this.spawnProcess = args.spawnProcess ?? ((cwd) =>
       spawn("codex", ["app-server"], {
         cwd,
@@ -1062,6 +1065,7 @@ export class CodexAppServerManager {
     queue.push({ type: "transcript", entry: codexSystemInitEntry(args.model) })
 
     const pendingTurn: PendingTurn = {
+      startedAt: this.now(),
       turnId: null,
       model: args.model,
       planMode: args.planMode,
@@ -1863,7 +1867,7 @@ export class CodexAppServerManager {
         kind: "result",
         subtype: isCancelled ? "cancelled" : isError ? "error" : "success",
         isError,
-        durationMs: 0,
+        durationMs: Math.max(1, Math.round(this.now() - pendingTurn.startedAt)),
         result: isError
           ? formatCodexError(notification.turn.error)
             || formatCodexError(pendingTurn.retryCause)
@@ -1912,7 +1916,7 @@ export class CodexAppServerManager {
           kind: "result",
           subtype: "error",
           isError: true,
-          durationMs: 0,
+          durationMs: Math.max(1, Math.round(this.now() - pendingTurn.startedAt)),
           result: message,
         }),
       })

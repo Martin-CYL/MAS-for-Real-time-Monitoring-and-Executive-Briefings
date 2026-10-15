@@ -176,6 +176,7 @@ function getToolRequestPreview(tool: PendingToolRequest["tool"]) {
 }
 
 interface ActiveTurn {
+  startedAt: number
   customTools?: NexToolRuntime
   chatId: string
   provider: AgentProvider
@@ -2115,6 +2116,7 @@ export class AgentCoordinator {
       wireContent = buildHandoffMessageContent(contextBlock.text, wireContent)
     }
 
+    const startedAt = performance.now()
     let turn: HarnessTurn
     if (args.provider === "claude") {
       turn = await this.startClaudeTurn({
@@ -2210,6 +2212,7 @@ export class AgentCoordinator {
     }
 
     const active: ActiveTurn = {
+      startedAt,
       chatId: args.chatId,
       provider: args.provider,
       turn,
@@ -2757,6 +2760,7 @@ export class AgentCoordinator {
    */
   private async resumeBackgroundTurn(session: ClaudeSessionState) {
     const active: ActiveTurn = {
+      startedAt: performance.now(),
       chatId: session.chatId,
       provider: "claude",
       turn: {
@@ -2901,7 +2905,7 @@ export class AgentCoordinator {
             kind: "result",
             subtype: "error",
             isError: true,
-            durationMs: 0,
+            durationMs: Math.max(1, Math.round(performance.now() - active.startedAt)),
             result: message,
           })
         )
@@ -3016,7 +3020,7 @@ export class AgentCoordinator {
             kind: "result",
             subtype: "error",
             isError: true,
-            durationMs: 0,
+            durationMs: Math.max(1, Math.round(performance.now() - active.startedAt)),
             result: message,
           })
         )
@@ -3069,7 +3073,7 @@ export class AgentCoordinator {
               kind: "result",
               subtype: "error",
               isError: true,
-              durationMs: 0,
+              durationMs: Math.max(1, Math.round(performance.now() - active.startedAt)),
               result: message,
             })
           )
@@ -3087,7 +3091,7 @@ export class AgentCoordinator {
               kind: "result",
               subtype: "error",
               isError: true,
-              durationMs: 0,
+              durationMs: Math.max(1, Math.round(performance.now() - active.startedAt)),
               result: message,
             })
           )
@@ -3164,6 +3168,12 @@ export class AgentCoordinator {
       }
     }
 
+    if (active.provider === "codex") {
+      await this.store.appendMessage(chatId, timestamped({
+        kind: "result", subtype: "cancelled", isError: false, result: "", hidden: true,
+        durationMs: Math.max(1, Math.round(performance.now() - active.startedAt)),
+      }))
+    }
     await this.store.appendMessage(chatId, timestamped({ kind: "interrupted", hidden: options?.hideInterrupted }))
     await this.store.recordTurnCancelled(chatId)
     active.cancelRecorded = true

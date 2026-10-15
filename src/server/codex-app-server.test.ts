@@ -2789,3 +2789,36 @@ describe("Codex spawned agents", () => {
     manager.stopAll()
   })
 })
+
+describe("Codex turn elapsed time", () => {
+  for (const outcome of ["completed", "failed", "interrupted", "fatal"] as const) {
+    test(`records elapsed time for ${outcome}, including retry and resetting between turns`, async () => {
+      let now = 1000
+      let turnNumber = 0
+      const child = new FakeCodexProcess((message, process) => {
+        if (message.method === "initialize") process.writeServerMessage({ id: message.id, result: { userAgent: "test" } })
+        if (message.method === "thread/start") process.writeServerMessage({ id: message.id, result: { thread: { id: "thread-time" }, model: "gpt-5.4" } })
+        if (message.method === "turn/start") {
+          turnNumber++
+          process.writeServerMessage({ id: message.id, result: { turn: { id: `turn-${turnNumber}`, status: "in_progress", error: null } } })
+        }
+      })
+      const manager = new CodexAppServerManager({ spawnProcess: () => child as never, now: () => now })
+      await manager.startSession({ chatId: "timed", cwd: "/tmp/project", model: "gpt-5.4", sessionToken: null })
+      for (const duration of outcome === "fatal" ? [2750] : [2750, 850]) {
+        const turn = await manager.startTurn({ chatId: "timed", model: "gpt-5.4", content: "test", planMode: false, onToolRequest: async () => ({}) })
+        now += 500
+        child.writeServerMessage({ method: "error", params: { error: { message: "retry" }, willRetry: true } })
+        now += duration - 500
+        if (outcome === "fatal") child.writeServerMessage({ method: "error", params: { error: { message: "fatal" }, willRetry: false } })
+        else child.writeServerMessage({ method: "turn/completed", params: { threadId: "thread-time", turn: { id: `turn-${turnNumber}`, status: outcome, error: outcome === "failed" ? { message: "failed" } : null } } })
+        const events = await collectStream(turn.stream)
+        const results = events.filter(e => e.type === "transcript" && e.entry.kind === "result")
+        expect(results).toHaveLength(1)
+        expect(results[0].entry.durationMs).toBe(duration)
+        now += 10000 // idle time must not be included in the next turn
+      }
+      manager.stopSession("timed")
+    })
+  }
+})

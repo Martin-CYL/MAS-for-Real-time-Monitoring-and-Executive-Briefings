@@ -1,6 +1,6 @@
 # Nex interface languages
 
-The browser defaults to `zh-CN`, and `nex.locale` persists `zh-CN` or `en`.
+The browser defaults to `en` when no valid preference is saved. `nex.locale` preserves an existing `zh-CN` or `en` choice.
 The General settings language selector updates Zustand and `<html lang>` without
 remounting the application. Storage events synchronise other tabs. Blocked browser
 storage does not prevent in-memory switching.

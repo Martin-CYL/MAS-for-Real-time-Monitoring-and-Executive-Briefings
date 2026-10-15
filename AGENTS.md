@@ -12,6 +12,6 @@ Nex is a web workspace for research and executive briefings. The React frontend 
 
 Production application data lives in `~/.nex`; the dev profile uses `~/.nex-dev`. Codex state stays in `CODEX_HOME` or `~/.codex`. Do not check credentials, runtime state or user messages into Git. Preserve the upstream LICENSE and attribution in README.md.
 
-There is no desktop application, npm release workflow, automatic application updater or hosted cloud pairing service. Hidden Git/terminal/provider code remains in use by underlying workflows. Keep the existing bilingual UI and local read-only sharing behavior. This is currently a single-user service.
+There is no desktop application, npm release workflow, automatic application updater or hosted cloud pairing service. Hidden Git/terminal/provider code remains in use by underlying workflows. Keep the existing bilingual UI and local read-only sharing behavior. The core app is a single-workspace service. Optional account-gateway deployments run a separate app container and data directories for each invited user; see docs/accounts.md.
 
 Docker validation is deferred until server deployment. Do not infer that the image works from successful local web tests. Do not modify Skills as part of repository cleanup.

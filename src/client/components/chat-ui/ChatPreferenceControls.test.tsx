@@ -43,12 +43,12 @@ describe("ChatPreferenceControls", () => {
     expect(html).not.toContain("Fast Mode")
   })
 
-  test("renders Ultra as a reasoning level for supported GPT-5.6 models", () => {
+  test("renders Ultra as a reasoning level for supported GPT-6 models", () => {
     const html = renderToStaticMarkup(
       <ChatPreferenceControls
         availableProviders={PROVIDERS}
         selectedProvider="codex"
-        model="gpt-5.6-sol"
+        model="gpt-6-sol"
         modelOptions={{ reasoningEffort: "ultra", fastMode: false }}
         onProviderChange={() => {}}
         onModelChange={() => {}}
@@ -57,7 +57,7 @@ describe("ChatPreferenceControls", () => {
       />
     )
 
-    expect(html).toContain("GPT-5.6 Sol")
+    expect(html).toContain("GPT-6 Sol")
     expect(html).toContain("Ultra")
   })
 

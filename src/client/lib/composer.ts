@@ -1,6 +1,7 @@
 import { t } from "../i18n/translate"
 import {
   chatModeFromFlags,
+  isRetiredCodexModel,
   CLAUDE_CONTEXT_WINDOW_OPTIONS,
   CLAUDE_REASONING_OPTIONS,
   getCodexReasoningOptions,
@@ -156,6 +157,7 @@ export interface ComposerView {
   selectedProvider: AgentProvider
   /** Effective preferences — render/submit from this. */
   effectiveState: ComposerState
+  retiredModelReplaced: boolean
   /** Catalog entry for the selected provider (models incl. runtime-discovered). */
   providerConfig: ProviderCatalogEntry | undefined
   /** The only models that may be selected for this chat. */
@@ -183,9 +185,13 @@ export function deriveComposerView(args: {
   // Without an explicit switch, a stored state whose provider disagrees with
   // the chat's session (e.g. seeded from defaults) defers to the session's
   // provider — same fallback as before switching existed.
-  const effectiveState = providerSwitchPending
+  let effectiveState = providerSwitchPending
     ? args.composerState
     : getEffectiveComposerState(args.composerState, args.activeProvider, args.providerDefaults, args.chatModel)
+  const retiredModelReplaced = effectiveState.provider === "codex" && isRetiredCodexModel(effectiveState.model)
+  if (retiredModelReplaced) {
+    effectiveState = { ...effectiveState, model: "gpt-6-sol", modelOptions: { ...effectiveState.modelOptions, reasoningEffort: "medium", fastMode: false } } as ComposerState
+  }
   const selectedProvider = effectiveState.provider
   const providerConfig = args.availableProviders.find((provider) => provider.id === selectedProvider)
     ?? args.availableProviders[0]
@@ -197,8 +203,10 @@ export function deriveComposerView(args: {
     canChangeProvider: true,
     selectedProvider,
     effectiveState,
+    retiredModelReplaced,
     providerConfig,
-    models: providerConfig?.models ?? [],
+    models: selectedProvider === "codex" && providerConfig?.models.some(model => isRetiredCodexModel(model.id))
+      ? providerConfig.models.filter(model => !isRetiredCodexModel(model.id)) : providerConfig?.models ?? [],
     supportsPlanMode: providerConfig?.supportsPlanMode ?? false,
     supportsAutoPlanMode: providerConfig?.supportsAutoPlanMode ?? false,
   }

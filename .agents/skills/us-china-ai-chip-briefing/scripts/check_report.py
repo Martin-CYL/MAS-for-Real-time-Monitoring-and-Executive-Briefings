@@ -10,7 +10,8 @@ from qa_common import finding, emit, exit_code
 
 MONTHS = {m: i+1 for i,m in enumerate('JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC'.split())}
 # Presentation labels only. Technical/agency abbreviations are not globally exempt.
-COMMON_OK = set('AI HTML PDF FIGURE EXECUTIVE RISK TECHNOLOGY BRIEFING MONITORING STATUS GLOSSARY APPENDIX MANAGEMENT VIEW SEMICONDUCTOR INTELLIGENCE PUBLIC SOURCE PUBLIC-SOURCE DEMO OCT SEP NOV DEC JAN FEB MAR APR MAY JUN JUL AUG USD CNY RMB'.split())
+# Abbreviations any English-reading finance audience knows; technical and agency acronyms still need a first-use explanation.
+COMMON_OK = set('US UK EU UN CEO CFO GDP IPO AI HTML PDF FIGURE EXECUTIVE RISK TECHNOLOGY BRIEFING MONITORING STATUS GLOSSARY APPENDIX MANAGEMENT VIEW SEMICONDUCTOR INTELLIGENCE PUBLIC SOURCE PUBLIC-SOURCE DEMO OCT SEP NOV DEC JAN FEB MAR APR MAY JUN JUL AUG USD CNY RMB'.split())
 PROCESS = ('上一版','本版','本期补入','修订版','草稿','初稿','审稿','根据反馈','因此保留','本章补','新增主线')
 
 
@@ -18,7 +19,8 @@ def dates_in(text):
     found=[]
     patterns=[(r'(\d{4})[-./](\d{1,2})[-./](\d{1,2})',lambda m:(int(m[1]),int(m[2]),int(m[3]))),
               (r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日',lambda m:(int(m[1]),int(m[2]),int(m[3]))),
-              (r'(?<!\d)(\d{1,2})\s+('+'|'.join(MONTHS)+r')\s+(\d{4})(?!\d)',lambda m:(int(m[3]),MONTHS[m[2].upper()],int(m[1])))]
+              (r'(?<!\d)(\d{1,2})\s+('+'|'.join(MONTHS)+r')[a-z]*\.?\s+(\d{4})(?!\d)',lambda m:(int(m[3]),MONTHS[m[2].upper()],int(m[1]))),
+              (r'\b('+'|'.join(MONTHS)+r')[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})(?!\d)',lambda m:(int(m[3]),MONTHS[m[1][:3].upper()],int(m[2])))]
     for pat,parts in patterns:
         for m in re.finditer(pat,text,re.I):
             try:
@@ -50,7 +52,17 @@ def first_use_explained(text, pos, term):
         return True
     if re.search(r'[\u4e00-\u9fff]{4,}[^。；\n]{0,20}[（(]\s*$',before) and re.match(r'\s*[）)]',after):
         return True
-    return bool(re.match(r'\s*[:：]\s*[\u4e00-\u9fff]{2}',after))
+    if re.match(r'\s*[:：]\s*[\u4e00-\u9fff]{2}',after):
+        return True
+    # English: "Bureau of Industry and Security (BIS)", "BIS (the US export-control agency)", "BIS: the US ..."
+    words=r"[A-Za-z][A-Za-z'’.-]*"
+    if re.search(words+r'(?:\s+'+words+r'){1,}\s*\(\s*$',before) and re.match(r'\s*\)',after):
+        return True
+    if re.match(r'\s*\(\s*'+words+r'(?:\s+'+words+r'){1,}[^)]*\)',after):
+        return True
+    if re.search(r'(?:known as|hereafter|referred to as|called)\s+["“]?\s*$',before,re.I):
+        return True
+    return bool(re.match(r'\s*:\s*'+words+r'\s+'+words,after))
 
 
 def validate_report(raw, expected_date=None, glossary=None):
@@ -59,12 +71,15 @@ def validate_report(raw, expected_date=None, glossary=None):
     def add(status,code,msg,**kw):
         items.append(finding(status,code,msg,**kw))
     segments=doc.visible_segments()
-    text=''.join(s for s,_ in segments)
-    offsets=[]
-    offset=0
+    # Adjacent elements ("<b>Title</b>HBM ...") would otherwise fuse Latin words; a space is added only between two
+    # Latin letters/digits, so Chinese text is unchanged.
+    parts,offsets,offset=[],[],0
     for s,n in segments:
+        if parts and parts[-1][-1:].isascii() and parts[-1][-1:].isalnum() and s[:1].isascii() and s[:1].isalnum():
+            parts.append(' '); offset+=1
         offsets.append((offset,offset+len(s),n))
-        offset+=len(s)
+        parts.append(s); offset+=len(s)
+    text=''.join(parts)
     def node_at(pos):
         return next((n for a,b,n in offsets if a<=pos<b),doc.root)
 
@@ -88,7 +103,7 @@ def validate_report(raw, expected_date=None, glossary=None):
         regions['masthead']=' '.join(n.text() for n in strong)
     issues=doc.selected('issue')
     if issues:
-        regions['issue']=' '.join(n.text() for n in issues).split('资料截至')[0].split('数据截至')[0]
+        regions['issue']=re.split(r'资料截至|数据截至|(?i:data as of|information cutoff)',' '.join(n.text() for n in issues))[0]
     foot=[n for n in doc.nodes if n.tag=='footer']
     if foot:
         regions['footer']=' '.join(n.text() for n in foot)
@@ -195,7 +210,9 @@ def validate_report(raw, expected_date=None, glossary=None):
         add('FAIL','CHAPTER_SEQUENCE',f'Chapter labels: {chapters}')
 
     # Map actual legend entries by dot class, accepting V17 wording variations.
-    states={'confirmed':r'(官方|政府|公司).*(公告|声明)', 'reported':r'(媒体|未经|尚未).*?(报道|核验|验证|数据)', 'pending':r'(拟议|待审批|待生效)'}
+    states={'confirmed':r'(官方|政府|公司).*(公告|声明)|(?i:(official|government|company).*(announcement|statement|document|filing))',
+            'reported':r'(媒体|未经|尚未).*?(报道|核验|验证|数据)|(?i:media|not independently|unconfirmed|unverified|reported)',
+            'pending':r'(拟议|待审批|待生效)|(?i:proposed|pending|awaiting|not yet in force)'}
     legends=doc.selected('status-key')
     mapped={}
     for legend in legends:
@@ -218,7 +235,7 @@ def validate_report(raw, expected_date=None, glossary=None):
         declared=n.attrs.get('data-evidence-status')
         if declared and declared!=state:
             add('FAIL','STATUS_MISMATCH',f'Class {state} differs from data-evidence-status {declared}',line=n.line)
-        if state=='confirmed' and re.fullmatch(r'\s*(?:媒体报道|未经独立验证|尚未核验)\s*',n.text()):
+        if state=='confirmed' and re.fullmatch(r'\s*(?:媒体报道|未经独立验证|尚未核验|(?i:media reports?|not independently (?:verified|confirmed)|unverified))\s*',n.text()):
             add('FAIL','STATUS_MISMATCH','Confirmed label explicitly says unverified/reporting',line=n.line)
     if re.search(r'\.st\.pending\s*:{1,2}before\s*\{[^}]*var\(\s*--red\s*\)',raw):
         add('FAIL','STATUS_COLOUR','Pending uses red rather than slate')
@@ -243,10 +260,11 @@ def validate_report(raw, expected_date=None, glossary=None):
 # Sections a reader relies on. Detected from visible wording and real elements, not only
 # from template class names, so a report written with its own HTML cannot skip them.
 REQUIRED_SECTIONS = (
-    ('本期三个判断', lambda doc, text: '三个判断' in text, 'three headline judgments ("本期三个判断")'),
-    ('事件状态表', lambda doc, text: any(n.tag == 'table' for n in doc.nodes) and bool(re.search(r'事件状态|MONITORING STATUS', text)),
+    ('本期三个判断', lambda doc, text: '三个判断' in text or bool(re.search(r'(?i)(three|key) (key )?judg(e)?ments', text)),
+     'three headline judgments ("Three key judgments" / "本期三个判断")'),
+    ('事件状态表', lambda doc, text: any(n.tag == 'table' for n in doc.nodes) and bool(re.search(r'事件状态|(?i:monitoring status|event status)', text)),
      'event status table (<table> under "事件状态 / MONITORING STATUS")'),
-    ('管理层参考', lambda doc, text: bool(re.search(r'管理层参考|MANAGEMENT VIEW', text)), 'management view ("管理层参考")'),
+    ('管理层参考', lambda doc, text: bool(re.search(r'管理层参考|(?i:management view)', text)), 'management view ("Management view" / "管理层参考")'),
 )
 VERIFIED_WORDS = r'已验证|已核实|已核验|经核实|(?i:\bfully verified\b|\bverified\b)'
 
@@ -263,7 +281,8 @@ def required_structure(doc, text, legend_map):
                              'No template status labels (class "st confirmed|reported|pending"); custom badges are not checked against the legend'))
     if has_stories and not legend_map:
         items.append(finding('FAIL', 'SECTION_MISSING', 'No machine-readable status legend (.status-key with dot classes g/a/s)', field='状态图例'))
-    hits = list(re.finditer(VERIFIED_WORDS, text))
+    hits = [m for m in re.finditer(VERIFIED_WORDS, text)
+            if not re.search(r'(?i)(\bnot|\bnever|\bun|\byet to be|\bcannot be|\bcould not be)\W*(?:\w+\W+){0,2}$', text[max(0, m.start() - 30):m.start()])]
     if hits:
         words = sorted({m[0] for m in hits})
         items.append(finding('FAIL', 'VERIFIED_WORDING',

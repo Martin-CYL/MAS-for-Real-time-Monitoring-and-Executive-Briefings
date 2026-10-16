@@ -110,13 +110,28 @@ def validate_dates(raw,ledger,review=None,now=None):
     # Never infer the missing year in legacy masthead cutoff prose.
     issues=Document(raw).selected('issue')
     for node in issues:
-        m=re.search(r'(?:资料|数据|信息)截至\s*(.*)',node.text())
+        m=re.search(r'(?:资料|数据|信息)截至\s*(.*)|(?i:data as of|information cutoff:?)\s*(.*)',node.text())
         if not m:continue
-        full=re.match(r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日',m[1])
-        iso=re.match(DATE_RE,m[1])
-        partial=re.match(r'(\d{1,2})\s*月\s*(\d{1,2})\s*日',m[1])
+        val=m[1] if m[1] is not None else m[2]
+        full=re.match(r'(\d{4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日',val)
+        iso=re.match(DATE_RE,val)
+        partial=re.match(r'(\d{1,2})\s*月\s*(\d{1,2})\s*日',val)
+        # English: "October 15, 2026", "15 October 2026", or month and day only
+        mon=r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?'
+        en_full=re.match(mon+r'\s+(\d{1,2}),?\s+(\d{4})',val,re.I) or re.match(r'(\d{1,2})\s+'+mon+r'\s+(\d{4})',val,re.I)
+        en_part=re.match(mon+r'\s+(\d{1,2})\b',val,re.I) or re.match(r'(\d{1,2})\s+'+mon+r'\b',val,re.I)
+        months='jan feb mar apr may jun jul aug sep oct nov dec'.split()
+        def en_parts(mm):
+            g=mm.groups()
+            return (months.index(g[0][:3].lower())+1,int(g[1])) if not g[0].isdigit() else (months.index(g[1][:3].lower())+1,int(g[0]))
         expected=None
         try:
+            if en_full:
+                mo,dy=en_parts(en_full); expected=date(int(en_full.groups()[-1]),mo,dy)
+            elif en_part and not full and not iso and not partial and cutoff:
+                z=zone_of(zone); localday=cutoff.start.astimezone(z).date()
+                if (localday.month,localday.day)!=en_parts(en_part):
+                    add('FAIL','HTML_CUTOFF_MISMATCH','Visible cutoff month/day differs from ledger.cutoff; align the issue metadata','cutoff',line=node.line)
             if full:expected=date(int(full[1]),int(full[2]),int(full[3]))
             elif iso:expected=date.fromisoformat(iso[0])
             elif partial and cutoff:

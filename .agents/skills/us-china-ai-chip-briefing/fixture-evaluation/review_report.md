@@ -1,6 +1,6 @@
 # 质量检查与人工签核报告
 
-- 生成时间（UTC）：2026-10-14T18:48:09.695745+00:00
+- 生成时间（UTC）：2026-10-15T02:14:38.502898+00:00
 - 总体状态：**FAIL**；不等于事实全部核验。
 - HTML SHA-256：`3954dc857d70be3961f492b4c9a45d87013bd5c1630122bac38ece767fa3a37f`
 - 台账 SHA-256：`94302655cb262f98b20b770db5d2cf9d3abd2ccda6a086fc0371789c3040bc73`
@@ -33,9 +33,9 @@
 
 | # | 类别 | 代码 | 定位 | 涉及文字 | 怎么做 |
 |---:|---|---|---|---|---|
-| 1 | 规则违反（必须修正） | SECTION_MISSING | 本期三个判断 | — | Add the missing section, copied from assets/template.html. （Required section missing: three headline judgments ("本期三个判断")） |
+| 1 | 规则违反（必须修正） | SECTION_MISSING | 本期三个判断 | — | Add the missing section, copied from assets/template.html. （Required section missing: three headline judgments ("Three key judgments" / "本期三个判断")） |
 | 2 | 规则违反（必须修正） | SECTION_MISSING | 事件状态表 | — | Add the missing section, copied from assets/template.html. （Required section missing: event status table (<table> under "事件状态 / MONITORING STATUS")） |
-| 3 | 规则违反（必须修正） | SECTION_MISSING | 管理层参考 | — | Add the missing section, copied from assets/template.html. （Required section missing: management view ("管理层参考")） |
+| 3 | 规则违反（必须修正） | SECTION_MISSING | 管理层参考 | — | Add the missing section, copied from assets/template.html. （Required section missing: management view ("Management view" / "管理层参考")） |
 | 4 | 规则违反（必须修正） | DATE_CONFLICT | — | — | Report-date mismatch: {'masthead': '2030-01-02', 'issue': '2030-01-03', 'footer': '2030-01-02', 'title': '2030-01-02', 'annotation:line2': '2030-01-02'} |
 | 5 | 规则违反（必须修正） | FIGURE_DUPLICATE | — | — | Duplicate figure labels: [1, 1, 3] |
 | 6 | 规则违反（必须修正） | FIGURE_SEQUENCE | — | — | Expected labels in order 1..3; found [1, 1, 3] |
@@ -44,12 +44,12 @@
 | 9 | 规则违反（必须修正） | QUOTE_NOT_FOUND | C001 | — | Copy the quote verbatim from the saved page text; never retype or translate it. （Page fetched (HTTP 200) but the recorded quote is not on it (best match 5%). Quote may be invented or from another page） |
 | 10 | 规则违反（必须修正） | QUOTE_NOT_FOUND | C002 | — | Copy the quote verbatim from the saved page text; never retype or translate it. （Page fetched (HTTP 200) but the recorded quote is not on it (best match 0%). Quote may be invented or from another page） |
 | 11 | 规则违反（必须修正） | CLAIM_UNSUPPORTED | C002 | — | 来源没有任何法律文本、管辖范围或生效日期，不能支持全球证券禁令；作者 supported 标签不可信。 |
-| 12 | 作者可立即修正 | FIRST_USE | XYZ | — | Explain this term at its first visible use, e.g. "美国商务部工业与安全局（BIS）". （XYZ: explain at first visible use; later glossary does not count） |
+| 12 | 作者可立即修正 | FIRST_USE | XYZ | — | Explain this term at its first visible use, e.g. "the US Bureau of Industry and Security (BIS)". （XYZ: explain at first visible use; later glossary does not count） |
 | 13 | 作者可立即修正 | DATE_ORDER_AMBIGUOUS | review.signoff.date | — | 2030-01-02 and 2030-01-02 overlap at recorded precision; add source-backed time/offset if ordering matters |
 | 14 | 证据缺失或不足 | COVERAGE_SWEEP_MISSING | — | — | Create coverage.json and record every candidate event and every active case with a decision. （No coverage.json: nobody can tell which major events were considered and left out） |
 | 15 | 证据缺失或不足 | DATE_UNKNOWN | cutoff | — | Date is unknown; obtain it from the source or keep UNVERIFIED |
 | 16 | 证据缺失或不足 | SYNTHETIC_FIXTURE | — | — | Synthetic fixture; not a news report or release candidate |
-| 17 | 证据缺失或不足 | PRIMARY_LEGAL_SOURCE | C002 | — | Add the official instrument or list record (Federal Register, court filing, ministry notice) as a primary source. If it cannot be obtained, keep the claim worded as 据报, say in the report that the original was not obtained, and leave this for the reviewer. （Legal/list conclusion needs applicable original instrument or list record） |
+| 17 | 证据缺失或不足 | PRIMARY_LEGAL_SOURCE | C002 | — | Add the official instrument or list record (Federal Register, court filing, ministry notice) as a primary source. If it cannot be obtained, keep the claim attributed ("reportedly", "according to …"), say in the report that the original was not obtained, and leave this for the reviewer. （Legal/list conclusion needs applicable original instrument or list record） |
 | 18 | 来源无法自动访问（不代表来源错误） | BLOCKED | https://fixture.invalid/blocked | — | Not proof the source is wrong: the site refused automated access. Use a browser copy or an alternative source. （HTTP response only; source support not checked） |
 | 19 | 等待最终人工签核 | COVERAGE_REVIEW | — | — | Human must check all material facts, including facts without claim markers |
 | 20 | 等待最终人工签核 | HUMAN_SIGNOFF | — | — | Final human sign-off pending; no automatic VERIFIED label |
@@ -62,9 +62,9 @@
 | UNVERIFIED | FIRST_USE | line 4 | XYZ: explain at first visible use; later glossary does not count |
 | FAIL | FIGURE_DUPLICATE | — | Duplicate figure labels: [1, 1, 3] |
 | FAIL | FIGURE_SEQUENCE | — | Expected labels in order 1..3; found [1, 1, 3] |
-| FAIL | SECTION_MISSING | 本期三个判断 | Required section missing: three headline judgments ("本期三个判断") |
+| FAIL | SECTION_MISSING | 本期三个判断 | Required section missing: three headline judgments ("Three key judgments" / "本期三个判断") |
 | FAIL | SECTION_MISSING | 事件状态表 | Required section missing: event status table (<table> under "事件状态 / MONITORING STATUS") |
-| FAIL | SECTION_MISSING | 管理层参考 | Required section missing: management view ("管理层参考") |
+| FAIL | SECTION_MISSING | 管理层参考 | Required section missing: management view ("Management view" / "管理层参考") |
 | FAIL | STATUS_LABELS_MISSING | — | No template status labels (class "st confirmed\|reported\|pending"); custom badges are not checked against the legend |
 | PASS | MECHANICAL_COMPLETE | — | Mechanical scan completed; missing facts and semantic status require reviewer |
 | UNVERIFIED | BLOCKED | https://fixture.invalid/blocked | HTTP response only; source support not checked |

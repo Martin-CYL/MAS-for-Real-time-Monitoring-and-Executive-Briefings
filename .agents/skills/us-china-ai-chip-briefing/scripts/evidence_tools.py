@@ -196,9 +196,9 @@ def add_claim(run, source_id, quote, text, kinds=None, evidence_type=None, role=
                                 'If it is the company\'s own newsroom or investor page, rerun with --type company_statement; '
                                 'if it is a news outlet, use --type news and start the text with 据…报道.']
     srole = role or auto_role or ('primary' if etype in ('official_document', 'company_statement', 'dataset') else 'secondary')
-    if etype == 'news' and not re.search(r'据|报道|称', text):
+    if etype == 'news' and not re.search(r'据|报道|称|(?i:reportedly|according to|reported|said|says|told)', text):
         return None, [f'{source_id} is a news source, so the claim must be attributed: start the text with '
-                      f'"据{source_name or src["host"]}报道，…". Nothing was written.']
+                      f'"According to {source_name or src["host"]}, …". Nothing was written.']
     ledger = _load(run / 'evidence_ledger.json', None)
     if ledger is None:
         return None, ['evidence_ledger.json missing; run brief.py init first']

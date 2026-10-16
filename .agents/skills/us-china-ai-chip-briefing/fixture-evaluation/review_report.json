@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-10-14T18:48:09.695745+00:00",
+  "generated_at": "2026-10-15T02:14:38.502898+00:00",
   "report_sha256": "3954dc857d70be3961f492b4c9a45d87013bd5c1630122bac38ece767fa3a37f",
   "ledger_sha256": "94302655cb262f98b20b770db5d2cf9d3abd2ccda6a086fc0371789c3040bc73",
   "validation_clock": "2030-01-02T18:00:00+00:00",
@@ -34,7 +34,7 @@
       {
         "status": "FAIL",
         "code": "SECTION_MISSING",
-        "message": "Required section missing: three headline judgments (\"本期三个判断\")",
+        "message": "Required section missing: three headline judgments (\"Three key judgments\" / \"本期三个判断\")",
         "field": "本期三个判断"
       },
       {
@@ -46,7 +46,7 @@
       {
         "status": "FAIL",
         "code": "SECTION_MISSING",
-        "message": "Required section missing: management view (\"管理层参考\")",
+        "message": "Required section missing: management view (\"Management view\" / \"管理层参考\")",
         "field": "管理层参考"
       },
       {

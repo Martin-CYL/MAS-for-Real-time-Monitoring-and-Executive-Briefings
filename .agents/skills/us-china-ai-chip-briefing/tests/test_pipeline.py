@@ -209,7 +209,7 @@ class PipelineTests(unittest.TestCase):
     def test_news_claim_must_be_attributed(self):
         eid = self.complete(url='https://www.reuters.com/x')
         code, out = self.call('add-claim', str(self.run_dir), eid, 'S001', '--quote', '合成机构今日发布合成规则', '--text', '合成机构发布合成规则。')
-        self.assertEqual(code, 1); self.assertIn('据', out)
+        self.assertEqual(code, 1); self.assertIn('According to', out)
 
     def test_blocked_source_cannot_carry_a_claim_but_event_stays(self):
         r = str(self.run_dir)

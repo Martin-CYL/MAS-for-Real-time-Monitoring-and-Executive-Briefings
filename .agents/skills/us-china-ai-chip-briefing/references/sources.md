@@ -28,7 +28,7 @@ events are `track`, not `exclude`.
 - Weak by default: product launches, benchmarks and earnings **without** a US-China link. Record them as
   `excluded` with a reason, or put one line in the appendix. Do not fill the report with them because they are easy
   to find.
-- Major events stay in even if hard to source: report them as 据报 with the limitation stated, never drop them silently.
+- Major events stay in even if hard to source: report them as attributed ("reportedly", "according to …") with the limitation stated, never drop them silently.
 
 ## 3. Primary channels (examples; extend freely)
 
@@ -74,7 +74,7 @@ patent and list challenges), rare earths and critical minerals, and data-centre 
 
 | Outlet type | Examples | How to treat |
 |---|---|---|
-| Wire and financial press | Reuters, Bloomberg, Financial Times, WSJ, AP, Nikkei Asia | Strong original reporting; often paywalled or 403 to scripts. Say 据路透社报道 when it is the only source. |
+| Wire and financial press | Reuters, Bloomberg, Financial Times, WSJ, AP, Nikkei Asia | Strong original reporting; often paywalled or 403 to scripts. Say "according to Reuters" when it is the only source. |
 | Greater China | Caixin 财新, SCMP, Yicai 第一财经, 21st Century Business Herald, The Paper 澎湃, Jiemian 界面, CLS 财联社, 36Kr | Good for China-side detail; check who the original source is. |
 | Trade and tech | The Information, Semiconductor Engineering, EE Times, DigiTimes, TrendForce, TechCrunch, Tom's Hardware | Technical context; label analysis and estimates as such. |
 
@@ -87,6 +87,6 @@ A claim is not verified because a major outlet printed it: for legal, list and p
 1. Try the official API or a listing/print version (Federal Register API; ministry listing pages).
 2. Try a reprint by the same body or an official outlet (gov.cn or Xinhua reprinting a ministry document).
 3. Open it in a browser, save the visible text to a file and register it: `brief.py fetch RUN URL --file PAGE.txt` (recorded as browser reading).
-4. Use a second, independent report and write 据报.
+4. Use a second, independent report and attribute the fact ("reportedly").
 5. Otherwise record the source with `access_status: "blocked"` and an empty quote; the claim stays unverified and the
    report says the original could not be obtained. **A 403 or timeout is never evidence that a claim is false.**

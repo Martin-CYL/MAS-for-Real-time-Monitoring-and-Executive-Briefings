@@ -1,19 +1,19 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"/><meta content="width=device-width,initial-scale=1" name="viewport"/>
-<title>中美 AI 与半导体风险情报简报｜{{YYYY.MM.DD}}</title>
+<html lang="en"><head><meta charset="utf-8"/><meta content="width=device-width,initial-scale=1" name="viewport"/>
+<title>US-China AI &amp; Semiconductor Risk Briefing | {{YYYY.MM.DD}}</title>
 <!--
   TEMPLATE RULES
   - Replace every {{...}} placeholder. Delete any block you do not need.
   - Copy component blocks (story, compactstory, matrix-panel, policy-timeline, data-figure) as many times as needed.
-  - Status classes: st confirmed (green, 官方或公司正式公告) / st reported (amber, 媒体报道或未经独立验证) / st pending (blue-grey, 拟议/待审批/待生效).
-  - Mark explained terms: <abbr class="term" title="解释">术语</abbr>
+  - Status classes: st confirmed (green, Official or company announcement) / st reported (amber, Media report, not independently confirmed) / st pending (blue-grey, Proposed, pending approval or not yet in force).
+  - Mark explained terms: <abbr class="term" title="plain-English explanation">TERM</abbr>
   - Wrap each material factual claim in a span with data-claim-id; exact span text must match evidence_ledger.json.
   - Use separate claim IDs for independently checkable facts. Source hyperlinks are not verification.
   - Keep quality review / human sign-off in sidecar files, never in the executive report.
   - Never mention drafts or versions anywhere in this file.
 -->
 <style>
-:root{--red:#b80f2a;--ink:#202227;--muted:#777a7f;--line:#dddddc;--line2:#ecebea;--canvas:#f2f1ef;--light:#f8f7f5;--green:#366453;--amber:#b07a37;--slate:#708ba0;--serif:'Noto Serif CJK SC','Songti SC','Source Han Serif SC','SimSun',Georgia,serif;--sans:'Noto Sans CJK SC','PingFang SC','Microsoft YaHei','Helvetica Neue',Arial,sans-serif}
+:root{--red:#b80f2a;--ink:#202227;--muted:#777a7f;--line:#dddddc;--line2:#ecebea;--canvas:#f2f1ef;--light:#f8f7f5;--green:#366453;--amber:#b07a37;--slate:#708ba0;--serif:Georgia,'Times New Roman','Noto Serif CJK SC','Songti SC',serif;--sans:'Noto Sans CJK SC','PingFang SC','Microsoft YaHei','Helvetica Neue',Arial,sans-serif}
 *{box-sizing:border-box}html{scroll-behavior:smooth}
 body{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.75 var(--sans);-webkit-font-smoothing:antialiased}
 a{color:inherit;text-decoration:none}a:hover{color:var(--red)}a:focus-visible,button:focus-visible{outline:2px solid var(--red);outline-offset:3px}
@@ -121,83 +121,83 @@ footer{border-top:1px solid var(--line);padding:16px 0 22px;display:flex;justify
 .story,.compactstory,.matrix-table tr,.checkrow,.tl-cell{break-inside:avoid}h2,h3,.kicker{break-after:avoid}.term{border-bottom:0}}
 </style></head><body><div class="sheet"><div class="inner">
 
-<header class="mast"><div class="identity"><div aria-hidden="true" class="mark"><span></span><span></span><span></span><span></span></div><p>中美 AI 与半导体观察 <small>AI &amp; SEMICONDUCTOR RISK INTELLIGENCE</small></p></div>
-<div class="mastmeta"><span>政策 · 企业声誉 · 技术竞争 · 资本市场</span><strong data-report-date="{{YYYY-MM-DD}}">{{YYYY.MM.DD}}</strong><button class="print" onclick="window.print()">打印 / PDF ↗</button></div></header>
+<header class="mast"><div class="identity"><div aria-hidden="true" class="mark"><span></span><span></span><span></span><span></span></div><p>US-China AI &amp; Semiconductor Monitor <small>AI &amp; SEMICONDUCTOR RISK INTELLIGENCE</small></p></div>
+<div class="mastmeta"><span>Policy · Reputation · Technology · Capital markets</span><strong data-report-date="{{YYYY-MM-DD}}">{{YYYY.MM.DD}}</strong><button class="print" onclick="window.print()">Print / PDF ↗</button></div></header>
 
 <section class="hero"><div>
-<p class="issue">EXECUTIVE RISK &amp; TECHNOLOGY BRIEFING / {{YYYY 年 M 月 D 日}} / 资料截至 {{M 月 D 日}}</p>
-<h1>{{论点前半句}}，<em>{{论点后半句}}</em></h1>
-<p class="deck">{{2–3 句：本期发生了什么变化、为什么重要。不要写"本报告……"。}}</p>
-<p class="readpath">3 分钟阅读：本期三个判断 → 事件状态表 → 管理层参考</p>
-</div><aside class="hero-side"><p class="smallhead">管理层关注的三个问题</p>
-<p class="q"><b>01</b>{{问题}}</p><p class="q"><b>02</b>{{问题}}</p><p class="q"><b>03</b>{{问题}}</p>
-<p class="tiny">公开资料情报简报；不使用任何金融机构的内部客户信息、授信记录或敞口数据。</p></aside></section>
+<p class="issue">EXECUTIVE RISK &amp; TECHNOLOGY BRIEFING / {{Month D, YYYY}} / Data as of {{Month D, YYYY}}</p>
+<h1>{{Thesis, first half}}, <em>{{thesis, second half}}</em></h1>
+<p class="deck">{{2–3 sentences: what changed in this period and why it matters. Do not write "This report…".}}</p>
+<p class="readpath">3-minute read: Three key judgments → Event status → Management view</p>
+</div><aside class="hero-side"><p class="smallhead">Three questions for management</p>
+<p class="q"><b>01</b>{{Question}}</p><p class="q"><b>02</b>{{Question}}</p><p class="q"><b>03</b>{{Question}}</p>
+<p class="tiny">Public-source intelligence briefing; uses no internal client, credit or exposure data of any financial institution.</p></aside></section>
 
-<section class="takeaways"><div class="label">本期三个判断</div>
-<div class="summary"><b>{{判断标题}}</b>{{一至两句；首次出现的术语须解释}}</div>
-<div class="summary"><b>{{判断标题}}</b>{{…}}</div>
-<div class="summary"><b>{{判断标题}}</b>{{…}}</div></section>
+<section class="takeaways"><div class="label">Three key judgments</div>
+<div class="summary"><b>{{Judgment title}}</b>{{One or two sentences; explain terms at first use}}</div>
+<div class="summary"><b>{{Judgment title}}</b>{{…}}</div>
+<div class="summary"><b>{{Judgment title}}</b>{{…}}</div></section>
 
-<div class="panel"><div class="micro">MONITORING STATUS / 事件状态</div><h2>哪些事项已确认，下一步看什么？</h2>
-<table class="matrix-table mobile-cards"><thead><tr><th style="width:29%">事项</th><th style="width:22%">证据状态</th><th style="width:25%">下一节点</th><th style="width:24%">相关工作</th></tr></thead><tbody>
-<!-- First rows: last issue's tracked items with outcome (已解决/有变化/无变化/逾期). Then new items. -->
-<tr><td data-label="事项">{{事项}}<br><span class="muted">{{上期跟踪：结果 或 本期新增}}</span></td><td data-label="证据状态">{{…}}</td><td data-label="下一节点">{{精确日期}}</td><td data-label="相关工作">{{KYC / 承销 / …}}</td></tr>
+<div class="panel"><div class="micro">MONITORING STATUS / Event status</div><h2>What is confirmed, and what comes next?</h2>
+<table class="matrix-table mobile-cards"><thead><tr><th style="width:29%">Item</th><th style="width:22%">Evidence status</th><th style="width:25%">Next milestone</th><th style="width:24%">Relevant work</th></tr></thead><tbody>
+<!-- First rows: last issue's tracked items with outcome (resolved / changed / no change / overdue). Then new items. -->
+<tr><td data-label="Item">{{Item}}<br><span class="muted">{{Carried over: outcome, or New this period}}</span></td><td data-label="Evidence status">{{…}}</td><td data-label="Next milestone">{{Exact date}}</td><td data-label="Relevant work">{{KYC / underwriting / …}}</td></tr>
 </tbody></table>
-<div class="status-key"><b>标记</b><span><i class="dot g"></i>官方或公司正式公告</span><span><i class="dot a"></i>媒体报道或未经独立验证</span><span><i class="dot s"></i>拟议、待审批或待生效</span></div>
+<div class="status-key"><b>Key</b><span><i class="dot g"></i>Official or company announcement</span><span><i class="dot a"></i>Media report, not independently confirmed</span><span><i class="dot s"></i>Proposed, pending approval or not yet in force</span></div>
 </div>
 
-<section class="section" id="ch1"><div class="kicker">01 / {{章节类别}}</div><h2>{{章节标题（结论式）}}</h2>
-<p class="section-intro">{{本章主线，一段。}}</p>
+<section class="section" id="ch1"><div class="kicker">01 / {{Chapter category}}</div><h2>{{Chapter title (states the conclusion)}}</h2>
+<p class="section-intro">{{The chapter's main thread, one paragraph.}}</p>
 
 <!-- STORY BLOCK: copy for each main story -->
 <article class="story"><div>
-<div class="labelrow"><span class="eyebrow">{{国家 / 机构 / 日期}}</span><span class="st confirmed">{{状态说明}}</span><!-- add a second .st if evidence levels are mixed --></div>
-<h3>{{标题}}</h3>
-<p><strong>背景：</strong><span data-claim-id="{{CLAIM_ID_BACKGROUND}}">{{此前的情况}}</span></p>
-<p><strong>本次变化：</strong><span data-claim-id="{{CLAIM_ID_CHANGE}}">{{发生了什么}}</span></p>
-<p><strong>影响：</strong>{{为什么重要；与论点或银行决策的联系}}</p>
-<p><strong>企业回应：</strong><span data-claim-id="{{CLAIM_ID_RESPONSE}}">{{如有争议，写明回应及当前状态；否则删除}}</span></p>
-<div class="source">来源：<a href="{{已打开的 URL}}" rel="noopener noreferrer" target="_blank">{{来源名}} ↗</a></div></div>
-<aside class="lens"><b class="lhead">{{侧栏标题}}</b><p>{{具体核查点，不重复正文}}</p><div class="follow"><b>后续观察：</b>{{精确节点}}</div></aside></article>
+<div class="labelrow"><span class="eyebrow">{{Country / body / date}}</span><span class="st confirmed">{{Status label}}</span><!-- add a second .st if evidence levels are mixed --></div>
+<h3>{{Headline}}</h3>
+<p><strong>Background: </strong><span data-claim-id="{{CLAIM_ID_BACKGROUND}}">{{The situation before}}</span></p>
+<p><strong>What changed: </strong><span data-claim-id="{{CLAIM_ID_CHANGE}}">{{What happened}}</span></p>
+<p><strong>Why it matters: </strong>{{Why it matters; link to the thesis or to a financial-sector decision}}</p>
+<p><strong>Company response: </strong><span data-claim-id="{{CLAIM_ID_RESPONSE}}">{{If contested, the response and its current status; otherwise delete}}</span></p>
+<div class="source">Source: <a href="{{URL you opened}}" rel="noopener noreferrer" target="_blank">{{Source name}} ↗</a></div></div>
+<aside class="lens"><b class="lhead">{{Sidebar title}}</b><p>{{A concrete check, not a repeat of the body}}</p><div class="follow"><b>Watch next: </b>{{Exact milestone}}</div></aside></article>
 
 <!-- OPTIONAL: comparison table (e.g. two approval gates, list comparison) -->
-<div class="matrix-panel"><div class="micro">{{TAG}}</div><h3>{{表格标题}}</h3><p class="panel-intro">{{一句说明}}</p>
-<table class="matrix-table mobile-cards"><thead><tr><th>{{列}}</th><th>{{列}}</th><th>{{列}}</th></tr></thead><tbody>
-<tr><td data-label="{{列}}">{{…}}</td><td data-label="{{列}}">{{…}}</td><td data-label="{{列}}">{{…}}</td></tr>
-</tbody></table><p class="panel-note">来源：{{…}}</p></div>
+<div class="matrix-panel"><div class="micro">{{TAG}}</div><h3>{{Table title}}</h3><p class="panel-intro">{{One-sentence explanation}}</p>
+<table class="matrix-table mobile-cards"><thead><tr><th>{{Column}}</th><th>{{Column}}</th><th>{{Column}}</th></tr></thead><tbody>
+<tr><td data-label="{{Column}}">{{…}}</td><td data-label="{{Column}}">{{…}}</td><td data-label="{{Column}}">{{…}}</td></tr>
+</tbody></table><p class="panel-note">Source: {{…}}</p></div>
 
 <!-- OPTIONAL: two-track timeline. 5 columns after the side label; use .empty for gaps and .today for the report date. -->
-<figure class="policy-timeline"><div class="micro">FIGURE {{NN}} / {{标题}}</div><figcaption class="tl-heading">{{标题}}</figcaption><p class="tl-explain">节点按顺序排列，横向间距不表示真实时间比例。</p>
-<div class="tl-track"><div class="tl-side">美国</div>
-<div class="tl-cell"><div class="tl-date">{{日期}}</div><div class="tl-event">{{事件}}</div><div class="tl-desc">{{说明}}</div></div>
-<div class="tl-cell empty"></div><div class="tl-cell today"><div class="tl-date">今天 {{MM.DD}}</div></div><div class="tl-cell empty"></div><div class="tl-cell empty"></div></div>
-<div class="tl-track cn"><div class="tl-side">中国</div>
-<div class="tl-cell"><div class="tl-date">{{日期}}</div><div class="tl-event">{{事件}}</div><div class="tl-desc">{{说明}}</div></div>
+<figure class="policy-timeline"><div class="micro">FIGURE {{NN}} / {{Title}}</div><figcaption class="tl-heading">{{Title}}</figcaption><p class="tl-explain">Milestones are in order; horizontal spacing is not to time scale.</p>
+<div class="tl-track"><div class="tl-side">US</div>
+<div class="tl-cell"><div class="tl-date">{{Date}}</div><div class="tl-event">{{Event}}</div><div class="tl-desc">{{Explanation}}</div></div>
+<div class="tl-cell empty"></div><div class="tl-cell today"><div class="tl-date">Today {{MM.DD}}</div></div><div class="tl-cell empty"></div><div class="tl-cell empty"></div></div>
+<div class="tl-track cn"><div class="tl-side">China</div>
+<div class="tl-cell"><div class="tl-date">{{Date}}</div><div class="tl-event">{{Event}}</div><div class="tl-desc">{{Explanation}}</div></div>
 <div class="tl-cell empty"></div><div class="tl-cell empty"></div><div class="tl-cell empty"></div><div class="tl-cell empty"></div></div>
-<p class="tl-footnote">来源：{{…}}</p></figure>
+<p class="tl-footnote">Source: {{…}}</p></figure>
 
 <!-- OPTIONAL: bar chart, verified comparable data only -->
-<div class="data-figure"><div class="micro">FIGURE {{NN}} / {{标题}}</div><h3 class="exhibit-title">{{结论式标题}}</h3><p class="exhibit-context">{{口径说明}}</p>
-<div class="chartbar"><div>{{标签}}</div><div class="rail"><div class="fill" style="width:{{%}}"></div></div><div class="val">{{值}}</div></div>
-<div class="chartbar"><div>{{标签}}</div><div class="rail"><div class="fill strong" style="width:100%"></div></div><div class="val">{{值}}</div></div>
-<p class="fig-note">数据来源：{{…}}</p><p class="fig-strong"><strong>解读：</strong>{{数据说明了什么、不能说明什么}}</p></div>
+<div class="data-figure"><div class="micro">FIGURE {{NN}} / {{Title}}</div><h3 class="exhibit-title">{{Headline stating the conclusion}}</h3><p class="exhibit-context">{{Definitions and units}}</p>
+<div class="chartbar"><div>{{Label}}</div><div class="rail"><div class="fill" style="width:{{%}}"></div></div><div class="val">{{Value}}</div></div>
+<div class="chartbar"><div>{{Label}}</div><div class="rail"><div class="fill strong" style="width:100%"></div></div><div class="val">{{Value}}</div></div>
+<p class="fig-note">Data source: {{…}}</p><p class="fig-strong"><strong>Reading: </strong>{{What the data shows and what it does not}}</p></div>
 </section>
 <div class="chapterdiv"></div>
 <!-- more sections -->
 
-<section class="closing"><div><div class="kicker">后续监测事项</div><h2>未来一个月的关键节点</h2><div class="checklist">
-<!-- chronological order, exact dates; "X 日前" when action must precede a deadline -->
-<div class="checkrow"><div class="subject">{{M 月 D 日}}</div><p>{{要核查什么}}</p></div>
+<section class="closing"><div><div class="kicker">What to watch</div><h2>Key milestones in the next month</h2><div class="checklist">
+<!-- chronological order, exact dates; "by Month D" when action must precede a deadline -->
+<div class="checkrow"><div class="subject">{{Month D}}</div><p>{{What to check}}</p></div>
 </div></div>
-<aside class="lastnote"><p class="smallhead">MANAGEMENT VIEW / 管理层参考</p>
-<p><strong>可能改变下一期判断的证据：</strong>{{具体证据及其会改变什么；不要重复三个判断}}</p>
-<p class="tiny">本简报仅使用公开资料，为 HKUST MAS 项目示范输出，不代表任何金融机构的立场或内部风险评级。</p></aside></section>
+<aside class="lastnote"><p class="smallhead">MANAGEMENT VIEW / Management view</p>
+<p><strong>Evidence that could change our view: </strong>{{Specific evidence and what it would change; do not repeat the three judgments}}</p>
+<p class="tiny">This briefing uses public information only. It is a demonstration output of the HKUST MAS project and does not represent the position or internal risk rating of any financial institution.</p></aside></section>
 
-<div class="appendix"><div class="micro">APPENDIX / 其他动态</div><p><strong>{{名称}}：</strong>{{一句}} <a href="{{URL}}" target="_blank" rel="noopener noreferrer">来源 ↗</a></p></div>
+<div class="appendix"><div class="micro">APPENDIX / Other developments</div><p><strong>{{Name}}: </strong>{{One sentence}} <a href="{{URL}}" target="_blank" rel="noopener noreferrer">Source ↗</a></p></div>
 
-<div class="glossary"><div class="micro">GLOSSARY / 术语速查</div><div class="glossary-grid">
-<div><b>{{术语}}：</b>{{解释}}</div>
+<div class="glossary"><div class="micro">GLOSSARY / Terms</div><div class="glossary-grid">
+<div><b>{{Term}}: </b>{{Explanation}}</div>
 </div></div>
 
-<footer><span>PUBLIC-SOURCE RISK INTELLIGENCE · {{DD MON YYYY}}</span><span>事实 / 指控 / 拟议政策 / 分析推断明确区分</span></footer>
+<footer><span>PUBLIC-SOURCE RISK INTELLIGENCE · {{DD MON YYYY}}</span><span>Facts, allegations, proposed policy and analysis are clearly distinguished</span></footer>
 </div></div></body></html>

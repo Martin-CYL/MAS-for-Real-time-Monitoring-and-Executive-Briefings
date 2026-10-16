@@ -6,6 +6,16 @@ Chinese-language US-China AI and semiconductor executive briefing Skill. The wor
 
 Place this whole `us-china-ai-chip-briefing` directory, including scripts/references/assets/tests, in the agent's supported Skill directory (for Codex projects: `.agents/skills/`). Read `SKILL.md` when producing or reviewing a briefing. Paths below assume the **Skill directory** is the working directory. The full project package also contains the original V17 and evaluation logs; the standalone package includes those as supporting artifacts. Do not treat the historical reference as news evidence.
 
+## Report language: English
+
+The report is written in English (`assets/template.html`, `references/glossary.md`, `SKILL.md`). Research still
+uses Chinese sources; quotes in the evidence ledger stay verbatim in the source language, claim text is English.
+The validator is bilingual: English section names, legend labels, first-use explanations ("the US Bureau of
+Industry and Security (BIS)"), dates ("October 15, 2026"), the "Data as of" cutoff and attribution ("reportedly")
+are recognised, and Chinese reports still validate. The previous Chinese template is kept as
+`assets/template.zh.html`. Not yet translated: the QA sidecars (`review_report.md`, `signoff.md`) and the opt-in
+staged renderer (`scripts/brief.py`, `references/report-content.md`). Tests: `tests/test_english.py`.
+
 ## Round 6: scripted news discovery (read first)
 
 `scripts/discover.py --start YYYY-MM-DD --end YYYY-MM-DD --out RUN/discovery` sweeps, in about a minute and with no

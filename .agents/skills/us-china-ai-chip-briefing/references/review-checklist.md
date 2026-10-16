@@ -8,7 +8,7 @@ Aim for a short final check after research and correction, not a guaranteed ten-
 
 1. Check exact HTML/ledger fingerprints; changes invalidate old reviews. Start with every FAIL, unsupported claim, blocked source and unanswered UNVERIFIED item.
 2. Prioritize legal/list/reputational claims. Confirm original instrument, current version, entity identity/aliases, jurisdiction, effective/proposed state, scope, exceptions and dates. An announcement, historical watchlist or accessible URL alone is insufficient.
-3. Challenge negative claims: which records were searched, what aliases and date/version, and what the search cannot establish? Bound the language to the search, especially "未发现列名" and "未达成协议".
+3. Challenge negative claims: which records were searched, what aliases and date/version, and what the search cannot establish? Bound the language to the search, especially "no listing found" and "no agreement reached".
 4. Recompute material statistics; reconcile periods, currency, units, denominators, methods and comparison bases. Company benchmark claims are not independently replicated results.
 5. Check contested company responses, attribution, publication date and latest litigation/approval status. Preserve disagreement instead of choosing the convenient side.
 6. Scan all material claims without IDs, including summaries, status rows, timelines, chart captions and analytical premises. Check first-use definitions and status legend; preserve material technical competition developments even without a direct banking link.

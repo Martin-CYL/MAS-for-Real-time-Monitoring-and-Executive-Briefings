@@ -135,7 +135,8 @@ def validate_evidence(raw, ledger=None, review=None, ledger_bytes=None, now=None
         add('FAIL','NO_CLAIMS','Ledger and HTML need at least one material claim')
 
     # This catches obvious omissions, not comprehensive natural-language coverage.
-    risk_pattern=r'制裁|名单|禁令|生效|未发现|未列入|没有达成|\d+(?:\.\d+)?\s*[%％]|\d+\s*(?:亿美元|亿元)'
+    risk_pattern=(r'制裁|名单|禁令|生效|未发现|未列入|没有达成|\d+(?:\.\d+)?\s*[%％]|\d+\s*(?:亿美元|亿元)'
+                  r'|(?i:sanction|entity list|\bbanned?\b|takes? effect|in force|not listed|no agreement|\$\s?\d[\d.,]*\s?(?:bn|billion|million|m)\b)')
     for n in doc.nodes:
         if n.tag in ('p','td') and re.search(risk_pattern,n.text()):
             if not any('data-claim-id' in p.attrs for p in n.ancestors()) and not any('data-claim-id' in child.attrs and any(p is n for p in child.ancestors()) for child in doc.nodes):

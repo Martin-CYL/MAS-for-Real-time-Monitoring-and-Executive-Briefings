@@ -1,5 +1,6 @@
 // English source strings are stable message IDs. Do not translate user content.
 export const en = {
+  "GPT-5.6 is no longer available. Your next message will use GPT-6 Sol with Medium reasoning.": "GPT-5.6 is no longer available. Your next message will use GPT-6 Sol with Medium reasoning.",
   "File unavailable. It may have been moved or deleted; check that you are signed in.": "File unavailable. It may have been moved or deleted; check that you are signed in.",
   "This file is outside the current workspace.": "This file is outside the current workspace.",
   "Wait for the current task to finish before changing models.": "Wait for the current task to finish before changing models.",

@@ -658,7 +658,7 @@ export function withPiFaveModels(
   ))
 }
 
-export const PROVIDERS: ProviderCatalogEntry[] = [
+const COMPATIBILITY_PROVIDERS: ProviderCatalogEntry[] = [
   {
     id: "claude",
     label: "Claude Code",
@@ -843,6 +843,15 @@ export const PROVIDERS: ProviderCatalogEntry[] = [
   },
 ]
 
+/** Retired picker options remain readable in historical sessions. */
+export function isRetiredCodexModel(modelId?: string): boolean {
+  return ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"].includes(modelId?.trim() ?? "")
+}
+
+export const PROVIDERS: ProviderCatalogEntry[] = COMPATIBILITY_PROVIDERS.map(provider =>
+  provider.id === "codex" ? { ...provider, models: provider.models.filter(model => !isRetiredCodexModel(model.id)) } : provider
+)
+
 export function getProviderCatalog(provider: AgentProvider): ProviderCatalogEntry {
   const entry = PROVIDERS.find((candidate) => candidate.id === provider)
   if (!entry) {
@@ -854,7 +863,7 @@ export function getProviderCatalog(provider: AgentProvider): ProviderCatalogEntr
 function getProviderModelMatch(provider: AgentProvider, modelId?: string): ProviderModelOption | undefined {
   if (!modelId) return undefined
 
-  return getProviderCatalog(provider).models.find((candidate) =>
+  return COMPATIBILITY_PROVIDERS.find(entry => entry.id === provider)!.models.find((candidate) =>
     candidate.id === modelId || candidate.aliases?.includes(modelId)
   )
 }
@@ -941,7 +950,8 @@ export function getCodexModelOption(
   models?: ReadonlyArray<ProviderModelOption>,
 ): ProviderModelOption | undefined {
   const normalizedModelId = normalizeCodexModelId(modelId)
-  return (models ?? getProviderCatalog("codex").models).find((candidate) => candidate.id === normalizedModelId)
+  return (models ?? COMPATIBILITY_PROVIDERS.find(provider => provider.id === "codex")!.models).find((candidate) => candidate.id === normalizedModelId)
+    ?? (isRetiredCodexModel(normalizedModelId) ? getProviderModelMatch("codex", normalizedModelId) : undefined)
 }
 
 export function getCodexReasoningOptions(

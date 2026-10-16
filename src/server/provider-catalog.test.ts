@@ -256,20 +256,6 @@ describe("provider catalog normalization", () => {
         supportsFastMode: true,
       },
       {
-        id: "gpt-5.6-sol",
-        label: "GPT-5.6 Sol",
-        supportsEffort: true,
-        // Static aliases carry over so persisted "gpt-5.6" still resolves.
-        aliases: ["gpt-5.6"],
-        supportedReasoningEfforts: [
-          { id: "low", label: "Low" },
-          { id: "medium", label: "Medium" },
-          { id: "ultra", label: "Ultra", description: "Maximum reasoning with automatic task delegation" },
-        ],
-        defaultReasoningEffort: "medium",
-        supportsFastMode: true,
-      },
-      {
         id: "gpt-5.3-codex-spark",
         label: "GPT-5.3 Codex Spark",
         supportsEffort: true,
@@ -433,4 +419,13 @@ describe("provider catalog normalization", () => {
       { value: "nova", resolvedModel: "claude-nova-2", displayName: "Nova" },
     ])).toBe(false)
   })
+})
+
+test("runtime discovery cannot restore retired Codex models", () => {
+  try {
+    for (let i = 0; i < 2; i++) {
+      applyCodexModels(["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-sol"].map(model => ({model,displayName:model})))
+      expect(SERVER_PROVIDERS.find(p=>p.id==="codex")?.models.map(m=>m.id)).toEqual(["gpt-6-sol"])
+    }
+  } finally { resetServerProvidersForTests() }
 })

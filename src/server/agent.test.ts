@@ -3561,3 +3561,13 @@ describe("waiting on a subagent", () => {
     expect(stopped).toEqual(["agent-thread-1"])
   })
 })
+
+test("legacy clients cannot start new turns using retired Codex models", () => {
+  const resolve = Reflect.get(AgentCoordinator.prototype, "getProviderSettings")
+  for (const model of ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+    const result = resolve.call(null, "codex", { model, modelOptions: {codex: {reasoningEffort: "high", fastMode: true}} })
+    expect(result.model).toBe("gpt-6-sol")
+    expect(result.effort).toBe("medium")
+    expect(result.serviceTier).toBeUndefined()
+  }
+})

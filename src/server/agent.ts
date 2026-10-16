@@ -1,3 +1,4 @@
+import { isRetiredCodexModel } from "../shared/types"
 import {
   query,
   type BackgroundTaskSummary,
@@ -1722,8 +1723,9 @@ export class AgentCoordinator {
       }
     }
 
-    const model = normalizeServerModel(provider, options.model)
-    const modelOptions = normalizeCodexModelOptions(model, options.modelOptions, options.effort)
+    const retired = isRetiredCodexModel(options.model)
+    const model = retired ? "gpt-6-sol" : normalizeServerModel(provider, options.model)
+    const modelOptions = normalizeCodexModelOptions(model, retired ? { codex: { reasoningEffort: "medium", fastMode: false } } : options.modelOptions, retired ? "medium" : options.effort)
     return {
       model,
       effort: modelOptions.reasoningEffort,

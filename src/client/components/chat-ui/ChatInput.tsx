@@ -508,13 +508,15 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
       onCancel?.()
     }
   }
+  // Hidden until a transcription service is configured for Nex users.
+  const voiceInputEnabled = false
   const recorder = useVoiceRecorder()
   const [transcribing, setTranscribing] = useState(false)
   const recording = recorder.isRecording
   // The mic only shows with an empty composer; with a draft the send
   // button is the sole action, the same as iOS. Mid-turn it stays: the
   // transcript queues behind the running turn.
-  const showMic = !canSubmit && !recording && !transcribing
+  const showMic = voiceInputEnabled && !canSubmit && !recording && !transcribing
   const orderedAttachments = [...attachments].sort((left, right) => {
     if (left.kind === right.kind) return 0
     return left.kind === "image" ? -1 : 1
@@ -1108,6 +1110,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   return (
     <div>
+      {composer.retiredModelReplaced && <p role="status" className="px-5 pb-2 text-sm text-muted-foreground">{t("GPT-5.6 is no longer available. Your next message will use GPT-6 Sol with Medium reasoning.")}</p>}
       <div className={cn("px-3 pt-0", isStandalone && "px-5")}>
         <div className="relative max-w-[840px] mx-auto rounded-[32px]">
           {skillMenuOpen ? (
@@ -1208,7 +1211,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
             </ScrollArea>
           ) : null}
 
-          {recorder.errorMessage ? (
+          {voiceInputEnabled && recorder.errorMessage ? (
             <div className="max-w-[840px] mx-auto px-4 pb-1.5 text-xs text-destructive">{t(recorder.errorMessage)}</div>
           ) : null}
           {/*
@@ -1264,7 +1267,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 <Trash2 className="h-5 w-5" />
               </Button>
             ) : null}
-            {showMic || recording || transcribing ? (
+            {voiceInputEnabled && (showMic || recording || transcribing) ? (
               <Button
                 type="button"
                 variant={recording ? "default" : "ghost"}

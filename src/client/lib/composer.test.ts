@@ -344,3 +344,15 @@ describe("getEffectiveComposerState", () => {
     expect(getEffectiveComposerState(stored, "claude", providerDefaults).model).toBe(providerDefaults.claude.model)
   })
 })
+
+ test("retired models switch only the next-send view, preserving historical state", () => {
+   for (const model of ["gpt-5.6", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]) {
+     const state: ComposerState = {provider:"codex",model,modelOptions:{reasoningEffort:"high",fastMode:false},planMode:false,autoPlan:false}
+     const view=deriveComposerView({chatId:"legacy",activeProvider:"codex",availableProviders:PROVIDERS,composerState:state,providerDefaults})
+     expect(view.effectiveState.model).toBe("gpt-6-sol")
+     expect(view.effectiveState.modelOptions.reasoningEffort).toBe("medium")
+     expect(view.retiredModelReplaced).toBe(true)
+     expect(state.model).toBe(model)
+     expect(view.models.some(m=>m.id===model)).toBe(false)
+   }
+ })

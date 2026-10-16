@@ -1,6 +1,7 @@
 import type { MessageKey } from "./types"
 
 export const zhCN = {
+  "GPT-5.6 is no longer available. Your next message will use GPT-6 Sol with Medium reasoning.": "GPT-5.6 已下架。下一条消息将使用 GPT-6 Sol，思考强度为中。",
   "File unavailable. It may have been moved or deleted; check that you are signed in.": "文件无法访问，可能已移动或删除；请确认已登录。",
   "This file is outside the current workspace.": "该文件不在当前工作区内。",
   "Wait for the current task to finish before changing models.": "请等待当前任务结束后再修改模型。",

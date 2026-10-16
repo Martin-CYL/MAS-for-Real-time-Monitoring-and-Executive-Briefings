@@ -17,6 +17,7 @@ import {
   DEFAULT_CLAUDE_MODEL_OPTIONS,
   DEFAULT_CURSOR_MODEL_OPTIONS,
   PROVIDERS,
+  isRetiredCodexModel,
   codexReasoningEffortLabel,
   deriveModelLabel,
   withPiFaveModels,
@@ -207,7 +208,7 @@ export function applyCodexModels(models: ReadonlyArray<CodexAppServerModelInfo>)
   const nextModels: ProviderModelOption[] = []
   for (const model of models) {
     const id = model.model.trim()
-    if (!id || nextModels.some((existing) => existing.id === id)) continue
+    if (!id || isRetiredCodexModel(id) || nextModels.some((existing) => existing.id === id)) continue
     const efforts = (model.supportedReasoningEfforts ?? [])
       .map((option) => option.reasoningEffort.trim())
       .filter((effort, index, all) => effort.length > 0 && all.indexOf(effort) === index)

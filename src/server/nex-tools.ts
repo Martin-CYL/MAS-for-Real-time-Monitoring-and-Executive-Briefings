@@ -3,6 +3,8 @@ import type { NormalizedToolCall, TranscriptEntry } from "../shared/types"
 import { normalizeToolCall } from "../shared/tools"
 import type { HarnessToolRequest } from "./harness-types"
 import { timestamped } from "./transcript"
+import { briefingWorkflowEnabled, type BriefingWorkflow } from "./briefing-workflow"
+import { BRIEFING_TOOLS } from "./nex-briefing-tools"
 import { DISPLAY_TOOLS } from "./nex-display-tools"
 import { GENERATE_IMAGES_TOOL } from "./nex-image-tools"
 import { ORCHESTRATION_TOOLS } from "./nex-orchestration-tools"
@@ -23,6 +25,8 @@ interface NexToolContext {
   requestInput: (prompt: string) => Promise<string>
   /** Absent only where a runtime is built without a server behind it, as in tests. */
   orchestration?: ChatOrchestrator
+  /** The multi-agent briefing workflow, when NEX_BRIEFING_WORKFLOW=1. */
+  briefing?: BriefingWorkflow
 }
 
 export interface NexToolDefinition {
@@ -42,7 +46,13 @@ export interface NexToolDefinition {
 export const NEX_TOOL_DESCRIPTION_LIMIT = 2048
 
 // Add tools here. Every provider registers the same definitions and calls the same handlers.
-export const NEX_TOOLS: readonly NexToolDefinition[] = [...DISPLAY_TOOLS, GENERATE_IMAGES_TOOL, ...ORCHESTRATION_TOOLS]
+// The briefing tools are an opt-in execution mode: without the flag no chat is offered them.
+export const NEX_TOOLS: readonly NexToolDefinition[] = [
+  ...DISPLAY_TOOLS,
+  GENERATE_IMAGES_TOOL,
+  ...ORCHESTRATION_TOOLS,
+  ...(briefingWorkflowEnabled() ? BRIEFING_TOOLS : []),
+]
 
 export const NEX_TOOL_NAMES = NEX_TOOLS.map((tool) => tool.name)
 
@@ -73,6 +83,7 @@ export class NexToolRuntime implements NexToolHost {
     emit: (entry: TranscriptEntry) => Promise<void>
     requestInput: (request: HarnessToolRequest, signal: AbortSignal) => Promise<unknown>
     orchestration?: ChatOrchestrator
+    briefing?: BriefingWorkflow
   }, private readonly definitions: readonly NexToolDefinition[] = NEX_TOOLS) {}
 
   abort() {
@@ -112,6 +123,7 @@ export class NexToolRuntime implements NexToolHost {
         dataDir: this.context.dataDir,
         signal,
         orchestration: this.context.orchestration,
+        briefing: this.context.briefing,
         requestInput: async (prompt) => {
           tool = normalizeToolCall({ toolName: "AskUserQuestion", toolId, input: { questions: [{ id: "value", question: prompt, options: [] }] } })
           await this.context.emit(timestamped({ kind: "tool_call", tool }))

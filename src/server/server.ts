@@ -21,6 +21,7 @@ import { WorktreeProbe } from "./worktree-probe"
 import { TurnFileTracker } from "./worktree-snapshot"
 import { backfillTouchedFileBases } from "./touched-file-backfill"
 import { resumeInterruptedTurns } from "./resume-turns"
+import { BriefingWorkflow, briefingWorkflowEnabled } from "./briefing-workflow"
 import { ChatOrchestrator } from "./orchestrator"
 import { createChatCommands } from "./chat-commands"
 import { discoverProjects, type DiscoveredProject } from "./discovery"
@@ -229,8 +230,17 @@ export async function startNexServer(options: StartNexServerOptions = {}) {
     onError: (message) => console.warn(`${LOG_PREFIX} ${message}`),
   })
   agent.orchestration = orchestrator
-  agent.onChatSettled = (chatId) => orchestrator.handleChatSettled(chatId)
-  agent.onChatStopped = (chatId) => orchestrator.handleChatStopped(chatId)
+  // The multi-agent briefing: an opt-in workflow on top of the orchestrator's sub-chats.
+  const briefing = briefingWorkflowEnabled() ? new BriefingWorkflow({ chats: orchestrator }) : null
+  agent.briefing = briefing
+  agent.onChatSettled = (chatId) => {
+    orchestrator.handleChatSettled(chatId)
+    briefing?.handleChatSettled(chatId)
+  }
+  agent.onChatStopped = (chatId) => {
+    orchestrator.handleChatStopped(chatId)
+    briefing?.handleChatSettled(chatId)
+  }
   const usageLimits = new UsageLimitsManager(path.join(store.dataDir, "usage-limits.json"), {
     fetchClaudeUsage: () => agent.fetchClaudeUsage(),
     fetchCodexRateLimits: () => agent.fetchCodexRateLimits(),

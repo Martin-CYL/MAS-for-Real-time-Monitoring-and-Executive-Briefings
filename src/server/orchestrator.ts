@@ -572,6 +572,18 @@ export class ChatOrchestrator {
 
   // ── Reads ──────────────────────────────────────────────────────────────
 
+  /** A chat as `list_chats` describes it, or null. For workflows built on top of these tools. */
+  getChatSummary(chatId: string): AgentChatSummary | null {
+    const chat = this.store.getChat(chatId)
+    return chat && !chat.deletedAt ? this.summarize(chat) : null
+  }
+
+  /** How a chat's last turn ended, as `wait_for_chats` reports it, or null. */
+  getChatOutcome(chatId: string): ChatOutcome | null {
+    const chat = this.store.getChat(chatId)
+    return chat && !chat.deletedAt ? this.outcomeOf(chat) : null
+  }
+
   getContext(actorChatId: string) {
     const chat = this.requireChat(actorChatId)
     const project = this.store.getProject(chat.projectId)

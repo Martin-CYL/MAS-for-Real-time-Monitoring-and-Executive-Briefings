@@ -34,6 +34,7 @@ import type { ClientCommand } from "../shared/protocol"
 import { AsyncQueue } from "./async-queue"
 import { resolveClaudeExecutable } from "./claude-executable"
 import { NexToolRuntime, NexToolEventFilter, type NexToolHost } from "./nex-tools"
+import type { BriefingWorkflow } from "./briefing-workflow"
 import type { ChatOrchestrator } from "./orchestrator"
 import { createClaudeNexTools } from "./nex-tool-adapters"
 import { EventStore } from "./event-store"
@@ -1133,6 +1134,8 @@ export class AgentCoordinator {
    * because the orchestrator is built on top of this coordinator.
    */
   orchestration: ChatOrchestrator | null = null
+  /** The multi-agent briefing workflow, set when NEX_BRIEFING_WORKFLOW=1. */
+  briefing: BriefingWorkflow | null = null
   /**
    * Fired when a chat has no turn left to run: its turn ended and nothing
    * queued started another. Not fired for a steer or a shutdown, where the
@@ -2066,6 +2069,7 @@ export class AgentCoordinator {
           },
           requestInput: (request, callSignal) => this.requestToolInput(args.chatId, request, callSignal),
           orchestration: this.orchestration ?? undefined,
+          briefing: this.briefing ?? undefined,
         })
         return active.customTools.execute(name, input, signal)
       },

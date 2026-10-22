@@ -28,6 +28,17 @@ ROLES = ('scout', 'lead', 'cross_border', 'chief')
 MIN_NARRATIVE = 80
 # Record IDs mean nothing to a reader; the renderer prints tracked events' titles and reasons as they are.
 INTERNAL_ID = re.compile(r'\b[ACES]\d{3,}\b')
+# Legal state: a proposal must not be written up as law. Negated or future forms ("not yet in force",
+# "would take effect") are not claims of enactment.
+ENACTED = re.compile(r'\b(enacted|took effect|takes effect|has taken effect|came into (?:force|effect)|(?:is|are|now) in (?:force|effect)|'
+                     r'finali[sz]ed|issued a final rule|adopted the (?:rule|regulation|law))\b', re.I)
+NOT_ENACTED = re.compile(r'\b(not|yet|would|will|could|may|expected to|proposed to|before it)\b[^.;]{0,25}$', re.I)
+PROPOSAL = re.compile(r'propos|draft|would (?:require|impose|restrict|ban|add)|comments? (?:are|is) due|comment period|consultation|'
+                      r'征求意见|草案|拟', re.I)
+
+
+def says_enacted(text):
+    return any(not NOT_ENACTED.search(text[:m.start()]) for m in ENACTED.finditer(text or ''))
 
 
 def load(path, default=None):
@@ -60,11 +71,19 @@ def check(run, role):
             add('FAIL', 'WINDOW_MISMATCH', f'run window {cfg.get("window")} differs from the assigned window {assignment.get("window")}')
         if assignment.get('cutoff') and assignment.get('cutoff') != cfg.get('cutoff'):
             add('FAIL', 'CUTOFF_MISMATCH', f'run cutoff {cfg.get("cutoff")} differs from the assigned cutoff {assignment.get("cutoff")}')
+        if assignment.get('report_date') and assignment.get('report_date') != cfg.get('report_date'):
+            add('FAIL', 'REPORT_DATE_MISMATCH', f'run_config.json report date {cfg.get("report_date")} differs from the assigned '
+                f'{assignment.get("report_date")}; the run\'s dates are set by the workflow, not edited')
         if cfg.get('language', 'zh') != 'en':
             add('FAIL', 'LANGUAGE', 'the multi-agent briefing is written in English: initialise with brief.py init … --lang en')
 
     events, ledger, claims, risk, sources = brief.snapshot_state(run)
     evs = events['events']
+    # The ledger's header must stay what init wrote: the validator's date checks read it.
+    changed = [k for k in ('report_date', 'timezone', 'cutoff') if ledger.get(k) != cfg.get(k)]
+    if changed:
+        add('FAIL', 'LEDGER_HEADER_MISMATCH', f'evidence_ledger.json {", ".join(changed)} differ from run_config.json; '
+            'these are set when the run starts and are not edited')
     cutoff_day = None
     try:
         cutoff_day = datetime.fromisoformat(cfg['cutoff']).date()
@@ -77,7 +96,16 @@ def check(run, role):
     for cid, r in risk.items():
         if r.get('quote_state') != 'FOUND':
             add('FAIL', 'QUOTE_NOT_FOUND', f'{cid}: quote not found in its saved snapshot ({r.get("quote_state")})', claim=cid)
+    proposed_claims = {cid for e in evs if e.get('proposed') for cid in e.get('claim_ids') or []}
     for c in claims.values():
+        if says_enacted(c.get('text')):
+            quotes = ' '.join(src.get('quote') or '' for src in c.get('sources') or [])
+            if c['id'] in proposed_claims:
+                add('FAIL', 'STATUS_WORDING', f'{c["id"]}: its event is marked proposed, but the claim says it was enacted or took effect; '
+                    'withdraw it and record what the source says', claim=c['id'])
+            elif PROPOSAL.search(quotes) and not ENACTED.search(quotes):
+                add('FAIL', 'STATUS_WORDING', f'{c["id"]}: the claim says enacted or in force, but its quote only shows a proposal or draft; '
+                    'withdraw it and record what the source says, or quote the passage that shows enactment', claim=c['id'])
         bad = [k for k in c.get('kinds') or [] if k not in KINDS]
         if bad or not c.get('kinds'):
             add('FAIL', 'CLAIM_KINDS', f'{c["id"]}: kinds {bad or "missing"} are not accepted by the validator ({", ".join(sorted(KINDS))}); '

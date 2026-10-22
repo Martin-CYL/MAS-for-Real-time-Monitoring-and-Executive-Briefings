@@ -7,6 +7,11 @@
   "max_rework_rounds": 2,
   "max_draft_attempts": 4,
   "task_minutes": {"scout": 30, "lead": 90, "cross_border": 30, "reviewer": 30, "chief": 240},
+  "token_budget": {
+    "note": "Fresh tokens = uncached input + output, as the provider reports them per request. Best-effort: checked after each reported request and about once a minute, so a request in flight can overshoot.",
+    "run_fresh_tokens": 3000000,
+    "task_fresh_tokens": {"scout": 300000, "lead": 600000, "cross_border": 200000, "reviewer": 300000, "chief": 600000}
+  },
   "discovery": true,
   "days": 7
 }

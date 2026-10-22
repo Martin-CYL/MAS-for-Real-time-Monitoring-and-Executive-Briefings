@@ -331,6 +331,29 @@ class HandoffTests(unittest.TestCase):
         self.r.narrative(self.run)
         self.assertIn('CLAIM_KINDS', codes(check_handoff.check(self.run, 'scout')))
 
+    def test_proposed_measure_described_as_enacted_fails(self):
+        # The controlled example: the source says "proposed rule", the claim says "enacted".
+        eid = self.r.event(self.run, 'https://www.example.gov/rule', RULE, 'Synthetic agency rule', 'today issued a proposed rule on synthetic accelerators',
+                           'The Synthetic Agency enacted a rule on synthetic accelerators.')
+        self.r.narrative(self.run)
+        wording = [x for x in check_handoff.check(self.run, 'scout') if x['code'] == 'STATUS_WORDING']
+        self.assertEqual(len(wording), 1)
+        self.assertIn('only shows a proposal', wording[0]['message'])
+        # Marking the event proposed makes the conflict explicit too.
+        call('event', self.run, 'decide', eid, 'include', '--reason', 'r', '--proposed')
+        self.assertIn('marked proposed', [x for x in check_handoff.check(self.run, 'scout') if x['code'] == 'STATUS_WORDING'][0]['message'])
+        # The fix the protocol prescribes: withdraw and record what the source says.
+        call('withdraw', self.run, 'C001', '--reason', 'Proposal, not enacted')
+        call('add-claim', self.run, eid, 'S001', '--quote', 'today issued a proposed rule on synthetic accelerators',
+             '--text', 'The Synthetic Agency issued a proposed rule on synthetic accelerators.')
+        self.assertNotIn('STATUS_WORDING', codes(check_handoff.check(self.run, 'scout')))
+
+    def test_negated_or_future_enactment_is_not_flagged(self):
+        self.r.event(self.run, 'https://www.example.gov/rule', RULE, 'Synthetic agency rule', 'today issued a proposed rule on synthetic accelerators',
+                     'The Synthetic Agency proposed a rule on synthetic accelerators; it is not yet in force.', proposed=True)
+        self.r.narrative(self.run)
+        self.assertNotIn('STATUS_WORDING', codes(check_handoff.check(self.run, 'scout')))
+
     def test_record_ids_in_shown_text_are_flagged(self):
         self.r.rule(self.run, decision='track')
         call('event', self.run, 'decide', 'E001', 'track', '--reason', 'Covered by E013 instead')
@@ -341,6 +364,18 @@ class HandoffTests(unittest.TestCase):
         self.assertEqual([x['status'] for x in chief], ['FAIL'])
         call('event', self.run, 'decide', 'E001', 'track', '--reason', 'The final rule has not been published')
         self.assertNotIn('INTERNAL_ID_SHOWN', codes(check_handoff.check(self.run, 'chief')))
+
+    def test_hand_edited_run_dates_fail(self):
+        # Found live: an agent moved the report date to clear a generation-date check.
+        self.r.rule(self.run)
+        self.r.narrative(self.run)
+        cfg = jload(self.run / 'run_config.json')
+        a = jload(self.run / 'assignment.json'); a['report_date'] = cfg['report_date']; jsave(self.run / 'assignment.json', a)
+        self.assertFalse({'REPORT_DATE_MISMATCH', 'LEDGER_HEADER_MISMATCH'} & codes(check_handoff.check(self.run, 'scout')))
+        led = jload(self.run / 'evidence_ledger.json'); led['report_date'] = '2030-03-11'; jsave(self.run / 'evidence_ledger.json', led)
+        self.assertIn('LEDGER_HEADER_MISMATCH', codes(check_handoff.check(self.run, 'scout')))
+        cfg['report_date'] = '2030-03-11'; jsave(self.run / 'run_config.json', cfg)
+        self.assertIn('REPORT_DATE_MISMATCH', codes(check_handoff.check(self.run, 'scout')))
 
     def test_blocked_source_is_unverified_not_fail(self):
         self.r.rule(self.run)

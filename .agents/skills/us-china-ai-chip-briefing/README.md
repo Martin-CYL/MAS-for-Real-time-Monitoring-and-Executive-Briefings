@@ -26,9 +26,9 @@ workflow above is unchanged. Each agent works in its own `brief.py` run under `r
 |---|---|
 | `references/roles/*.md` | Chief Editor, Country Lead, Topic Scout, Reviewer and the shared protocol. Each names the `SKILL.md` and reference sections it needs (`includes:`), which Nex inlines, so rules are not copied |
 | `references/roles/categories.json` | Research categories a lead may assign; none is mandatory |
-| `references/roles/workflow.json` | Budgets: scouts per lead, concurrency, attempts, rework rounds, cross-border requests, minutes per role |
+| `references/roles/workflow.json` | Budgets: scouts per lead, concurrency, attempts, rework rounds, cross-border requests, minutes and fresh tokens per role and per run |
 | `scripts/merge_runs.py` | Merges accepted task runs into the parent run: new IDs, byte-identical snapshots, provenance, cautious joins, recorded conflicts |
-| `scripts/check_handoff.py` | Checks a task's records before handoff (window, decisions, Link/Size/New, quotes, hand edits, narrative) |
+| `scripts/check_handoff.py` | Checks a task's records before handoff (window, decisions, Link/Size/New, quotes, claim kinds, hand edits, narrative, record IDs in shown text, and `STATUS_WORDING`: a claim saying enacted or in force while its event is marked proposed or its quote only shows a proposal) |
 | `scripts/check_provenance.py` | Checks every accepted handoff reached the final run unchanged (claims, quotes, events, `proposed`/`unsupported`) |
 
 `brief.py` additions: `init --lang en --no-cases`, `event add --case`, `event decide --link --size --new` (stored as

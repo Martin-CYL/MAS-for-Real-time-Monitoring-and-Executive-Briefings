@@ -7,6 +7,7 @@ import { AgentCoordinator } from "./agent"
 import { NoopAnalyticsReporter } from "./analytics"
 import { AsyncQueue } from "./async-queue"
 import { BriefingWorkflow, runPython } from "./briefing-workflow"
+import type { SandboxRunner } from "./briefing-sandbox"
 import { createChatCommands } from "./chat-commands"
 import { EventStore } from "./event-store"
 import type { HarnessEvent, HarnessTurn } from "./harness-types"
@@ -22,6 +23,14 @@ import { timestamped } from "./transcript"
  * The Skill is not part of this repository. Point BRIEFING_SKILL_DIR at a
  * copy of `us-china-ai-chip-briefing` with multi-agent support to run it.
  */
+
+/** The OS sandbox check has its own test (briefing-sandbox.test.ts); here it answers as an enforcing host would. */
+const ENFORCING_SANDBOX: SandboxRunner = async () => ({
+  exitCode: 0,
+  stdout: ["write own task directory=allowed", "write another task directory=denied", "read another task directory=denied",
+    "write workflow state=denied", "read workflow state=denied", "read Codex credentials=denied"].join("\n"),
+  stderr: "",
+})
 
 const SKILL_DIR = process.env.BRIEFING_SKILL_DIR
 const skillTest = SKILL_DIR && existsSync(path.join(SKILL_DIR, "scripts", "merge_runs.py")) ? test : test.skip
@@ -60,7 +69,7 @@ const US_RULE = "The Synthetic Commerce Agency today issued a proposed rule that
 const CN_REPORT = "Synthetic Daily reported that Synthetic Foundry Co. halted shipments of synthetic wafers to a synthetic buyer on March 6, 2030, citing licensing uncertainty."
 
 describe("briefing workflow with the real Skill scripts", () => {
-  skillTest("records travel scout → lead → chief intact, tampering is caught, and the English report is built and validated", async () => {
+  skillTest("records travel scout → lead → chief intact, a proposal written as law and tampering are caught, review rework is routed and resubmitted, and the English report is built and validated", async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-skill-data-"))
     const projectDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-skill-project-"))
     const home = await mkdtemp(path.join(tmpdir(), "nex-briefing-skill-home-"))
@@ -74,7 +83,7 @@ describe("briefing workflow with the real Skill scripts", () => {
     const agent = new AgentCoordinator({ store, onStateChange: () => {}, codexManager: codex as never,
       generateTitle: async () => ({ title: null, usedFallback: true, failureMessage: null }) })
     const orchestrator = new ChatOrchestrator({ store, agent, commands: createChatCommands({ store, agent, analytics: NoopAnalyticsReporter }), push: () => {} })
-    const workflow = new BriefingWorkflow({ chats: orchestrator, settleGraceMs: 10, home, log: () => {} })
+    const workflow = new BriefingWorkflow({ chats: orchestrator, settleGraceMs: 10, home, sandboxRunner: ENFORCING_SANDBOX, log: () => {} })
     agent.orchestration = orchestrator
     agent.briefing = workflow
     agent.onChatSettled = (chatId) => { orchestrator.handleChatSettled(chatId); workflow.handleChatSettled(chatId) }
@@ -114,11 +123,18 @@ describe("briefing workflow with the real Skill scripts", () => {
     await brief("fetch", usScout.dir, "https://www.example.gov/proposed-rule", "--file", await page("rule.txt", US_RULE), "--route", "http_tool")
     await brief("event", usScout.dir, "add", "--title", "Synthetic agency proposes accelerator licence rule", "--date", TODAY, "--side", "us", "--source", "S001", "--materiality", "high", "--why", "Synthetic export-control link")
     await brief("event", usScout.dir, "decide", "E001", "include", "--reason", "Proposed rule in the window", "--proposed", "--link", "Export controls on accelerators", "--size", "Would add a licence requirement", "--new", "Issued in the window")
-    await brief("add-claim", usScout.dir, "E001", "S001", "--quote", "today issued a proposed rule that would require licences for synthetic accelerator exports", "--text", "The Synthetic Commerce Agency issued a proposed rule that would require licences for synthetic accelerator exports.", "--pub-date", TODAY)
+    // The controlled error: the page says "proposed rule", the claim says the rule was enacted.
+    await brief("add-claim", usScout.dir, "E001", "S001", "--quote", "today issued a proposed rule that would require licences for synthetic accelerator exports", "--text", "The Synthetic Commerce Agency enacted a rule requiring licences for synthetic accelerator exports.", "--pub-date", TODAY)
     await brief("search", usScout.dir, "synthetic accelerator rule", "--found", "the proposed rule")
-    await writeFile(path.join(usScout.dir, "narrative.md"), "E001: the agency proposed a licence rule (C001). It is a proposal, not yet in force; comments are due in April. Watch for the final rule.")
+    await writeFile(path.join(usScout.dir, "narrative.md"), "E001: the agency proposed a licence rule (C002). It is a proposal, not yet in force; comments are due in April. Watch for the final rule.")
     expect(await workflow.submit(usScout.chatId!, projectDir, {})).toMatchObject({ accepted: false }) // no output.json yet
     await writeFile(path.join(usScout.dir, "output.json"), done({ task_id: usScout.taskId }))
+    const wrongState = await workflow.submit(usScout.chatId!, projectDir, {})
+    expect(wrongState.accepted).toBe(false)
+    expect((wrongState.problems as string[]).join("\n")).toContain("STATUS_WORDING: C001: its event is marked proposed")
+    // The prescribed fix: withdraw the claim, record what the page says.
+    await brief("withdraw", usScout.dir, "C001", "--reason", "The source shows a proposed rule, not an enacted one")
+    await brief("add-claim", usScout.dir, "E001", "S001", "--quote", "today issued a proposed rule that would require licences for synthetic accelerator exports", "--text", "The Synthetic Commerce Agency issued a proposed rule that would require licences for synthetic accelerator exports.", "--pub-date", TODAY)
     expect(await workflow.submit(usScout.chatId!, projectDir, {})).toMatchObject({ accepted: true })
     codex.finish(usScout.chatId!)
 
@@ -162,6 +178,11 @@ describe("briefing workflow with the real Skill scripts", () => {
       "The Synthetic Commerce Agency issued a proposed rule that would require licences for synthetic accelerator exports.",
       "According to Reuters, Synthetic Foundry Co. halted shipments of synthetic wafers to a synthetic buyer.",
     ])
+    // The withdrawn wording travelled up as withdrawn, with its reason, not as a live claim.
+    expect(ledger.withdrawn.map((entry: { claim: { text: string }; reason: string }) => [entry.claim.text, entry.reason])).toEqual([
+      ["The Synthetic Commerce Agency enacted a rule requiring licences for synthetic accelerator exports.",
+        "withdrawn in us-lead: withdrawn in us-s01: The source shows a proposed rule, not an enacted one"],
+    ])
 
     // Chief: settle the merge, decide carried-over cases, write the analysis.
     for (const event of merged.events as Array<{ id: string; case_id?: string; title: string; merge_conflicts?: unknown[] }>) {
@@ -203,12 +224,43 @@ describe("briefing workflow with the real Skill scripts", () => {
     const qa = await json(path.join(runDir, "qa", "review_report.json"))
     expect(qa.readiness).not.toBe("BLOCKED")
 
+    const ruleClaim = (await json(path.join(runDir, "evidence_ledger.json"))).claims
+      .find((claim: { text: string }) => claim.text.startsWith("The Synthetic Commerce Agency issued")).id
     const reviewer = workflow.getRun(started.runId)!.tasks.find((task) => task.id === "review-1")!
-    await writeFile(path.join(runDir, reviewer.dir, "findings.json"), JSON.stringify({ verdict: "pass", summary: "Synthetic review.", findings: [] }))
-    expect(await workflow.submit(reviewer.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    await writeFile(path.join(runDir, reviewer.dir, "findings.json"), JSON.stringify({
+      verdict: "rework", summary: "The rule story omits its comment deadline.",
+      findings: [{ id: "R001", severity: "major", category: "omission", target: { claim_id: ruleClaim },
+        problem: "The story does not say when comments are due, which the source states.", evidence: "Source text: 'Comments are due by April 9, 2030.'" }],
+    }))
+    expect(await workflow.submit(reviewer.chatId!, projectDir, {})).toMatchObject({ accepted: true, verdict: "rework" })
+    codex.finish(reviewer.chatId!)
+    const review = await workflow.wait(chief, projectDir, { taskIds: ["review-1"] })
+    expect(review.stage).toBe("rework")
+    expect((review.tasks[0]!.output as { findings: Array<{ responsible: string[] }> }).findings[0]!.responsible).toEqual(["us-s01", "us-lead"])
+
+    // Targeted rework to the responsible lead, who adds the missing fact from the saved page.
+    await workflow.delegate(chief, projectDir, { role: "lead", reworkOf: "us-lead", findings: ["R001"] })
+    const leadEvent = (await json(path.join(us.dir, "events.json"))).events.find((event: { title: string }) => event.title === "Synthetic agency proposes accelerator licence rule").id
+    await brief("add-claim", us.dir, leadEvent, "S001", "--quote", "Comments are due by April 9, 2030", "--text", "Comments on the proposed rule are due by April 9, 2030.", "--pub-date", TODAY)
+    expect(await workflow.submit(us.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(us.chatId!)
+    await workflow.wait(chief, projectDir, { taskIds: ["us-lead"] })
+    expect((await json(path.join(runDir, "evidence_ledger.json"))).claims.map((claim: { text: string }) => claim.text))
+      .toContain("Comments on the proposed rule are due by April 9, 2030.")
+
+    expect(await workflow.submit(chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true, provenance: "PASS", reviewTask: "review-2" })
+    expect(await readFile(path.join(runDir, "report.html"), "utf8")).toContain("Comments on the proposed rule are due by April 9, 2030.")
+    const second = workflow.getRun(started.runId)!.tasks.find((task) => task.id === "review-2")!
+    expect(second.chatId).not.toBe(reviewer.chatId)
+    await writeFile(path.join(runDir, second.dir, "findings.json"), JSON.stringify({ verdict: "pass", summary: "The deadline is now stated.", findings: [] }))
+    expect(await workflow.submit(second.chatId!, projectDir, {})).toMatchObject({ accepted: true, verdict: "pass" })
     const final = workflow.getRun(started.runId)!
     expect(["ready_for_human_review", "incomplete"]).toContain(final.status)
     expect(final.final).toMatchObject({ provenance: "PASS" })
+    // Human sign-off stays mandatory: the form exists, nothing claims verification, and the summary says so.
     expect(existsSync(path.join(runDir, "qa", "signoff.md"))).toBe(true)
+    expect(await readFile(path.join(runDir, "report.html"), "utf8")).not.toMatch(/\bverified\b/i)
+    expect(await readFile(path.join(runDir, "qa", "workflow_summary.md"), "utf8")).toContain("Human sign-off is still required")
+    expect(final.reviewRounds).toBe(2)
   }, 60_000)
 })

@@ -1899,6 +1899,9 @@ export class AgentCoordinator {
         // No token → nothing to resume; a fork in progress must not be disturbed.
         if (!args.sessionToken || args.pendingForkSessionToken) return false
         try {
+          // The preflight starts the session the turn reuses, so it must be the confined one.
+          const policy = await this.briefing?.executionPolicy(args.chatId, args.cwd) ?? null
+          if (policy && "refuse" in policy) return false
           const started = await this.codexManager.startSession({
             chatId: args.chatId,
             cwd: args.cwd,
@@ -1906,6 +1909,7 @@ export class AgentCoordinator {
             serviceTier: args.serviceTier,
             sessionToken: args.sessionToken,
             pendingForkSessionToken: null,
+            restriction: policy?.restriction,
           })
           return started?.resumeFellBack === true
         } catch {
@@ -2000,6 +2004,13 @@ export class AgentCoordinator {
     if (!project) {
       throw new Error("Project not found")
     }
+    // A multi-agent briefing agent runs only on Codex, confined by its role's permission profile.
+    const briefingPolicy = await this.briefing?.executionPolicy(args.chatId, project.localPath) ?? null
+    if (briefingPolicy && "refuse" in briefingPolicy) throw new Error(briefingPolicy.refuse)
+    if (briefingPolicy && args.provider !== "codex") {
+      throw new Error("Multi-agent briefing agents run only on Codex, whose permission profiles confine them.")
+    }
+    const restriction = briefingPolicy?.restriction
 
     // Mid-conversation harness switch: drop the old provider's session (its
     // native context is stale the moment another harness takes a turn — we
@@ -2199,6 +2210,7 @@ export class AgentCoordinator {
         serviceTier: args.serviceTier,
         sessionToken: chat.sessionToken,
         pendingForkSessionToken: chat.pendingForkSessionToken,
+        restriction,
       })
       if (chat.pendingForkSessionToken && started?.sessionToken) {
         await this.store.setPendingForkSessionToken(args.chatId, null)

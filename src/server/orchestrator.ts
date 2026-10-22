@@ -584,6 +584,30 @@ export class ChatOrchestrator {
     return chat && !chat.deletedAt ? this.outcomeOf(chat) : null
   }
 
+  /**
+   * Token usage the provider reported in a chat's transcript after entry
+   * `fromIndex`, one item per model request, and the index to read on from.
+   * Only what the provider has reported so far: a request in flight is not in it.
+   */
+  getUsageSince(chatId: string, fromIndex: number) {
+    const total = this.store.getChat(chatId) ? this.store.getTranscriptLength(chatId) : 0
+    const requests: Array<{ at: number; input: number; cachedInput: number; output: number; reasoning: number }> = []
+    if (fromIndex < total) {
+      for (const entry of this.store.getClientTranscript(chatId, fromIndex).messages) {
+        if (entry.kind !== "context_window_updated") continue
+        const usage = entry.usage
+        requests.push({
+          at: entry.createdAt,
+          input: usage.lastInputTokens ?? 0,
+          cachedInput: usage.lastCachedInputTokens ?? 0,
+          output: usage.lastOutputTokens ?? 0,
+          reasoning: usage.lastReasoningOutputTokens ?? 0,
+        })
+      }
+    }
+    return { nextIndex: Math.max(fromIndex, total), requests }
+  }
+
   getContext(actorChatId: string) {
     const chat = this.requireChat(actorChatId)
     const project = this.store.getProject(chat.projectId)
@@ -714,6 +738,12 @@ export class ChatOrchestrator {
     title?: string
     projectId?: string
     subchat?: boolean
+    /**
+     * Runs after the chat exists and before its first message is sent, so a
+     * caller can register what the chat's first turn depends on (the briefing
+     * workflow's execution profile).
+     */
+    onCreated?: (chatId: string) => void | Promise<void>
   }) {
     const caller = this.requireChat(actorChatId)
     const subchat = input.subchat ?? true
@@ -735,6 +765,7 @@ export class ChatOrchestrator {
     })
     const chat = this.requireChat(created.result.chatId)
     if (input.title?.trim()) await this.commands.rename(chat.id, input.title)
+    await input.onCreated?.(chat.id)
     await this.send(actorChatId, chat, input.message, run, { report: subchat })
     this.push(created.changed!)
     return this.summarize(this.requireChat(chat.id))

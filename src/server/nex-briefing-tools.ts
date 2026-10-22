@@ -74,7 +74,7 @@ export const BRIEFING_TOOLS: readonly NexToolDefinition[] = [
     description: "Start a multi-agent US-China AI and semiconductor briefing run (us-china-ai-chip-briefing Skill). Use only when the user explicitly asks for the multi-agent briefing. Creates the run directory and the Chief Editor sub-chat, which reports back here when the run ends. Returns at once.",
     schema: start,
     async execute(input, context) {
-      return reply(await workflow(context).start(context.chatId, context.cwd, start.parse(input)))
+      return reply(await workflow(context).start(context.chatId, context.cwd, start.parse(input), context.signal))
     },
   },
   {

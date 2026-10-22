@@ -7,11 +7,12 @@ import { AgentCoordinator } from "./agent"
 import { NoopAnalyticsReporter } from "./analytics"
 import { AsyncQueue } from "./async-queue"
 import { BriefingWorkflow, buildRoleInstructions, extractSection, type PythonRunner } from "./briefing-workflow"
+import type { CodexRestriction, SandboxRunner } from "./briefing-sandbox"
 import { createChatCommands } from "./chat-commands"
 import { EventStore } from "./event-store"
 import type { HarnessEvent, HarnessTurn } from "./harness-types"
 import { BRIEFING_TOOLS } from "./nex-briefing-tools"
-import { NEX_TOOL_NAMES, NexToolRuntime } from "./nex-tools"
+import { NEX_TOOL_NAMES, NEX_TOOLS, NexToolRuntime } from "./nex-tools"
 import { ChatOrchestrator } from "./orchestrator"
 import { timestamped } from "./transcript"
 
@@ -28,7 +29,10 @@ interface FakeTurn { chatId: string; content: string; events: AsyncQueue<Harness
 
 class FakeCodex {
   readonly turns: FakeTurn[] = []
-  async startSession() {}
+  readonly sessions: Array<{ chatId: string; cwd: string; restriction?: CodexRestriction }> = []
+  async startSession(args: { chatId: string; cwd: string; restriction?: CodexRestriction }) {
+    this.sessions.push({ chatId: args.chatId, cwd: args.cwd, restriction: args.restriction })
+  }
   stopSession() {}
   stopAll() {}
   getResourceCounts() { return {} }
@@ -48,6 +52,15 @@ class FakeCodex {
     turn.open = false
     turn.events.finish()
   }
+  /** A model request the provider reported, as Codex's token-count event reaches the transcript. */
+  usage(chatId: string, tokens: { input: number; cached?: number; output: number }) {
+    const turn = this.openTurn(chatId)!
+    turn.events.push({ type: "transcript", entry: timestamped({ kind: "context_window_updated", usage: {
+      usedTokens: tokens.input + tokens.output, lastInputTokens: tokens.input, lastCachedInputTokens: tokens.cached ?? 0,
+      lastOutputTokens: tokens.output, lastReasoningOutputTokens: 0, compactsAutomatically: true,
+    } }) })
+  }
+
   fail(chatId: string, message: string) {
     const turn = this.openTurn(chatId)!
     turn.events.push({ type: "transcript", entry: timestamped({ kind: "result", subtype: "error", isError: true, durationMs: 0, result: message }) })
@@ -63,6 +76,9 @@ async function until(condition: () => boolean, label = "condition") {
   }
   throw new Error(`Timed out waiting for ${label}`)
 }
+
+/** The tool list a server with NEX_BRIEFING_WORKFLOW=1 offers. */
+const NEX_TOOLS_WITH_BRIEFING = [...NEX_TOOLS, ...BRIEFING_TOOLS]
 
 const ROLE_HEAD = (includes: string) => `---\nrole: x\nincludes: ${includes}\nreads: references/sources.md\n---\n`
 
@@ -107,7 +123,8 @@ function fakePython(calls: string[][]): PythonRunner {
       await writeFile(path.join(run, "report.html"), "<html lang=\"en\">fixture</html>")
       const readiness = existsSync(path.join(run, "fixture-blocked")) ? "BLOCKED" : "READY_FOR_HUMAN_REVIEW"
       await writeFile(path.join(run, "qa", "review_report.json"), JSON.stringify({ readiness }))
-      return { exitCode: readiness === "BLOCKED" ? 1 : 2, stdout: "Wrote report\n", stderr: "" }
+      const fix = readiness === "BLOCKED" ? "FIX 1: GENERATION_REPORT_MISMATCH [generated_at] → generated_at is outside report_date\n" : ""
+      return { exitCode: readiness === "BLOCKED" ? 1 : 2, stdout: `Wrote report\n${fix}`, stderr: "" }
     }
     if (script === "check_handoff.py") {
       const override = path.join(args[1]!, "fixture-handoff.json")
@@ -133,7 +150,21 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
 })
 
-async function setup(options: { budgets?: Record<string, unknown>; now?: () => number; watchdogMs?: number } = {}) {
+/** Answers the pre-run sandbox check as an enforcing host would. */
+const ENFORCING_SANDBOX: SandboxRunner = async () => ({
+  exitCode: 0,
+  stdout: ["write own task directory=allowed", "write another task directory=denied", "read another task directory=denied",
+    "write workflow state=denied", "read workflow state=denied", "read Codex credentials=denied"].join("\n"),
+  stderr: "",
+})
+
+async function setup(options: {
+  budgets?: Record<string, unknown>
+  now?: () => number
+  watchdogMs?: number
+  sandboxRunner?: SandboxRunner
+  usedPercent?: number | null
+} = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-data-"))
   const projectDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-project-"))
   const home = await mkdtemp(path.join(tmpdir(), "nex-briefing-home-"))
@@ -151,7 +182,10 @@ async function setup(options: { budgets?: Record<string, unknown>; now?: () => n
   const orchestrator = new ChatOrchestrator({ store, agent, commands: createChatCommands({ store, agent, analytics: NoopAnalyticsReporter }), push: () => {} })
   const calls: string[][] = []
   const logs: string[] = []
-  const workflow = new BriefingWorkflow({ chats: orchestrator, python: fakePython(calls), settleGraceMs: 10, home, now: options.now, watchdogMs: options.watchdogMs, log: (line) => logs.push(line) })
+  const workflow = new BriefingWorkflow({
+    chats: orchestrator, python: fakePython(calls), settleGraceMs: 10, home, now: options.now, watchdogMs: options.watchdogMs,
+    sandboxRunner: options.sandboxRunner ?? ENFORCING_SANDBOX, providerUsedPercent: () => options.usedPercent ?? null, log: (line) => logs.push(line),
+  })
   agent.orchestration = orchestrator
   agent.briefing = workflow
   agent.onChatSettled = (chatId) => { orchestrator.handleChatSettled(chatId); workflow.handleChatSettled(chatId) }
@@ -173,6 +207,11 @@ async function setup(options: { budgets?: Record<string, unknown>; now?: () => n
 
   async function writeOutput(dir: string, value: Record<string, unknown>) {
     await writeFile(path.join(dir, "output.json"), JSON.stringify({ status: "complete", summary: "Synthetic summary.", ...value }))
+  }
+
+  /** Waits until the coordinator has stored `count` usage reports for a chat. */
+  async function usageLanded(chatId: string, count: number) {
+    await until(() => orchestrator.getUsageSince(chatId, 0).requests.length >= count, "usage in the transcript")
   }
 
   /** briefing_start, plan, and both leads delegated. Returns the chat and task handles. */
@@ -203,7 +242,7 @@ async function setup(options: { budgets?: Record<string, unknown>; now?: () => n
     return { scout, waited }
   }
 
-  return { store, project, projectDir, codex, orchestrator, workflow, calls, logs, userChat, startRun, researchCountry, writeOutput }
+  return { store, project, projectDir, codex, orchestrator, workflow, calls, logs, userChat, startRun, researchCountry, writeOutput, usageLanded }
 }
 
 describe("briefing workflow", () => {
@@ -280,7 +319,7 @@ describe("briefing workflow", () => {
     await until(() => codex.turnsFor(run.cnLead).length === 2, "the request reaching the China lead")
     expect(codex.turnsFor(run.cnLead)[1]!.content).toContain("Which Chinese firms are named as affected?")
     expect(codex.turnsFor(run.cnLead)[1]!.content).toContain("Synthetic US rule")
-    const xbDir = path.join(run.runDir, "tasks", "xb-01")
+    const xbDir = path.join(run.cnDir, "xb-01")
     await writeOutput(xbDir, { task_id: "xb-01", answer: "None named in the window.", remaining_uncertainty: "Ministry statement pending." })
     expect(await workflow.submit(run.cnLead, projectDir, {})).toMatchObject({ accepted: true })
     codex.finish(run.cnLead)
@@ -455,7 +494,7 @@ describe("briefing workflow", () => {
   })
 
   test("validator and provenance failures refuse the draft; a draft changed after review is not marked ready", async () => {
-    const { startRun, researchCountry, workflow, codex, projectDir } = await setup()
+    const { startRun, researchCountry, workflow, codex, projectDir, logs } = await setup()
     const run = await startRun()
     await researchCountry(run.usLead, run.usDir, "us-lead")
     await researchCountry(run.cnLead, run.cnDir, "cn-lead")
@@ -468,6 +507,7 @@ describe("briefing workflow", () => {
     await rm(path.join(run.runDir, "fixture-not-ready"))
     await writeFile(path.join(run.runDir, "fixture-blocked"), "")
     expect((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems).toEqual(expect.arrayContaining([expect.stringContaining("validator blocked")]))
+    expect(logs.some((line) => line.includes("submission=refused") && line.includes('codes=["GENERATION_REPORT_MISMATCH"]'))).toBe(true)
     await rm(path.join(run.runDir, "fixture-blocked"))
     await writeFile(path.join(run.runDir, "fixture-provenance-fail"), "")
     expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: false })
@@ -512,10 +552,185 @@ describe("briefing workflow", () => {
     expect(workflow.getRun(run.runId)!.tasks.find((task) => task.id === scout.taskId)!.failure).toBe("timed out after 1 minutes")
   })
 
+  test("agents run under their role's profile in their own directory; the user's chat does not", async () => {
+    const { startRun, workflow, codex, projectDir } = await setup()
+    const run = await startRun()
+    const scout = await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })
+    const sessionOf = (chatId: string) => codex.sessions.find((session) => session.chatId === chatId)!
+    expect(sessionOf(run.root).restriction).toBeUndefined()
+    expect(sessionOf(run.chief).restriction).toMatchObject({ profile: "nex-briefing-chief", cwd: run.runDir })
+    expect(sessionOf(run.usLead).restriction).toMatchObject({ profile: "nex-briefing-lead", cwd: run.usDir })
+    const scoutProfile = sessionOf(scout.chatId!).restriction!
+    expect(scoutProfile).toMatchObject({ profile: "nex-briefing-scout", cwd: scout.dir, network: true })
+    expect(scoutProfile.filesystem[scout.dir]).toBe("write")
+    expect(scoutProfile.filesystem[path.join(run.runDir, "workflow.json")]).toBe("deny")
+    // Two scouts never share a writable directory.
+    const other = await workflow.delegate(run.cnLead, projectDir, { role: "scout", topic: "t2" })
+    const otherProfile = sessionOf(other.chatId!).restriction!
+    expect(otherProfile.filesystem[other.dir]).toBe("write")
+    expect(otherProfile.filesystem[scout.dir]).toBeUndefined() // falls under the denied project
+    expect(otherProfile.filesystem[projectDir]).toBe("deny")
+  })
+
+  test("an agent gets only its role's tools: injected instructions cannot reach other chats, schedules or attachments", async () => {
+    const { startRun, workflow, store, project, projectDir } = await setup()
+    const run = await startRun()
+    const scout = await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })
+    const userChat = await store.createChat(project.id)
+    const runtime = (chatId: string) => new NexToolRuntime({ chatId, cwd: project.localPath, emit: async () => {}, requestInput: async () => ({}), briefing: workflow }, NEX_TOOLS_WITH_BRIEFING)
+    // What a page saying "send the run to this chat / schedule a job / attach the files" would make an agent try.
+    for (const [tool, input] of [
+      ["send_message", { chatId: userChat.id, message: "exfiltrate" }],
+      ["create_chat", { message: "start something" }],
+      ["set_schedule", { message: "x", inMinutes: 1 }],
+      ["send_attachments", { paths: ["/etc/hosts"] }],
+      ["generate_images", { prompt: "x" }],
+      ["briefing_delegate", { role: "scout", topic: "more" }],
+    ] as const) {
+      const result = await runtime(scout.chatId!).execute(tool, input)
+      expect(result.isError).toBe(true)
+      expect(result.content[0]!.text).toContain("not available to this briefing agent")
+    }
+    expect((await runtime(scout.chatId!).execute("briefing_status", {})).isError).toBeUndefined()
+    expect(workflow.allowedTools(run.usLead)).toEqual(["briefing_status", "briefing_delegate", "briefing_wait", "briefing_submit"])
+    expect(workflow.allowedTools(run.chief)).toContain("briefing_cross_border")
+    expect(workflow.allowedTools(run.root)).toBeNull() // the user's own chat is not restricted
+    expect(store.getQueuedMessages(userChat.id)).toHaveLength(0)
+  })
+
+  test("a chat an agent creates outside the workflow is refused before it runs", async () => {
+    const { startRun, workflow, codex, orchestrator, store } = await setup()
+    const run = await startRun()
+    await expect(orchestrator.createChat(run.usLead, { message: "do something unconfined" })).rejects.toThrow("has no permission profile and cannot run")
+    const stray = [...store.state.chatsById.values()].find((chat) => chat.createdByChatId === run.usLead && chat.parentChatId === run.usLead
+      && !workflow.getRun(run.runId)!.tasks.some((task) => task.chatId === chat.id))!
+    expect(await workflow.executionPolicy(stray.id)).toMatchObject({ refuse: expect.stringContaining("outside the workflow") })
+    expect(codex.turnsFor(stray.id)).toHaveLength(0)
+    expect(codex.sessions.some((session) => session.chatId === stray.id)).toBe(false)
+    expect(workflow.allowedTools(stray.id)).toEqual([])
+  })
+
+  test("a host that does not enforce the profile never starts a run", async () => {
+    const leaky: SandboxRunner = async () => ({ exitCode: 0, stdout: "write own task directory=allowed\nwrite another task directory=allowed", stderr: "" })
+    const { userChat, workflow, projectDir, codex } = await setup({ sandboxRunner: leaky })
+    const root = await userChat()
+    await expect(workflow.start(root, projectDir, { request: "x", end: "2030-03-10", discovery: false })).rejects.toThrow("sandbox is not enforced")
+    expect(codex.sessions.filter((session) => session.restriction)).toHaveLength(0)
+    const missing: SandboxRunner = async () => ({ exitCode: 127, stdout: "", stderr: "spawn codex ENOENT" })
+    const second = await setup({ sandboxRunner: missing })
+    await expect(second.workflow.start(await second.userChat(), second.projectDir, { request: "x", end: "2030-03-10", discovery: false })).rejects.toThrow("codex sandbox could not run")
+  })
+
+  test("a request stopped while the run is being prepared starts no agent", async () => {
+    const stop = new AbortController()
+    // The user stops the chat while the pre-run check is running.
+    const stoppingCheck: SandboxRunner = async (...args) => {
+      stop.abort()
+      return ENFORCING_SANDBOX(...args)
+    }
+    const { userChat, workflow, projectDir, codex } = await setup({ sandboxRunner: stoppingCheck })
+    const root = await userChat()
+    await expect(workflow.start(root, projectDir, { request: "x", end: "2030-03-10", discovery: false }, stop.signal))
+      .rejects.toThrow("Cancelled before any agent started")
+    expect(codex.sessions.filter((session) => session.restriction)).toHaveLength(0)
+    expect(await workflow.status(root, projectDir, {})).toMatchObject({ status: "cancelled", tasks: [] })
+  })
+
+  test("cross-border replies are written inside the answering lead's own directory", async () => {
+    const { startRun, researchCountry, workflow, codex, projectDir } = await setup()
+    const run = await startRun()
+    await researchCountry(run.usLead, run.usDir, "us-lead")
+    await researchCountry(run.cnLead, run.cnDir, "cn-lead")
+    codex.finish(run.usLead)
+    codex.finish(run.cnLead)
+    await workflow.wait(run.chief, projectDir, {})
+    await writeFile(path.join(run.usDir, "events.json"), JSON.stringify({ events: [{ id: "E001", title: "Synthetic rule" }] }))
+    await workflow.crossBorder(run.chief, projectDir, { fromTaskId: "us-lead", toCountry: "cn", question: "q", eventIds: ["E001"], scope: "s", evidenceRequired: "e" })
+    const xb = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "xb-01")!
+    expect(path.join(run.runDir, xb.dir)).toBe(path.join(run.cnDir, "xb-01"))
+  })
+
+  test("provider refusals are classified; a 403 halts new work and a chief lost to it ends the run as provider_unavailable", async () => {
+    const { startRun, workflow, codex, projectDir } = await setup({ usedPercent: 79 })
+    const run = await startRun()
+    const scout = await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })
+    codex.fail(scout.chatId!, "unexpected status 403 Forbidden: <html><body>blocked</body></html>")
+    const waited = await workflow.wait(run.usLead, projectDir, {})
+    expect(waited.tasks[0]).toMatchObject({ state: "failed", failure: expect.stringContaining("provider error (forbidden, HTTP 403)") })
+    expect(workflow.getRun(run.runId)!.provider).toMatchObject({ state: "halted", lastError: { class: "forbidden", status: 403, task: "us-s01" } })
+    // Retrying into the same refusal is pointless: nothing new starts.
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", retryOf: "us-s01" })).rejects.toThrow("provider refused this run")
+    codex.fail(run.usLead, "unexpected status 403 Forbidden")
+    codex.fail(run.cnLead, "unexpected status 403 Forbidden")
+    // Each failed lead's report wakes the chief, whose next request meets the same refusal.
+    for (let attempt = 0; attempt < 400 && workflow.getRun(run.runId)!.status === "running"; attempt += 1) {
+      if (codex.openTurn(run.chief)) codex.fail(run.chief, "unexpected status 403 Forbidden")
+      await Bun.sleep(5)
+    }
+    expect(workflow.getRun(run.runId)!.status).toBe("provider_unavailable")
+    expect(await readFile(path.join(run.runDir, "qa", "workflow_summary.md"), "utf8")).toContain("Provider: halted (last error forbidden, HTTP 403")
+  })
+
+  test("a rate limit backs off new starts, then allows them again", async () => {
+    let clock = Date.parse("2030-03-10T00:00:00Z")
+    const { startRun, workflow, codex, projectDir } = await setup({ now: () => clock })
+    const run = await startRun()
+    const scout = await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })
+    codex.fail(scout.chatId!, "unexpected status 429 Too Many Requests")
+    await workflow.wait(run.usLead, projectDir, {})
+    expect(workflow.getRun(run.runId)!.provider).toMatchObject({ state: "backoff", until: "2030-03-10T00:01:00.000Z" })
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", retryOf: "us-s01" })).rejects.toThrow("retry after 2030-03-10T00:01:00.000Z")
+    clock += 61_000
+    expect(await workflow.delegate(run.usLead, projectDir, { role: "scout", retryOf: "us-s01" })).toMatchObject({ taskId: "us-s01-a2", state: "running" })
+  })
+
+  test("token use is counted per task and per run, and a task over its budget is stopped", async () => {
+    const { startRun, workflow, codex, projectDir, usageLanded } = await setup({ budgets: { token_budget: { run_fresh_tokens: 1_000_000, task_fresh_tokens: { scout: 10_000 } } } })
+    const run = await startRun()
+    const scout = await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })
+    codex.usage(scout.chatId!, { input: 6_000, cached: 4_000, output: 1_000 })
+    codex.usage(run.usLead, { input: 3_000, cached: 0, output: 500 })
+    await usageLanded(scout.chatId!, 1)
+    await usageLanded(run.usLead, 1)
+    let status = await workflow.status(run.usLead, projectDir, {})
+    expect(status.tasks.find((task) => task.taskId === "us-s01")).toMatchObject({ freshTokens: 3_000, cachedInputTokens: 4_000 })
+    expect(status.usage).toMatchObject({ input: 9_000, cachedInput: 4_000, output: 1_500, freshTokens: 6_500, requests: 2 })
+    codex.usage(scout.chatId!, { input: 9_000, cached: 1_000, output: 1_000 })
+    await usageLanded(scout.chatId!, 2)
+    status = await workflow.status(run.usLead, projectDir, {})
+    expect(status.tasks.find((task) => task.taskId === "us-s01")).toMatchObject({ state: "failed", failure: "task token budget exhausted (12000 of 10000 fresh tokens)" })
+  })
+
+  test("a run over its budget stops every agent; near the budget no new research starts but the review may", async () => {
+    const { startRun, workflow, codex, projectDir, usageLanded } = await setup({ budgets: { token_budget: { run_fresh_tokens: 100_000 } } })
+    const run = await startRun()
+    codex.usage(run.chief, { input: 91_000, output: 0 })
+    await usageLanded(run.chief, 1)
+    await workflow.status(run.chief, projectDir, {})
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })).rejects.toThrow("no new research starts")
+    codex.usage(run.chief, { input: 10_000, output: 0 })
+    await usageLanded(run.chief, 2)
+    const status = await workflow.status(run.chief, projectDir, {})
+    expect(status.status).toBe("budget_exhausted")
+    expect(status.tasks.map((task) => task.state)).toEqual(["cancelled", "cancelled", "cancelled"])
+    expect(await readFile(path.join(run.runDir, "qa", "workflow_summary.md"), "utf8")).toContain("**budget_exhausted**")
+  })
+
+  test("after a restart an agent's chat is still recognised and confined before its first turn", async () => {
+    const { startRun, workflow, projectDir, orchestrator } = await setup()
+    const run = await startRun()
+    const scout = await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })
+    const reloaded = new BriefingWorkflow({ chats: orchestrator, python: fakePython([]), settleGraceMs: 10, sandboxRunner: ENFORCING_SANDBOX, log: () => {} })
+    const policy = await reloaded.executionPolicy(scout.chatId!, projectDir)
+    expect(policy).toMatchObject({ restriction: { profile: "nex-briefing-scout", cwd: scout.dir } })
+    expect(reloaded.allowedTools(scout.chatId!)).toEqual(["briefing_status", "briefing_submit"])
+    reloaded.dispose()
+  })
+
   test("the run survives a restart: a new controller reads workflow.json back", async () => {
     const { startRun, workflow, projectDir, orchestrator } = await setup()
     const run = await startRun()
-    const reloaded = new BriefingWorkflow({ chats: orchestrator, python: fakePython([]), settleGraceMs: 10, log: () => {} })
+    const reloaded = new BriefingWorkflow({ chats: orchestrator, python: fakePython([]), settleGraceMs: 10, sandboxRunner: ENFORCING_SANDBOX, log: () => {} })
     const status = await reloaded.status(run.chief, projectDir, {})
     expect(status).toMatchObject({ runId: run.runId, stage: "country_tasks_assigned" })
     expect(status.tasks.map((task) => task.taskId)).toEqual(["chief", "us-lead", "cn-lead"])

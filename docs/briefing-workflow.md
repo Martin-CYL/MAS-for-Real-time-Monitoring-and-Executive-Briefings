@@ -24,10 +24,12 @@ levels; scouts beyond the run's concurrency budget are queued by the workflow an
 | File | Role |
 |---|---|
 | `src/server/briefing-workflow.ts` | Run state, task rules, queue, acceptance, merges, draft/review/rework, final status |
+| `src/server/briefing-sandbox.ts` | Per-role Codex permission profiles and the pre-run enforcement check |
+| `src/server/briefing-provider.ts` | Provider error classes and backoff |
 | `src/server/briefing-contracts.ts` | Zod schemas for the agents' envelopes: `output.json`, `plan.json`, `findings.json` |
 | `src/server/nex-briefing-tools.ts` | The six agent tools |
-| `src/server/nex-tools.ts`, `agent.ts`, `server.ts` | Registration behind the flag, wiring, settle/stop hooks |
-| `src/server/orchestrator.ts` | Two read-only accessors (`getChatSummary`, `getChatOutcome`) |
+| `src/server/nex-tools.ts`, `agent.ts`, `server.ts`, `codex-app-server.ts` | Registration behind the flag, role tool allowlist, confined Codex sessions, wiring |
+| `src/server/orchestrator.ts` | Read-only accessors (`getChatSummary`, `getChatOutcome`, `getUsageSince`) and `createChat`'s `onCreated` |
 
 The Skill supplies the domain side: role instructions (`references/roles/*.md`, which name the sections of
 `SKILL.md` and the references each role needs), research categories and budgets (`references/roles/*.json`), the
@@ -62,8 +64,59 @@ record keeper (`scripts/brief.py`, now able to render the English template), `me
   budgeted in the Skill's `references/roles/workflow.json`. Time budgets are re-checked every minute while a run is
   active, so a task whose provider request hangs is stopped and recorded as timed out even when no agent is calling
   a tool.
-- Final statuses: `ready_for_human_review`, `incomplete`, `escalated`, `blocked`, `failed`, `cancelled`. None of them
-  replaces the human sign-off in `qa/signoff.md`.
+- Final statuses: `ready_for_human_review`, `incomplete`, `escalated`, `blocked`, `failed`, `cancelled`,
+  `budget_exhausted`, `provider_unavailable`. None of them replaces the human sign-off in `qa/signoff.md`.
+
+## Agent permissions
+
+Ordinary Nex chats run Codex with `danger-full-access`. Briefing agents do not. Each agent's Codex session gets a
+permission profile for its role, passed as thread config overrides (`default_permissions`, `permissions.<profile>`),
+and Codex enforces it with the OS sandbox (Seatbelt on macOS). Nothing is written to the user's Codex config.
+
+| | Writes | Reads denied (besides credentials) | Nex tools |
+|---|---|---|---|
+| Scout | its own `tasks/<id>/` | the rest of the run and project, except `discovery/` and the Skill | `briefing_submit`, `briefing_status` |
+| Lead | its own directory (cross-border replies are nested in it) | other runs and project files | + `briefing_delegate`, `briefing_wait` |
+| Chief | the run root, except `tasks/` (read-only) and controller files | other runs and project files | + `briefing_cross_border` |
+| Reviewer | its own `tasks/review-N/` | other runs and project files | `briefing_submit`, `briefing_status` |
+
+For every role:
+
+- Denied reads and writes: `workflow.json`, `workflow.log.jsonl`, Nex's data directory, `CODEX_HOME`, `~/.codex`,
+  `~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.config`, `~/.gitconfig`, `~/.git-credentials`, `~/.netrc`, `~/.nex*`,
+  `~/Library/Keychains` and similar (`HOME_DENY` in `briefing-sandbox.ts`). `assignment.json` and `submission.json` are
+  read-only. Network stays on for research.
+- Codex features that act outside the shell sandbox are off: computer use, browser use, connectors (`apps`),
+  plugins and native sub-agents. The shell environment drops variables matching `*TOKEN*`, `*SECRET*`, `*KEY*`,
+  `*PASSWORD*`, `GH_*`, `GITHUB_*`, `NEX_*`, and Git is pointed at no global or system config.
+- Nex tools outside the role's list are refused in `NexToolRuntime`, whatever the provider lists: an agent cannot
+  message other chats, schedule work, start chats, send attachments or generate images. There is no approval path
+  inside a run; such operations are denied.
+- An agent's task is registered before its chat's first turn (`createChat`'s `onCreated`). A chat an agent creates
+  outside the workflow is refused before it runs, and briefing agents run only on Codex.
+- Before a run starts, `verifySandbox` runs a scout's profile through `codex sandbox` against canaries (own directory
+  writable; another task directory, the workflow state and Codex credentials not). If the host does not enforce it,
+  the run does not start.
+
+Limits: reads outside the denied paths are allowed, so an agent can still read system files and unlisted parts of the
+user's home. Network egress is not restricted by domain. The controller's own Python checks and merges run outside
+the sandbox on agent-written JSON (as data, with `python3 -I`). Enforcement was verified on macOS (Codex 0.163,
+Seatbelt); on Linux it depends on that host's Codex sandbox and is checked by `verifySandbox` at each run start.
+
+## Tokens, providers and statuses
+
+Usage is read from the provider's per-request reports in each agent's transcript and attributed to the task that
+chat was working on: input, cached input, output and reasoning tokens per task and per run (`briefing_status`,
+`qa/workflow_summary.md`). Budgets count fresh tokens (uncached input + output) and live in the Skill's
+`workflow.json` (`token_budget`). At 90 % of the run budget no new research starts (a review still may); past a task
+budget the task is stopped; past the run budget every agent is stopped and the run ends `budget_exhausted`. Checks
+run after each tool call and every minute, and a request in flight is invisible until it ends, so the budgets are
+best-effort ceilings, not hard caps.
+
+A turn that ends on a provider error is classified from its message and, where Nex knows it, the account's usage
+window: `auth`, `forbidden`, `quota`, `rate_limit`, `transient` or unknown. A 403 is `forbidden`, not quota, unless the
+window is full. `auth`, `forbidden` and `quota` halt the run's new starts and retries; `rate_limit` and `transient`
+back off (1, 2, 4… up to 15 minutes). A chief lost to a provider error ends the run `provider_unavailable`.
 
 ## Files of a run
 
@@ -90,7 +143,11 @@ the account's Codex skills directory), then ask in a chat: `/us-china-ai-chip-br
   stand-in for the Skill scripts. Covers delegation depth, result return, queueing, budgets, refusal, failure, retry,
   timeout, cancellation, cross-border, review/rework bounds, partial runs, restart and tool wiring.
 - `src/server/briefing-workflow.skill.test.ts`: the same hierarchy through the real Skill scripts (records, merges,
-  handoff and provenance checks, English render and validator), with a seeded post-handoff edit. Skipped unless
+  handoff and provenance checks, English render and validator): a proposal written as enacted is refused, a
+  post-handoff edit is refused, review rework is routed to the responsible lead and resubmitted. Skipped unless
   `BRIEFING_SKILL_DIR` points at the Skill.
+- `src/server/briefing-sandbox.test.ts`: profiles per role, the exact `thread/start` parameters, session reuse, the
+  pre-run check; with `NEX_CODEX_SANDBOX_TEST=1` and `codex` on PATH it runs the real OS sandbox.
+- `src/server/briefing-provider.test.ts`: provider error classes and backoff.
 
 Both play the agents by hand. They show the workflow's rules and handoffs, not what a model researches or writes.

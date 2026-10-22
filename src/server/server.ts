@@ -231,7 +231,15 @@ export async function startNexServer(options: StartNexServerOptions = {}) {
   })
   agent.orchestration = orchestrator
   // The multi-agent briefing: an opt-in workflow on top of the orchestrator's sub-chats.
-  const briefing = briefingWorkflowEnabled() ? new BriefingWorkflow({ chats: orchestrator }) : null
+  const briefing = briefingWorkflowEnabled()
+    ? new BriefingWorkflow({
+      chats: orchestrator,
+      // Denied to every briefing agent, besides the credential stores under the home directory.
+      deniedPaths: [store.dataDir, path.dirname(store.dataDir), ...(process.env.CODEX_HOME ? [process.env.CODEX_HOME] : [])],
+    })
+    : null
+  // Agents resumed after a restart must be recognised before their first turn.
+  if (briefing) void briefing.loadProjects(store.listProjects().map((project) => project.localPath))
   agent.briefing = briefing
   agent.onChatSettled = (chatId) => {
     orchestrator.handleChatSettled(chatId)

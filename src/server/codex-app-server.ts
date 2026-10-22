@@ -17,6 +17,7 @@ import { buildNexSystemInstructions } from "./harness-instructions"
 import { AsyncQueue } from "./async-queue"
 import type { SubagentActivityUpdate } from "./background-tasks"
 import type { NexToolHost } from "./nex-tools"
+import { type CodexRestriction, nexMcpApproval, restrictionConfig, restrictionKey } from "./briefing-sandbox"
 import { createNexMcpServer } from "./nex-mcp"
 import { asNumber, asRecord } from "../shared/json"
 import { timestamped } from "./transcript"
@@ -158,6 +159,8 @@ interface SessionContext {
   customTools?: ReturnType<typeof createNexMcpServer>
   chatId: string
   cwd: string
+  /** `restrictionKey` of the profile the session was started under; empty for an unrestricted session. */
+  restriction: string
   child: CodexAppServerProcess
   pendingRequests: Map<CodexRequestId, PendingRequest<unknown>>
   pendingTurn: PendingTurn | null
@@ -182,6 +185,11 @@ export interface StartCodexSessionArgs {
   serviceTier?: ServiceTier
   sessionToken: string | null
   pendingForkSessionToken?: string | null
+  /**
+   * A least-privilege profile instead of `danger-full-access` (multi-agent
+   * briefing chats only; see `briefing-sandbox.ts`). Its cwd replaces `cwd`.
+   */
+  restriction?: CodexRestriction
 }
 
 export interface StartCodexTurnArgs {
@@ -908,6 +916,7 @@ export class CodexAppServerManager {
     const context: SessionContext = {
       chatId: `probe-${randomUUID()}`,
       cwd,
+      restriction: "",
       child,
       pendingRequests: new Map(),
       pendingTurn: null,
@@ -937,7 +946,9 @@ export class CodexAppServerManager {
 
   async startSession(args: StartCodexSessionArgs) {
     const existing = this.sessions.get(args.chatId)
-    if (existing && !existing.closed && existing.cwd === args.cwd && !args.pendingForkSessionToken) {
+    const cwd = args.restriction?.cwd ?? args.cwd
+    const restriction = restrictionKey(args.restriction)
+    if (existing && !existing.closed && existing.cwd === cwd && existing.restriction === restriction && !args.pendingForkSessionToken) {
       return
     }
 
@@ -945,12 +956,13 @@ export class CodexAppServerManager {
       this.stopSession(args.chatId)
     }
 
-    const child = this.spawnProcess(args.cwd)
+    const child = this.spawnProcess(cwd)
     const customTools = args.customTools ? createNexMcpServer(args.customTools) : undefined
     const context: SessionContext = {
       customTools,
       chatId: args.chatId,
-      cwd: args.cwd,
+      cwd,
+      restriction,
       child,
       pendingRequests: new Map(),
       pendingTurn: null,
@@ -979,15 +991,22 @@ export class CodexAppServerManager {
       })
 
       // Resume and fork accept MCP config, but this CLI only accepts dynamic tools on thread/start.
-      const toolConfig = customTools ? {
+      const toolConfig = customTools || args.restriction ? {
         config: {
-          "mcp_servers.nex": {
-            url: customTools.url,
-            http_headers: customTools.headers,
-            tool_timeout_sec: 86400,
-          },
+          ...(customTools ? {
+            "mcp_servers.nex": {
+              url: customTools.url,
+              http_headers: customTools.headers,
+              tool_timeout_sec: 86400,
+              ...(args.restriction ? nexMcpApproval(args.restriction) : {}),
+            },
+          } : {}),
+          ...(args.restriction ? restrictionConfig(args.restriction) : {}),
         },
       } : {}
+      // A restricted session takes its sandbox from the permission profile in
+      // its config; an explicit sandbox mode would override the profile.
+      const sandbox = args.restriction ? {} : { sandbox: "danger-full-access" as const }
       // Standard speed is an explicit null. An omitted tier inherits the
       // user's config.toml (`service_tier = "priority"` runs fast while the
       // UI shows "Standard"), and on turn/start it keeps the thread's tier, so
@@ -995,10 +1014,10 @@ export class CodexAppServerManager {
       const serviceTier = null // Nex does not offer Fast Mode, including restored sessions.
       const threadParams = {
         model: args.model,
-        cwd: args.cwd,
+        cwd,
         serviceTier,
         approvalPolicy: "never",
-        sandbox: "danger-full-access",
+        ...sandbox,
         experimentalRawEvents: false,
         persistExtendedHistory: false,
         ...toolConfig,
@@ -1013,10 +1032,10 @@ export class CodexAppServerManager {
         response = await this.sendRequest<ThreadForkResponse>(context, "thread/fork", {
           threadId: args.pendingForkSessionToken,
           model: args.model,
-          cwd: args.cwd,
+          cwd,
           serviceTier,
           approvalPolicy: "never",
-          sandbox: "danger-full-access",
+          ...sandbox,
           persistExtendedHistory: false,
           ...toolConfig,
         } satisfies ThreadForkParams)
@@ -1025,10 +1044,10 @@ export class CodexAppServerManager {
           response = await this.sendRequest<ThreadResumeResponse>(context, "thread/resume", {
             threadId: args.sessionToken,
             model: args.model,
-            cwd: args.cwd,
+            cwd,
             serviceTier,
             approvalPolicy: "never",
-            sandbox: "danger-full-access",
+            ...sandbox,
             persistExtendedHistory: false,
             ...toolConfig,
           } satisfies ThreadResumeParams)

@@ -93,6 +93,11 @@ export class NexToolRuntime implements NexToolHost {
   async execute(name: string, rawInput: unknown, signal?: AbortSignal): Promise<NexToolResult> {
     const definition = this.definitions.find((tool) => tool.name === name)
     if (!definition) return { content: [{ type: "text", text: `Unknown Nex tool: ${name}` }], isError: true }
+    // A multi-agent briefing agent may use only its role's tools, whatever the provider lists.
+    const allowed = this.context.briefing?.allowedTools(this.context.chatId)
+    if (allowed && !allowed.includes(name)) {
+      return { content: [{ type: "text", text: `${name} is not available to this briefing agent. Allowed: ${allowed.join(", ") || "none"}.` }], isError: true }
+    }
     const callSignal = signal
       ? AbortSignal.any([signal, this.abortController.signal])
       : this.abortController.signal

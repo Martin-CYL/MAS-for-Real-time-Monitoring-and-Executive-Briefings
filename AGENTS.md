@@ -15,3 +15,12 @@ Production application data lives in `~/.nex`; the dev profile uses `~/.nex-dev`
 There is no desktop application, npm release workflow, automatic application updater or hosted cloud pairing service. Hidden Git/terminal/provider code remains in use by underlying workflows. Keep the existing bilingual UI and local read-only sharing behavior. The core app is a single-workspace service. Optional account-gateway deployments run a separate app container and data directories for each invited user; see docs/accounts.md.
 
 Docker validation is deferred until server deployment. Do not infer that the image works from successful local web tests. Do not modify Skills as part of repository cleanup.
+
+## Project documentation and task hygiene
+
+Follow [docs/WORKFLOW.md](docs/WORKFLOW.md). In short:
+
+- Before a task: read this file and the relevant part of [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md); check the branch and uncommitted changes; find the task ID and acceptance criteria in [docs/ROADMAP.md](docs/ROADMAP.md); confirm what earlier work is actually implemented and validated. Conversation summaries are not authoritative.
+- Nex and the briefing Skill live on separate file trees; see [docs/BRANCH_MAP.md](docs/BRANCH_MAP.md). Never merge a `skill/*` branch into `main`, `test` or a `feature/*` branch.
+- At completion: review the diff, name any required tests that were not run, check each acceptance criterion, list new blockers, update the roadmap or status entry if the state changed, and give the branch and commit. Generated code alone does not complete a task.
+- Read-only audits change nothing; findings become separate tasks.

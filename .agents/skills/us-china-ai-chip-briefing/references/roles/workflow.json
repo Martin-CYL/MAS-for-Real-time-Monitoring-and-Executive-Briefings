@@ -1,0 +1,12 @@
+{
+  "note": "Budgets the Nex briefing workflow enforces. Nex also enforces its own chat limits (depth 3, 8 live sub-chats per conversation); these stay below them.",
+  "max_scouts_per_lead": 4,
+  "max_concurrent_scouts": 4,
+  "max_task_attempts": 2,
+  "max_cross_border_requests": 3,
+  "max_rework_rounds": 2,
+  "max_draft_attempts": 4,
+  "task_minutes": {"scout": 30, "lead": 90, "cross_border": 30, "reviewer": 30, "chief": 240},
+  "discovery": true,
+  "days": 7
+}

@@ -17,6 +17,13 @@ The goal is a report a person can release after a short sign-off of the riskiest
 - Public information only. Do not imply access to any bank's clients, exposures or ratings.
 - **Language.** Research in any language: Chinese official and press sources are essential, so read them in Chinese. Write the report in English. Translate facts faithfully; give Chinese bodies, laws and programmes their standard English name at first use (add the Chinese name in brackets only when it helps identification). Attribute media-only facts in English ("reportedly", "according to Reuters").
 
+## Multi-agent mode (opt-in)
+
+Use it only when the user explicitly asks for the multi-agent briefing and the Nex tool `briefing_start` is
+available. Call `briefing_start` with the user's request and window, report the run ID and status it returns, and
+stop: Nex runs the Chief Editor, country leads, scouts and reviewer as separate chats, using the role files in
+`references/roles/` and the records and checks of `scripts/brief.py`. Otherwise follow the steps below.
+
 ## Files
 
 | File | Use |

@@ -2,8 +2,11 @@
 
 `build` assembles the report from your records: the facts of each story (your claims, word for word), its status
 label (from the evidence), sources, the status table (every included and tracked event), dates, glossary and
-first-use explanations. **You write only the analysis below, in Chinese, for finance readers without chip or
-export-control expertise.** Do not restate facts with new numbers or dates; if a fact is missing, add a claim first.
+first-use explanations. **You write only the analysis below, in the report language (`language` in run_config.json:
+Chinese by default, English when initialised with `--lang en`, as in the multi-agent briefing), for finance readers
+without chip or export-control expertise.** Do not restate facts with new numbers or dates; if a fact is missing, add a
+claim first. The examples below are Chinese; in English use the English equivalents ("Policy and enforcement",
+"Until now …", announced / took effect / proposed / reportedly / the company said / alleged).
 
 | Field | Write | What makes it good |
 |---|---|---|

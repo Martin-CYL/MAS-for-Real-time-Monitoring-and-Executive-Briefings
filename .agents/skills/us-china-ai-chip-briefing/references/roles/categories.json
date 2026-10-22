@@ -1,0 +1,17 @@
+{
+  "note": "Research categories a country lead may assign to scouts. Choose by what the window needs; none is mandatory. Third-country developments that bear on US-China competition belong to the category they affect.",
+  "categories": [
+    {"id": "policy_regulation", "title": "Policy and regulation",
+     "scope": "Laws, rules, industrial policy, AI governance and procurement rules that affect AI or chips; legislative bills with a realistic path."},
+    {"id": "export_controls_sanctions", "title": "Export controls and sanctions",
+     "scope": "Export and import controls, licences, entity and sanctions lists, enforcement cases and countermeasures, including rules that bind third-country firms (Netherlands, Japan, Malaysia, Taiwan)."},
+    {"id": "ai_models_capabilities", "title": "AI models and capabilities",
+     "scope": "Frontier and open-weight model releases, capability or efficiency shifts, training on domestic hardware, evaluations with a competitive bearing."},
+    {"id": "semiconductor_supply_chain", "title": "Semiconductor companies and supply chains",
+     "scope": "Foundry, memory, equipment, materials and packaging; capacity, yields, substitution milestones; TSMC, Samsung, SK Hynix, ASML and peers where they affect US-China competition."},
+    {"id": "compute_infrastructure", "title": "Computing infrastructure",
+     "scope": "Data centres, accelerator supply and allocation, cloud access, chip diversion and smuggling routes, power constraints."},
+    {"id": "corporate_market", "title": "Significant corporate and market developments",
+     "scope": "Financing, deals, listings, litigation, contested company responses and market-access changes for AI and chip firms with a US-China angle."}
+  ]
+}

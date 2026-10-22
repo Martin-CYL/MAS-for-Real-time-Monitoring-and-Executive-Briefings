@@ -2,23 +2,27 @@
 """Single-agent briefing pipeline. The agent reads, judges and writes; this script keeps the records.
 
 Stages communicate through files in RUN/, so any stage can later be handed to a separate agent:
-  run_config.json       window, timezone, cutoff                      (init)
+  run_config.json       window, timezone, cutoff, report language     (init)
   sources.json          every page registered, opened or blocked      (fetch)      + sources/S###.txt
   events.json           every candidate event and its decision        (event)
-  evidence_ledger.json  claims with located quotes and snapshots      (add-claim)
+  evidence_ledger.json  claims with located quotes and snapshots      (add-claim, withdraw)
   report.json           the agent's analysis and judgments           (agent writes)
   report.html, coverage.json, qa/                                     (build)
 
 Commands (run from the skill folder):
-  brief.py init RUN [--days 7] [--end YYYY-MM-DD] [--tz Asia/Hong_Kong]
+  brief.py init RUN [--days 7] [--end YYYY-MM-DD] [--tz Asia/Hong_Kong] [--lang zh|en] [--no-cases]
   brief.py fetch RUN URL [--file PAGE.txt] [--route browser|http_tool|api|reprint]
   brief.py event RUN add --title T --date YYYY-MM-DD --side us|cn|both|other [--source S001] [--url U]
                          [--materiality high|medium|low] [--why TEXT]
   brief.py event RUN decide E001 include|track|exclude --reason TEXT [--followup TEXT] [--proposed] [--unsupported]
+                         [--link TEXT --size TEXT --new TEXT]
   brief.py add-claim RUN E001 S001 --quote "exact words from the page" --text "中文句子" [--kind legal] [--type news]
+  brief.py withdraw RUN C001 --reason TEXT
   brief.py search RUN "query" [--found "what it turned up"]
   brief.py status RUN
   brief.py build RUN [--network]
+
+The report language is set once at init (zh by default; en renders the English template wording).
 """
 import argparse
 from datetime import date, datetime, timedelta, timezone
@@ -33,6 +37,7 @@ SCRIPTS = Path(__file__).resolve().parent
 SKILL = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 from check_quotes import validate_quotes, host_of  # noqa: E402
+from check_evidence import KINDS  # noqa: E402
 import evidence_tools as ev  # noqa: E402
 
 STATUS = {'confirmed': ('g', '官方或公司正式公告'), 'reported': ('a', '媒体报道或未经独立验证'),
@@ -42,6 +47,54 @@ SIDE_CN = {'us': '美国', 'cn': '中国', 'both': '中美', 'other': '其他'}
 DECISIONS = ('include', 'track', 'exclude')
 EVIDENCE_CN = {'supported': '官方或公司原文已打开', 'partial': '仅有媒体报道', 'unresolved': '原文未能取得或尚未核实',
                'unsupported': '核心说法无法得到来源支持'}
+MONTH_EN = 'January February March April May June July August September October November December'.split()
+
+# Fixed report wording per language. The English strings follow assets/template.html (tests keep them in step).
+LABELS = {
+    'zh': {
+        'lang': 'zh-CN', 'title': '中美 AI 与半导体观察｜{d:%Y.%m.%d}', 'brand': '中美 AI 与半导体观察',
+        'tags': '政策 · 企业声誉 · 技术竞争 · 资本市场', 'print': '打印 / PDF ↗',
+        'issue': 'EXECUTIVE RISK &amp; TECHNOLOGY BRIEFING / {date} / 资料截至 {cut}',
+        'thesis_sep': '，', 'readpath': '3 分钟阅读：本期三个判断 → 事件状态表 → 管理层参考',
+        'questions': '管理层关注的三个问题', 'public_only': '公开资料情报简报；不使用任何金融机构的内部客户信息、授信记录或敞口数据。',
+        'judgments': '本期三个判断', 'panel': 'MONITORING STATUS / 事件状态', 'panel_title': '哪些事项已确认，下一步看什么？',
+        'columns': ('事项', '证据状态', '下一节点', '位置'), 'carried': '上期跟踪', 'new': '本期新增', 'join': '；',
+        'chapter': '见第 {n} 章', 'tracking': '持续跟踪', 'key': '标记',
+        'background': '背景：', 'change': '本次变化：', 'impact': '影响：', 'response': '企业回应：', 'uncertain': '尚不确定：',
+        'source': '来源：', 'blocked': '；未能打开：', 'host_join': '、', 'watch': '后续观察',
+        'closing': '后续监测事项', 'closing_title': '未来一个月的关键节点', 'view': 'MANAGEMENT VIEW / 管理层参考',
+        'view_lead': '可能改变下一期判断的证据：', 'disclaimer': '本简报仅使用公开资料，不代表任何金融机构的立场或内部风险评级。',
+        'glossary': 'GLOSSARY / 术语速查', 'term_sep': '：', 'footer': '事实 / 指控 / 拟议政策 / 分析推断明确区分',
+        'status': {k: v[1] for k, v in STATUS.items()}, 'side': SIDE_CN, 'evidence': EVIDENCE_CN,
+    },
+    'en': {
+        'lang': 'en', 'title': 'US-China AI &amp; Semiconductor Risk Briefing | {d:%Y.%m.%d}', 'brand': 'US-China AI &amp; Semiconductor Monitor',
+        'tags': 'Policy · Reputation · Technology · Capital markets', 'print': 'Print / PDF ↗',
+        'issue': 'EXECUTIVE RISK &amp; TECHNOLOGY BRIEFING / {date} / Data as of {cut}',
+        'thesis_sep': ', ', 'readpath': '3-minute read: Three key judgments → Event status → Management view',
+        'questions': 'Three questions for management',
+        'public_only': 'Public-source intelligence briefing; uses no internal client, credit or exposure data of any financial institution.',
+        'judgments': 'Three key judgments', 'panel': 'MONITORING STATUS / Event status', 'panel_title': 'What is confirmed, and what comes next?',
+        'columns': ('Item', 'Evidence status', 'Next milestone', 'Where'), 'carried': 'Carried over', 'new': 'New this period', 'join': '; ',
+        'chapter': 'See chapter {n}', 'tracking': 'Tracking', 'key': 'Key',
+        'background': 'Background: ', 'change': 'What changed: ', 'impact': 'Why it matters: ', 'response': 'Company response: ',
+        'uncertain': 'Still uncertain: ', 'source': 'Source: ', 'blocked': '; could not open: ', 'host_join': ', ', 'watch': 'Watch next',
+        'closing': 'What to watch', 'closing_title': 'Key milestones in the next month', 'view': 'MANAGEMENT VIEW / Management view',
+        'view_lead': 'Evidence that could change our view: ',
+        'disclaimer': 'This briefing uses public information only. It is a demonstration output of the HKUST MAS project and does not '
+                      'represent the position or internal risk rating of any financial institution.',
+        'glossary': 'GLOSSARY / Terms', 'term_sep': ': ', 'footer': 'Facts, allegations, proposed policy and analysis are clearly distinguished',
+        'status': {'confirmed': 'Official or company announcement', 'reported': 'Media report, not independently confirmed',
+                   'pending': 'Proposed, pending approval or not yet in force'},
+        'side': {'us': 'US', 'cn': 'China', 'both': 'US-China', 'other': 'Other'},
+        'evidence': {'supported': 'Official or company source opened', 'partial': 'Media reports only',
+                     'unresolved': 'Original not obtained or not yet checked', 'unsupported': 'Core claim not supported by a source'},
+    },
+}
+
+
+def report_lang(run):
+    return (load(Path(run) / 'run_config.json', {}) or {}).get('language', 'zh')
 
 
 def load(path, default=None):
@@ -99,9 +152,11 @@ def cmd_init(a):
                           else datetime(end.year, end.month, end.day, 23, 59, 59, tzinfo=tz)).isoformat()
     cfg = {'report_date': end.isoformat(), 'window': {'start': start.isoformat(), 'end': end.isoformat()},
            'timezone': a.tz, 'cutoff': cutoff}
+    if a.lang != 'zh':
+        cfg['language'] = a.lang
     if not (run / 'run_config.json').exists():
         save(run / 'run_config.json', cfg)
-    cases = active_cases()
+    cases = [] if a.no_cases else active_cases()
     if not (run / 'events.json').exists():
         save(run / 'events.json', {'window': cfg['window'], 'searches': [], 'events': [
             {'id': f'E{i:03d}', 'title': c['question'], 'case_id': c['id'], 'date': None, 'side': '', 'sources': [],
@@ -116,7 +171,8 @@ def cmd_init(a):
     if not (run / 'report.json').exists():
         save(run / 'report.json', json.loads((SKILL / 'assets' / 'report.skeleton.json').read_text(encoding='utf-8')))
     print(f"Window {cfg['window']['start']} → {cfg['window']['end']} ({a.tz}); cutoff {cutoff}")
-    print(f"{len(cases)} active cases are pre-loaded as events E001–E{len(cases):03d}; each needs a decision.")
+    if cases:
+        print(f"{len(cases)} active cases are pre-loaded as events E001–E{len(cases):03d}; each needs a decision.")
     print('NEXT: Stage 1 discovery (references/staged-pipeline.md). Register pages with `fetch`, record events with `event add`.')
     return 0
 
@@ -166,7 +222,7 @@ def cmd_event(a):
         url = a.url or (reg[srcs[0]]['url'] if srcs else '')
         dup = [e for e in evs if (url and url == e.get('url')) or SequenceMatcher(None, e['title'].lower(), a.title.lower()).ratio() > 0.8]
         eid = f"E{len(evs) + 1:03d}"
-        evs.append({'id': eid, 'title': a.title, 'case_id': None, 'date': a.date, 'side': a.side, 'sources': srcs,
+        evs.append({'id': eid, 'title': a.title, 'case_id': a.case, 'date': a.date, 'side': a.side, 'sources': srcs,
                     'url': url, 'materiality': a.materiality or '', 'why_it_matters': a.why or '',
                     'decision': None, 'reason': '', 'claim_ids': [], 'followup': ''})
         save(run / 'events.json', data)
@@ -193,6 +249,13 @@ def cmd_event(a):
                 e['sources'].append(sid)
         e['proposed'] = bool(a.proposed) or e.get('proposed', False)
         e['unsupported'] = bool(a.unsupported) or e.get('unsupported', False)
+        # The three selection questions (SKILL.md Step 3), kept as fields when given so later stages can check them.
+        answers = {k: getattr(a, k).strip() for k in ('link', 'size', 'new') if (getattr(a, k, None) or '').strip()}
+        if answers:
+            e['assessment'] = {**(e.get('assessment') or {}), **answers}
+        # Disagreements recorded by merge_runs.py are settled by this explicit decision; the record is kept.
+        if e.get('merge_conflicts'):
+            e.setdefault('resolved_conflicts', []).extend(e.pop('merge_conflicts'))
         save(run / 'events.json', data)
         print(f'{a.id}: {a.decision} — {a.reason}')
         if a.decision == 'include':
@@ -212,6 +275,9 @@ def cmd_add_claim(a):
     e = next((e for e in (data or {}).get('events', []) if e['id'] == a.event), None)
     if not e:
         print(f'unknown event {a.event}'); return 1
+    unknown = [k for k in a.kind or [] if k not in KINDS]
+    if unknown:  # the validator fails these later, when only the claim's author could still fix them
+        print(f'unknown --kind {", ".join(unknown)}; use {", ".join(sorted(KINDS))}. Nothing was written.'); return 1
     cfg = load(run / 'run_config.json', {})
     today = min(datetime.now().date().isoformat(), cfg.get('report_date') or '9999')
     cid, msgs = ev.add_claim(run, a.source, a.quote, a.text, a.kind, a.type, a.role, e.get('date'), a.uncertainty,
@@ -236,6 +302,31 @@ def cmd_add_claim(a):
     return 0
 
 
+# ------------------------------------------------------------------ withdraw
+def cmd_withdraw(a):
+    """Take a claim out of the report without deleting it: it moves to the ledger's `withdrawn` list with the reason."""
+    run = Path(a.run)
+    led = load(run / 'evidence_ledger.json')
+    if led is None:
+        print('evidence_ledger.json missing: run init first'); return 1
+    if not (a.reason or '').strip():
+        print('--reason is required (one line)'); return 1
+    claim = next((c for c in led['claims'] if c.get('id') == a.claim), None)
+    if not claim:
+        print(f'unknown claim {a.claim}'); return 1
+    led['claims'] = [c for c in led['claims'] if c is not claim]
+    led.setdefault('withdrawn', []).append({'claim': claim, 'reason': a.reason.strip(),
+                                            'withdrawn_at': datetime.now(timezone.utc).isoformat(timespec='seconds')})
+    save(run / 'evidence_ledger.json', led)
+    data = load(run / 'events.json', {'events': []})
+    touched = [e['id'] for e in data['events'] if a.claim in (e.get('claim_ids') or [])]
+    for e in data['events']:
+        e['claim_ids'] = [c for c in e.get('claim_ids') or [] if c != a.claim]
+    save(run / 'events.json', data)
+    print(f'{a.claim} withdrawn ({a.reason.strip()}); removed from {", ".join(touched) or "no event"}.')
+    return 0
+
+
 # ------------------------------------------------------------------ status: the single progress check
 def problems(run):
     """Ordered (stage, text) items still open. Stages: 1 discovery, 2 selection, 3 evidence, 4 analysis."""
@@ -251,13 +342,17 @@ def problems(run):
             out.append(('1 discovery', f'no new {name}-side event recorded; search that side (sources.md §3)'))
     if len(events.get('searches') or []) < 3:
         out.append(('1 discovery', 'log your searches: brief.py search RUN "query" --found "what it turned up" (at least 3, one beyond the watchlist)'))
+    english = report_lang(run) == 'en'
     for e in evs:
         if not e.get('decision'):
             out.append(('2 selection', f'{e["id"]} {e["title"][:45]}: decide include / track / exclude'))
             continue
         if e['decision'] in ('include', 'track') and not e.get('side'):
             out.append(('2 selection', f'{e["id"]}: add --side us|cn|both|other'))
-        if e['decision'] in ('include', 'track') and not re.search(r'[\u4e00-\u9fff]', e.get('title') or ''):
+        has_cjk = bool(re.search(r'[\u4e00-\u9fff]', e.get('title') or ''))
+        if e['decision'] in ('include', 'track') and english and has_cjk:
+            out.append(('2 selection', f'{e["id"]}: shown in the report, so give it a short English title (decide … --title "English title")'))
+        if e['decision'] in ('include', 'track') and not english and not has_cjk:
             out.append(('2 selection', f'{e["id"]}: shown in the report, so give it a short Chinese title (decide … --title "中文标题")'))
         if e['decision'] == 'include' and not (e.get('why_it_matters') or '').strip():
             out.append(('2 selection', f'{e["id"]}: included events need --why (the US-China or financial-sector link)'))
@@ -368,17 +463,23 @@ def label_for(e):
     return 'confirmed' if e['evidence_status'] == 'supported' else 'reported'
 
 
-def md_date(iso):
+def md_date(iso, lang='zh'):
     try:
         d = date.fromisoformat(iso)
-        return f'{d.month} 月 {d.day} 日'
     except (TypeError, ValueError):
-        return '日期未明'
+        return 'Date not stated' if lang == 'en' else '日期未明'
+    return f'{MONTH_EN[d.month - 1]} {d.day}, {d.year}' if lang == 'en' else f'{d.month} 月 {d.day} 日'
+
+
+def long_date(d, lang):
+    return f'{MONTH_EN[d.month - 1]} {d.day}, {d.year}' if lang == 'en' else f'{d.year} 年 {d.month} 月 {d.day} 日'
 
 
 def page(run):
     run = Path(run)
     cfg, rep = load(run / 'run_config.json'), load(run / 'report.json')
+    lang = cfg.get('language', 'zh')
+    L = LABELS[lang]
     events, ledger, claims, risk, sources = snapshot_state(run)
     evs = {e['id']: e for e in events['events']}
     w = Writer()
@@ -392,36 +493,38 @@ def page(run):
         if s['chapter'] not in chapters:
             chapters.append(s['chapter'])
         evs[s['event']]['_chapter'] = chapters.index(s['chapter']) + 1
-    P = [f'<!doctype html>\n<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
-         f'<title>中美 AI 与半导体观察｜{d:%Y.%m.%d}</title>\n{style}</head><body><div class="sheet"><div class="inner">',
+    cut_text = f'{long_date(cut, lang)} {cut:%H:%M}（{html.escape(cfg["timezone"])}）' if lang == 'zh' \
+        else f'{long_date(cut, lang)} {cut:%H:%M} ({html.escape(cfg["timezone"])})'
+    P = [f'<!doctype html>\n<html lang="{L["lang"]}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">'
+         f'<title>{L["title"].format(d=d)}</title>\n{style}</head><body><div class="sheet"><div class="inner">',
          '<header class="mast"><div class="identity"><div aria-hidden="true" class="mark"><span></span><span></span><span></span><span></span></div>'
-         '<p>中美 AI 与半导体观察 <small>AI &amp; SEMICONDUCTOR RISK INTELLIGENCE</small></p></div>'
-         f'<div class="mastmeta"><span>政策 · 企业声誉 · 技术竞争 · 资本市场</span><strong data-report-date="{d.isoformat()}">{d:%Y.%m.%d}</strong>'
-         '<button class="print" onclick="window.print()">打印 / PDF ↗</button></div></header>',
-         f'<section class="hero"><div><p class="issue">EXECUTIVE RISK &amp; TECHNOLOGY BRIEFING / {d.year} 年 {d.month} 月 {d.day} 日 / '
-         f'资料截至 {cut.year} 年 {cut.month} 月 {cut.day} 日 {cut:%H:%M}（{html.escape(cfg["timezone"])}）</p>'
-         f'<h1>{w(t["lead"])}，<em>{w(t["emphasis"])}</em></h1><p class="deck">{w(rep["deck"])}</p>'
-         '<p class="readpath">3 分钟阅读：本期三个判断 → 事件状态表 → 管理层参考</p></div>'
-         '<aside class="hero-side"><p class="smallhead">管理层关注的三个问题</p>'
+         f'<p>{L["brand"]} <small>AI &amp; SEMICONDUCTOR RISK INTELLIGENCE</small></p></div>'
+         f'<div class="mastmeta"><span>{L["tags"]}</span><strong data-report-date="{d.isoformat()}">{d:%Y.%m.%d}</strong>'
+         f'<button class="print" onclick="window.print()">{L["print"]}</button></div></header>',
+         f'<section class="hero"><div><p class="issue">{L["issue"].format(date=long_date(d, lang), cut=cut_text)}</p>'
+         f'<h1>{w(t["lead"])}{L["thesis_sep"]}<em>{w(t["emphasis"])}</em></h1><p class="deck">{w(rep["deck"])}</p>'
+         f'<p class="readpath">{L["readpath"]}</p></div>'
+         f'<aside class="hero-side"><p class="smallhead">{L["questions"]}</p>'
          + ''.join(f'<p class="q"><b>{i:02d}</b>{w(q)}</p>' for i, q in enumerate(rep['questions'], 1))
-         + '<p class="tiny">公开资料情报简报；不使用任何金融机构的内部客户信息、授信记录或敞口数据。</p></aside></section>',
-         '<section class="takeaways"><div class="label">本期三个判断</div>'
+         + f'<p class="tiny">{L["public_only"]}</p></aside></section>',
+         f'<section class="takeaways"><div class="label">{L["judgments"]}</div>'
          + ''.join(f'<div class="summary"><b>{w(j["title"])}</b>{w(j["text"])}</div>' for j in rep['judgments']) + '</section>']
     # Status table from the event records: tracked and unresolved items stay visible without extra writing.
     order = sorted((e for e in evs.values() if e.get('decision') in ('include', 'track')),
                    key=lambda e: (e['decision'] != 'include', not e.get('case_id'), e['id']))
     rows = []
+    c1, c2, c3, c4 = L['columns']
     for e in order:
         st = label_for(e)
-        ev_text = EVIDENCE_CN[e['evidence_status']] + ('' if e['decision'] == 'include' else f'；{e.get("reason", "")}')
-        where = f'见第 {e["_chapter"]} 章' if e.get('_chapter') else '持续跟踪'
-        rows.append(f'<tr><td data-label="事项">{w(e["title"])}<br><span class="muted">{"上期跟踪" if e.get("case_id") else "本期新增"}</span></td>'
-                    f'<td data-label="证据状态"><i class="dot {STATUS[st][0]}"></i>{w(ev_text)}</td>'
-                    f'<td data-label="下一节点">{w(e.get("followup") or "—")}</td><td data-label="位置">{w(where)}</td></tr>')
-    P.append('<div class="panel"><div class="micro">MONITORING STATUS / 事件状态</div><h2>哪些事项已确认，下一步看什么？</h2>'
-             '<table class="matrix-table mobile-cards"><thead><tr><th style="width:29%">事项</th><th style="width:29%">证据状态</th>'
-             f'<th style="width:26%">下一节点</th><th style="width:16%">位置</th></tr></thead><tbody>{"".join(rows)}</tbody></table>'
-             '<div class="status-key"><b>标记</b>' + ''.join(f'<span><i class="dot {c}"></i>{lab}</span>' for c, lab in STATUS.values())
+        ev_text = L['evidence'][e['evidence_status']] + ('' if e['decision'] == 'include' else f'{L["join"]}{e.get("reason", "")}')
+        where = L['chapter'].format(n=e['_chapter']) if e.get('_chapter') else L['tracking']
+        rows.append(f'<tr><td data-label="{c1}">{w(e["title"])}<br><span class="muted">{L["carried"] if e.get("case_id") else L["new"]}</span></td>'
+                    f'<td data-label="{c2}"><i class="dot {STATUS[st][0]}"></i>{w(ev_text)}</td>'
+                    f'<td data-label="{c3}">{w(e.get("followup") or "—")}</td><td data-label="{c4}">{w(where)}</td></tr>')
+    P.append(f'<div class="panel"><div class="micro">{L["panel"]}</div><h2>{L["panel_title"]}</h2>'
+             f'<table class="matrix-table mobile-cards"><thead><tr><th style="width:29%">{c1}</th><th style="width:29%">{c2}</th>'
+             f'<th style="width:26%">{c3}</th><th style="width:16%">{c4}</th></tr></thead><tbody>{"".join(rows)}</tbody></table>'
+             f'<div class="status-key"><b>{L["key"]}</b>' + ''.join(f'<span><i class="dot {STATUS[k][0]}"></i>{lab}</span>' for k, lab in L['status'].items())
              + '</div></div>')
     for ci, ch in enumerate(chapters, 1):
         stories = [s for s in rep['stories'] if s['chapter'] == ch]
@@ -430,14 +533,14 @@ def page(run):
         for s in stories:
             e = evs[s['event']]
             cl = [claims[c] for c in e['claim_ids'] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
-            facts = ''.join(f'<span data-claim-id="{c["id"]}">{w(c["text"])}</span>' for c in cl)
+            facts = (' ' if lang == 'en' else '').join(f'<span data-claim-id="{c["id"]}">{w(c["text"])}</span>' for c in cl)
             st = label_for(e)
             first = cl[0]['sources'][0] if cl else {}
-            eyebrow = f'{SIDE_CN.get(e.get("side"), "")} / {first.get("source_name", "")} / {md_date(e.get("date"))}'
-            body = (f'<p><strong>背景：</strong>{w(s["background"])}</p>' if s.get('background') else '') \
-                + f'<p><strong>本次变化：</strong>{facts}</p><p><strong>影响：</strong>{w(s["impact"])}</p>' \
-                + (f'<p><strong>企业回应：</strong>{w(s["response"])}</p>' if s.get('response') else '') \
-                + (f'<p><strong>尚不确定：</strong>{w(s["uncertain"])}</p>' if s.get('uncertain') else '')
+            eyebrow = f'{L["side"].get(e.get("side"), "")} / {first.get("source_name", "")} / {md_date(e.get("date"), lang)}'
+            body = (f'<p><strong>{L["background"]}</strong>{w(s["background"])}</p>' if s.get('background') else '') \
+                + f'<p><strong>{L["change"]}</strong>{facts}</p><p><strong>{L["impact"]}</strong>{w(s["impact"])}</p>' \
+                + (f'<p><strong>{L["response"]}</strong>{w(s["response"])}</p>' if s.get('response') else '') \
+                + (f'<p><strong>{L["uncertain"]}</strong>{w(s["uncertain"])}</p>' if s.get('uncertain') else '')
             seen, links = set(), []
             for c in cl:
                 for src in c['sources']:
@@ -445,23 +548,23 @@ def page(run):
                         seen.add(src['url'])
                         links.append(link(src['url'], src.get('source_name') or host_of(src['url'])))
             blocked = [sources[x] for x in e.get('sources') or [] if x in sources and sources[x].get('access') != 'opened']
-            note = ('；未能打开：' + '、'.join(html.escape(b['host']) for b in blocked)) if blocked else ''
-            aside = f'<aside class="lens"><b class="lhead">后续观察</b><p>{w(s["watch"])}</p></aside>' if s.get('watch') else ''
+            note = (L['blocked'] + L['host_join'].join(html.escape(b['host']) for b in blocked)) if blocked else ''
+            aside = f'<aside class="lens"><b class="lhead">{L["watch"]}</b><p>{w(s["watch"])}</p></aside>' if s.get('watch') else ''
             P.append(f'<article class="story"><div><div class="labelrow"><span class="eyebrow">{w(eyebrow)}</span>'
-                     f'<span class="st {st}">{STATUS[st][1]}</span></div><h3>{w(s["title"])}</h3>{body}'
-                     f'<div class="source">来源：{"；".join(links)}{note}</div></div>{aside}</article>')
+                     f'<span class="st {st}">{L["status"][st]}</span></div><h3>{w(s["title"])}</h3>{body}'
+                     f'<div class="source">{L["source"]}{L["join"].join(links)}{note}</div></div>{aside}</article>')
         P.append('</section><div class="chapterdiv"></div>')
     follows = rep.get('followups') or [{'date': e['followup'], 'text': e['title']} for e in order if e.get('followup')][:6]
-    P.append('<section class="closing"><div><div class="kicker">后续监测事项</div><h2>未来一个月的关键节点</h2><div class="checklist">'
+    P.append(f'<section class="closing"><div><div class="kicker">{L["closing"]}</div><h2>{L["closing_title"]}</h2><div class="checklist">'
              + ''.join(f'<div class="checkrow"><div class="subject">{w(f["date"])}</div><p>{w(f["text"])}</p></div>' for f in follows)
-             + '</div></div><aside class="lastnote"><p class="smallhead">MANAGEMENT VIEW / 管理层参考</p>'
-             f'<p><strong>可能改变下一期判断的证据：</strong>{w(rep["management_view"])}</p>'
-             '<p class="tiny">本简报仅使用公开资料，不代表任何金融机构的立场或内部风险评级。</p></aside></section>')
-    gl = ''.join(f'<div><b>{html.escape(k)}：</b>{html.escape(v)}</div>' for k, v in w.gloss.items() if k in w.seen)
+             + f'</div></div><aside class="lastnote"><p class="smallhead">{L["view"]}</p>'
+             f'<p><strong>{L["view_lead"]}</strong>{w(rep["management_view"])}</p>'
+             f'<p class="tiny">{L["disclaimer"]}</p></aside></section>')
+    gl = ''.join(f'<div><b>{html.escape(k)}{L["term_sep"]}</b>{html.escape(v)}</div>' for k, v in w.gloss.items() if k in w.seen)
     if gl:
-        P.append(f'<div class="glossary"><div class="micro">GLOSSARY / 术语速查</div><div class="glossary-grid">{gl}</div></div>')
+        P.append(f'<div class="glossary"><div class="micro">{L["glossary"]}</div><div class="glossary-grid">{gl}</div></div>')
     P.append(f'<footer><span>PUBLIC-SOURCE RISK INTELLIGENCE · {d.day:02d} {mon} {d.year}</span>'
-             '<span>事实 / 指控 / 拟议政策 / 分析推断明确区分</span></footer>\n</div></div></body></html>\n')
+             f'<span>{L["footer"]}</span></footer>\n</div></div></body></html>\n')
     return '\n'.join(P)
 
 
@@ -542,6 +645,7 @@ def main():
     sub = ap.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('init'); p.add_argument('run'); p.add_argument('--days', type=int, default=7)
     p.add_argument('--end'); p.add_argument('--tz', default='Asia/Hong_Kong'); p.add_argument('--cutoff')
+    p.add_argument('--lang', choices=['zh', 'en'], default='zh'); p.add_argument('--no-cases', action='store_true')
     p = sub.add_parser('fetch'); p.add_argument('run'); p.add_argument('url'); p.add_argument('--file')
     p.add_argument('--route', choices=['http_tool', 'browser', 'api', 'reprint'])
     p = sub.add_parser('event'); p.add_argument('run'); p.add_argument('action', choices=['add', 'decide', 'list'])
@@ -550,17 +654,19 @@ def main():
     p.add_argument('--url'); p.add_argument('--materiality', choices=['high', 'medium', 'low']); p.add_argument('--why')
     p.add_argument('--reason'); p.add_argument('--followup')
     p.add_argument('--proposed', action='store_true'); p.add_argument('--unsupported', action='store_true')
+    p.add_argument('--case'); p.add_argument('--link'); p.add_argument('--size'); p.add_argument('--new')
     p = sub.add_parser('add-claim'); p.add_argument('run'); p.add_argument('event'); p.add_argument('source')
     p.add_argument('--quote', required=True); p.add_argument('--text', required=True); p.add_argument('--kind', action='append')
     p.add_argument('--type', choices=['official_document', 'company_statement', 'news', 'dataset', 'other'])
     p.add_argument('--role', choices=['primary', 'secondary']); p.add_argument('--uncertainty', default='')
     p.add_argument('--anchor'); p.add_argument('--notes', default=''); p.add_argument('--name'); p.add_argument('--pub-date')
+    p = sub.add_parser('withdraw'); p.add_argument('run'); p.add_argument('claim'); p.add_argument('--reason', required=True)
     p = sub.add_parser('search'); p.add_argument('run'); p.add_argument('query'); p.add_argument('--found', default='')
     p = sub.add_parser('status'); p.add_argument('run')
     p = sub.add_parser('build'); p.add_argument('run'); p.add_argument('--network', action='store_true')
     a = ap.parse_args()
     return {'init': cmd_init, 'fetch': cmd_fetch, 'event': cmd_event, 'add-claim': cmd_add_claim, 'search': cmd_search,
-            'status': cmd_status, 'build': cmd_build}[a.cmd](a)
+            'withdraw': cmd_withdraw, 'status': cmd_status, 'build': cmd_build}[a.cmd](a)
 
 
 def cmd_search(a):

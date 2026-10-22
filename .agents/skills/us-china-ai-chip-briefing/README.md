@@ -13,8 +13,27 @@ uses Chinese sources; quotes in the evidence ledger stay verbatim in the source 
 The validator is bilingual: English section names, legend labels, first-use explanations ("the US Bureau of
 Industry and Security (BIS)"), dates ("October 15, 2026"), the "Data as of" cutoff and attribution ("reportedly")
 are recognised, and Chinese reports still validate. The previous Chinese template is kept as
-`assets/template.zh.html`. Not yet translated: the QA sidecars (`review_report.md`, `signoff.md`) and the opt-in
-staged renderer (`scripts/brief.py`, `references/report-content.md`). Tests: `tests/test_english.py`.
+`assets/template.zh.html`. The opt-in staged renderer (`scripts/brief.py`) renders English for runs initialised with
+`--lang en` (Chinese stays the default for existing runs). Not yet translated: the QA sidecars (`review_report.md`,
+`signoff.md`). Tests: `tests/test_english.py`, `tests/test_multi_agent.py`.
+
+## Multi-agent mode (opt-in)
+
+Used by the Nex briefing workflow (`NEX_BRIEFING_WORKFLOW=1`, see Nex `docs/briefing-workflow.md`); the single-agent
+workflow above is unchanged. Each agent works in its own `brief.py` run under `runs/<run-id>/tasks/<task-id>/`.
+
+| File | Use |
+|---|---|
+| `references/roles/*.md` | Chief Editor, Country Lead, Topic Scout, Reviewer and the shared protocol. Each names the `SKILL.md` and reference sections it needs (`includes:`), which Nex inlines, so rules are not copied |
+| `references/roles/categories.json` | Research categories a lead may assign; none is mandatory |
+| `references/roles/workflow.json` | Budgets: scouts per lead, concurrency, attempts, rework rounds, cross-border requests, minutes per role |
+| `scripts/merge_runs.py` | Merges accepted task runs into the parent run: new IDs, byte-identical snapshots, provenance, cautious joins, recorded conflicts |
+| `scripts/check_handoff.py` | Checks a task's records before handoff (window, decisions, Link/Size/New, quotes, hand edits, narrative) |
+| `scripts/check_provenance.py` | Checks every accepted handoff reached the final run unchanged (claims, quotes, events, `proposed`/`unsupported`) |
+
+`brief.py` additions: `init --lang en --no-cases`, `event add --case`, `event decide --link --size --new` (stored as
+`assessment`; an explicit decision settles merge conflicts), and `withdraw RUN CID --reason` (a claim leaves the
+report but stays in the ledger's `withdrawn` list; its ID is never reused).
 
 ## Round 6: scripted news discovery (read first)
 

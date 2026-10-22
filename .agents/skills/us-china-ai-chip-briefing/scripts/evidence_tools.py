@@ -221,8 +221,10 @@ def add_claim(run, source_id, quote, text, kinds=None, evidence_type=None, role=
             c['recorded_sha'] = fingerprint(c)
             _save(run / 'evidence_ledger.json', ledger)
             return c['id'], msgs + [f'Added {source_id} as another source for {c["id"]}.']
+    # Withdrawn claims keep their IDs, so a new claim never reuses one.
+    used = {c.get('id') for c in ledger['claims']} | {w.get('claim', {}).get('id') for w in ledger.get('withdrawn') or []}
     cid = f"C{len(ledger['claims']) + 1:03d}"
-    while any(c.get('id') == cid for c in ledger['claims']):
+    while cid in used:
         cid = f'C{int(cid[1:]) + 1:03d}'
     claim = {'id': cid, 'text': text, 'kinds': infer_kinds(text, kinds), 'author_status': 'supported',
              'event_date': event_date, 'uncertainty': uncertainty or '', 'sources': [entry]}

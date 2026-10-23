@@ -16,6 +16,11 @@ The merge never edits a claim's text, quotes or source entries. It only:
 A task merged before is merged again incrementally: new records are added, changed event fields propagate unless the
 target changed the same field since the last merge (then it is a conflict), and nothing already merged is duplicated.
 merge_log.json in the target keeps the ID maps and the field values of the last merge.
+
+The four target files are replaced together: they are written aside, a commit record names them, and only then are
+they moved into place. A merge interrupted before the commit record leaves the target as it was; one interrupted
+after it is completed by the next merge (or any later run of this script). A lock left by a process that no longer
+exists is taken over.
 """
 import argparse
 from datetime import date, datetime, timezone
@@ -26,6 +31,7 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import time
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
@@ -52,6 +58,49 @@ def save(path, obj):
     tmp = Path(str(path) + '.tmp')
     tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     os.replace(tmp, path)
+
+
+COMMIT = '.merge.commit.json'
+STAGED = '.merge-staged'
+
+
+def save_together(target, files):
+    """Replace several files of the target as one step (see the module notes)."""
+    target = Path(target)
+    for name, obj in files.items():
+        (target / f'{name}{STAGED}').write_text(json.dumps(obj, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+    save(target / COMMIT, {'files': list(files)})
+    fault('merge:committed')
+    finish_commit(target)
+
+
+def finish_commit(target):
+    """Complete a committed merge, or discard one that never reached its commit record."""
+    target = Path(target)
+    record = load(target / COMMIT)
+    if record:
+        for name in record['files']:
+            staged = target / f'{name}{STAGED}'
+            if staged.exists():
+                os.replace(staged, target / name)
+        (target / COMMIT).unlink()
+        return True
+    for staged in target.glob(f'*{STAGED}'):
+        staged.unlink()
+    return False
+
+
+def fault(point):
+    """Tests stop the process here (MERGE_RUNS_FAULT=point) to check recovery."""
+    if os.environ.get('MERGE_RUNS_FAULT') == point:
+        os._exit(75)
+
+
+def add_origin(record, origin):
+    """Provenance is a set of origins: merging the same record twice does not list it twice."""
+    record['provenance'] = list(record.get('provenance') or [])
+    if origin not in record['provenance']:
+        record['provenance'].append(origin)
 
 
 def next_id(prefix, used):
@@ -81,15 +130,42 @@ def same_event(a, b):
     return None
 
 
+def pid_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 class Lock:
+    #: A lock file without a readable PID (a crash while writing it) is stale after this many seconds.
+    UNREADABLE_STALE_AFTER = 60
+
     def __init__(self, run):
         self.path = Path(run) / '.merge.lock'
 
-    def __enter__(self):
+    def stale(self):
         try:
-            fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        except FileExistsError:
-            raise MergeError(f'{self.path} exists: another merge into this run is running (remove the file if it is stale)')
+            pid = int(self.path.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            try:
+                return time.time() - self.path.stat().st_mtime > self.UNREADABLE_STALE_AFTER
+            except FileNotFoundError:
+                return True
+        return pid != os.getpid() and not pid_alive(pid)
+
+    def __enter__(self):
+        for attempt in (1, 2):
+            try:
+                fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+                break
+            except FileExistsError:
+                if attempt == 2 or not self.stale():
+                    raise MergeError(f'{self.path} exists: another merge into this run is running')
+                self.path.unlink(missing_ok=True)
         os.write(fd, str(os.getpid()).encode())
         os.close(fd)
         return self
@@ -124,7 +200,7 @@ def merge(target, task_id, source):
         match = next((t for t in reg_t['sources'] if t['url'] == s['url'] and t.get('sha256') == s.get('sha256')), None)
         if match:
             entry['sources'][s['id']] = match['id']
-            match.setdefault('provenance', []).append({'task': task_id, 'id': s['id']})
+            add_origin(match, {'task': task_id, 'id': s['id']})
             continue
         new = dict(s, id=next_id('S', [t['id'] for t in reg_t['sources']]))
         if s.get('file'):
@@ -169,7 +245,7 @@ def merge(target, task_id, source):
             for src in new['sources']:
                 if not any(x.get('url') == src.get('url') and x.get('quote') == src.get('quote') for x in same['sources']):
                     same['sources'].append(src)
-            same['provenance'] = list(same.get('provenance') or []) + new['provenance'][-1:]
+            add_origin(same, new['provenance'][-1])
             target_claim = same
         else:
             new['id'] = next_id('C', used)
@@ -263,10 +339,7 @@ def merge(target, task_id, source):
             known.add(line)
 
     entry['merged_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
-    save(target / 'sources.json', reg_t)
-    save(target / 'evidence_ledger.json', led_t)
-    save(target / 'events.json', evs_t)
-    save(target / 'merge_log.json', log)
+    save_together(target, {'sources.json': reg_t, 'evidence_ledger.json': led_t, 'events.json': evs_t, 'merge_log.json': log})
     return out
 
 
@@ -280,7 +353,8 @@ def _join_lists(t, mapped):
 def _join(t, m, task_id, out):
     """Join a duplicate event into an existing one. Cautious values win; other disagreements are recorded."""
     _join_lists(t, m)
-    t['provenance'] = list(t.get('provenance') or []) + list(m.get('provenance') or []) + [{'task': task_id, 'id': m['id']}]
+    for origin in list(m.get('provenance') or []) + [{'task': task_id, 'id': m['id']}]:
+        add_origin(t, origin)
     t['proposed'] = bool(t.get('proposed') or m.get('proposed'))
     t['unsupported'] = bool(t.get('unsupported') or m.get('unsupported'))
     if RANK.get(m.get('materiality'), 0) > RANK.get(t.get('materiality'), 0):
@@ -316,6 +390,7 @@ def main():
     results = []
     try:
         with Lock(a.target):
+            finish_commit(a.target)
             for spec in a.sources:
                 task_id, sep, run = spec.partition('=')
                 if not sep or not task_id or not run:

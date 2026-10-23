@@ -65,6 +65,21 @@ This is a format illustration, not a valid report ledger (claims cannot be empty
 - Source publication after cutoff is UNVERIFIED and needs attribution/reviewer eligibility decision or an updated cutoff. Exact cutoff vs date-only publication needs precision review. A source checked after the original generation is UNVERIFIED unless source `recheck_reason` explicitly documents historical revalidation; that note does not excuse checks in the future or change the original cutoff.
 - Review/sign-off times are checked against runtime, and sign-off must not precede the review. Impossible source dates prevent a recorded source-support PASS. Other temporal findings remain visible even with a recorded human approval.
 
+### Six dates, kept apart
+
+| Date | Where | Set by |
+|---|---|---|
+| Coverage window | `run_config.json` `window` | `brief.py init`; never changed afterwards |
+| Information cutoff | `run_config.json` / ledger `cutoff` | `brief.py init`; evidence published after it is flagged, whatever the issue date |
+| Issue (report) date | report ledger `report_date`, masthead | `brief.py build --issue-date`; defaults to the window end |
+| Generation time | report ledger `generated_at` | each build with `--issue-date` (the first build without it) |
+| Publication date | each source | the researcher, from the source |
+| Effective date | event `date` / claim text | the source; may be in the future |
+
+A run that finishes after midnight is issued on the day it is built: pass that day as `--issue-date`. The issue date may
+not precede the window end or lie in the future. Do not edit `report_date` in `run_config.json` to make a late build
+pass: the window and cutoff stay what was researched.
+
 Older ledgers missing cutoff/generated_at remain readable: report_date supplies coarse generation precision; missing cutoff and unresolved comparisons remain UNVERIFIED. JSON Schema documents shape; semantic chronology is enforced by `check_dates.py` through `check_evidence.py` and the aggregate validator.
 
 ### Reproducible fixture clock

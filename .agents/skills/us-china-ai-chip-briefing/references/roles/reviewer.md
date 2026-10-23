@@ -35,8 +35,15 @@ Write `TASK/findings.json` and call `briefing_submit`:
  "summary": "one paragraph",
  "findings": [{"id": "R001", "severity": "blocker|major|minor", "category": "omission|unsupported_claim|causal_overreach|inconsistency|fact_status|narrative|other",
                "target": {"claim_id": "C004", "event_id": "E002", "section": "judgments", "source_url": "https://…"},
-               "problem": "what is wrong", "evidence": "what you checked (quote, file, URL)", "suggested_fix": "…"}]}
+               "problem": "what is wrong", "evidence": "what you checked (quote, file, URL)", "suggested_fix": "…"}],
+ "previous": [{"key": "review-1/R001", "status": "resolved|unresolved", "note": "what you checked in this version"}]}
 ```
 
 `verdict` is `rework` when there is any blocker or major finding. Give at least one target field per finding, using
 IDs that exist in RUN. No finding without evidence of what you checked; no invented problems to look thorough.
+
+**Earlier findings.** Your assignment's `previous_findings` lists findings of earlier review rounds that are not yet
+resolved, each with its `key`. Check each against this draft version and record it in `previous`: `resolved` only
+when the fix is in the report and its evidence, `unresolved` otherwise. Every earlier blocker and major finding must
+be assessed. One still unresolved means verdict `rework`; do not repeat it as a new finding. Only a reviewer can
+resolve a finding: the Chief Editor's word that it was fixed is not evidence.

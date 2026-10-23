@@ -20,7 +20,7 @@ Commands (run from the skill folder):
   brief.py withdraw RUN C001 --reason TEXT
   brief.py search RUN "query" [--found "what it turned up"]
   brief.py status RUN
-  brief.py build RUN [--network]
+  brief.py build RUN [--network] [--issue-date YYYY-MM-DD]
 
 The report language is set once at init (zh by default; en renders the English template wording).
 """
@@ -66,6 +66,7 @@ LABELS = {
         'view_lead': '可能改变下一期判断的证据：', 'disclaimer': '本简报仅使用公开资料，不代表任何金融机构的立场或内部风险评级。',
         'glossary': 'GLOSSARY / 术语速查', 'term_sep': '：', 'footer': '事实 / 指控 / 拟议政策 / 分析推断明确区分',
         'status': {k: v[1] for k, v in STATUS.items()}, 'side': SIDE_CN, 'evidence': EVIDENCE_CN,
+        'mixed': '部分说法仅有媒体报道', 'proposed': '拟议：',
     },
     'en': {
         'lang': 'en', 'title': 'US-China AI &amp; Semiconductor Risk Briefing | {d:%Y.%m.%d}', 'brand': 'US-China AI &amp; Semiconductor Monitor',
@@ -89,6 +90,7 @@ LABELS = {
         'side': {'us': 'US', 'cn': 'China', 'both': 'US-China', 'other': 'Other'},
         'evidence': {'supported': 'Official or company source opened', 'partial': 'Media reports only',
                      'unresolved': 'Original not obtained or not yet checked', 'unsupported': 'Core claim not supported by a source'},
+        'mixed': 'some claims rest on media reports only', 'proposed': 'Proposed: ',
     },
 }
 
@@ -463,6 +465,19 @@ def label_for(e):
     return 'confirmed' if e['evidence_status'] == 'supported' else 'reported'
 
 
+def is_primary(claim):
+    return any(s.get('evidence_type') in PRIMARY for s in claim.get('sources') or [])
+
+
+def labels_for(e, shown):
+    """Labels for a story, claim by claim: an official source for one claim does not make the others official.
+    `shown` are the claims printed for it. Mixed evidence gets both labels."""
+    first = label_for(e)
+    if first != 'confirmed' or all(is_primary(c) for c in shown):
+        return [first]
+    return ['confirmed', 'reported']
+
+
 def md_date(iso, lang='zh'):
     try:
         d = date.fromisoformat(iso)
@@ -475,7 +490,7 @@ def long_date(d, lang):
     return f'{MONTH_EN[d.month - 1]} {d.day}, {d.year}' if lang == 'en' else f'{d.year} 年 {d.month} 月 {d.day} 日'
 
 
-def page(run):
+def page(run, issue_date=None):
     run = Path(run)
     cfg, rep = load(run / 'run_config.json'), load(run / 'report.json')
     lang = cfg.get('language', 'zh')
@@ -483,7 +498,7 @@ def page(run):
     events, ledger, claims, risk, sources = snapshot_state(run)
     evs = {e['id']: e for e in events['events']}
     w = Writer()
-    d = date.fromisoformat(cfg['report_date'])
+    d = date.fromisoformat(issue_date or cfg['report_date'])
     cut = datetime.fromisoformat(cfg['cutoff'])
     style = re.search(r'<style>.*?</style>', (SKILL / 'assets' / 'template.html').read_text(encoding='utf-8'), re.S)[0]
     mon = 'JAN FEB MAR APR MAY JUN JUL AUG SEP OCT NOV DEC'.split()[d.month - 1]
@@ -516,7 +531,10 @@ def page(run):
     c1, c2, c3, c4 = L['columns']
     for e in order:
         st = label_for(e)
-        ev_text = L['evidence'][e['evidence_status']] + ('' if e['decision'] == 'include' else f'{L["join"]}{e.get("reason", "")}')
+        shown = [claims[c] for c in e.get('claim_ids') or [] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
+        ev_text = (L['proposed'] if e.get('proposed') else '') + L['evidence'][e['evidence_status']] \
+            + (f'{L["join"]}{L["mixed"]}' if len(labels_for(e, shown)) > 1 else '') \
+            + ('' if e['decision'] == 'include' else f'{L["join"]}{e.get("reason", "")}')
         where = L['chapter'].format(n=e['_chapter']) if e.get('_chapter') else L['tracking']
         rows.append(f'<tr><td data-label="{c1}">{w(e["title"])}<br><span class="muted">{L["carried"] if e.get("case_id") else L["new"]}</span></td>'
                     f'<td data-label="{c2}"><i class="dot {STATUS[st][0]}"></i>{w(ev_text)}</td>'
@@ -534,7 +552,7 @@ def page(run):
             e = evs[s['event']]
             cl = [claims[c] for c in e['claim_ids'] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
             facts = (' ' if lang == 'en' else '').join(f'<span data-claim-id="{c["id"]}">{w(c["text"])}</span>' for c in cl)
-            st = label_for(e)
+            sts = labels_for(e, cl)
             first = cl[0]['sources'][0] if cl else {}
             eyebrow = f'{L["side"].get(e.get("side"), "")} / {first.get("source_name", "")} / {md_date(e.get("date"), lang)}'
             body = (f'<p><strong>{L["background"]}</strong>{w(s["background"])}</p>' if s.get('background') else '') \
@@ -551,7 +569,7 @@ def page(run):
             note = (L['blocked'] + L['host_join'].join(html.escape(b['host']) for b in blocked)) if blocked else ''
             aside = f'<aside class="lens"><b class="lhead">{L["watch"]}</b><p>{w(s["watch"])}</p></aside>' if s.get('watch') else ''
             P.append(f'<article class="story"><div><div class="labelrow"><span class="eyebrow">{w(eyebrow)}</span>'
-                     f'<span class="st {st}">{L["status"][st]}</span></div><h3>{w(s["title"])}</h3>{body}'
+                     + ''.join(f'<span class="st {st}">{L["status"][st]}</span>' for st in sts) + f'</div><h3>{w(s["title"])}</h3>{body}'
                      f'<div class="source">{L["source"]}{L["join"].join(links)}{note}</div></div>{aside}</article>')
         P.append('</section><div class="chapterdiv"></div>')
     follows = rep.get('followups') or [{'date': e['followup'], 'text': e['title']} for e in order if e.get('followup')][:6]
@@ -586,8 +604,31 @@ def export_coverage(run):
                                        'searches': events.get('searches') or [], 'candidates': cands})
 
 
+def issue_date_problem(cfg, issue):
+    """The issue date is when the report is published. It may be later than the coverage window (a run that
+    crosses midnight, a historical window); it may not precede the window's end or lie in the future."""
+    from zoneinfo import ZoneInfo
+    try:
+        d = date.fromisoformat(issue)
+    except ValueError:
+        return f'--issue-date {issue} is not a YYYY-MM-DD date'
+    end = date.fromisoformat(cfg['window']['end'])
+    today = datetime.now(ZoneInfo(cfg['timezone'])).date()
+    if d < end:
+        return f'--issue-date {issue} is before the coverage window ends ({end.isoformat()})'
+    if d > today:
+        return f'--issue-date {issue} is after today ({today.isoformat()} in {cfg["timezone"]})'
+    return None
+
+
 def cmd_build(a):
     run = Path(a.run)
+    cfg = load(run / 'run_config.json')
+    if a.issue_date:
+        bad = issue_date_problem(cfg, a.issue_date)
+        if bad:
+            print(f'Not ready to build:\nTODO 1 [dates]: {bad}. The coverage window and cutoff stay as recorded; pass the real issue date.')
+            return 1
     probs = problems(run)
     if probs:
         print('Not ready to build:')
@@ -596,21 +637,27 @@ def cmd_build(a):
         print('NEXT: fix these, then rerun build (status shows the same list).')
         return 1
     led = load(run / 'evidence_ledger.json')
-    if not led.get('generated_at'):
-        led['generated_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
-        save(run / 'evidence_ledger.json', led)
+    if a.issue_date:
+        # Dated by this build: the report ledger records when it was generated and the day it is issued.
+        # The coverage window, cutoff and evidence ledger are untouched.
+        header = {'report_date': a.issue_date, 'generated_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
+    else:
+        if not led.get('generated_at'):
+            led['generated_at'] = datetime.now(timezone.utc).isoformat(timespec='seconds')
+            save(run / 'evidence_ledger.json', led)
+        header = {}
     events, _, claims, risk, _ = snapshot_state(run)
     # evidence_ledger.json keeps every claim (tracked events included). The report ledger holds exactly the
     # claims printed in the report; it is what validation and the human sign-off are bound to.
     shown = [c for e in events['events'] if e.get('decision') == 'include' for c in e.get('claim_ids') or []
              if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
-    save(run / 'report_ledger.json', {**{k: v for k, v in led.items() if k != 'claims'}, 'claims': [claims[c] for c in dict.fromkeys(shown)]})
-    (run / 'report.html').write_text(page(run), encoding='utf-8')
+    save(run / 'report_ledger.json', {**{k: v for k, v in led.items() if k != 'claims'}, **header,
+                                      'claims': [claims[c] for c in dict.fromkeys(shown)]})
+    (run / 'report.html').write_text(page(run, a.issue_date), encoding='utf-8')
     export_coverage(run)
     from validate import run_all, print_next_steps
     from qa_common import exit_code
-    cfg = load(run / 'run_config.json')
-    result, md, signoff = run_all(run / 'report.html', run / 'report_ledger.json', expected_date=cfg['report_date'],
+    result, md, signoff = run_all(run / 'report.html', run / 'report_ledger.json', expected_date=a.issue_date or cfg['report_date'],
                                   glossary=SKILL / 'references' / 'glossary.md', network=a.network, coverage_path=run / 'coverage.json')
     qa = run / 'qa'
     qa.mkdir(exist_ok=True)
@@ -664,6 +711,7 @@ def main():
     p = sub.add_parser('search'); p.add_argument('run'); p.add_argument('query'); p.add_argument('--found', default='')
     p = sub.add_parser('status'); p.add_argument('run')
     p = sub.add_parser('build'); p.add_argument('run'); p.add_argument('--network', action='store_true')
+    p.add_argument('--issue-date', help='YYYY-MM-DD the report is issued (default: run_config report_date, the window end)')
     a = ap.parse_args()
     return {'init': cmd_init, 'fetch': cmd_fetch, 'event': cmd_event, 'add-claim': cmd_add_claim, 'search': cmd_search,
             'withdraw': cmd_withdraw, 'status': cmd_status, 'build': cmd_build}[a.cmd](a)

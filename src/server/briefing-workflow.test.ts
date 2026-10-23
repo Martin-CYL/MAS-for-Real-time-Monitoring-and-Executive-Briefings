@@ -6,7 +6,7 @@ import path from "node:path"
 import { AgentCoordinator } from "./agent"
 import { NoopAnalyticsReporter } from "./analytics"
 import { AsyncQueue } from "./async-queue"
-import { BriefingWorkflow, buildRoleInstructions, extractSection, type PythonRunner } from "./briefing-workflow"
+import { BriefingWorkflow, buildRoleInstructions, extractSection, InjectedCrash, type FaultPoint, type PythonRunner } from "./briefing-workflow"
 import type { CodexRestriction, SandboxRunner } from "./briefing-sandbox"
 import { createChatCommands } from "./chat-commands"
 import { EventStore } from "./event-store"
@@ -121,6 +121,9 @@ function fakePython(calls: string[][]): PythonRunner {
       if (existsSync(path.join(run, "fixture-not-ready"))) return { exitCode: 1, stdout: "Not ready to build:\nTODO 1 [4 analysis]: report.json: \"deck\" is empty\n", stderr: "" }
       await mkdir(path.join(run, "qa"), { recursive: true })
       await writeFile(path.join(run, "report.html"), "<html lang=\"en\">fixture</html>")
+      // The claims the report prints, as the real build writes them.
+      const printed = path.join(run, "fixture-printed-claims.json")
+      await writeFile(path.join(run, "report_ledger.json"), existsSync(printed) ? await readFile(printed, "utf8") : JSON.stringify({ claims: [] }))
       const readiness = existsSync(path.join(run, "fixture-blocked")) ? "BLOCKED" : "READY_FOR_HUMAN_REVIEW"
       await writeFile(path.join(run, "qa", "review_report.json"), JSON.stringify({ readiness }))
       const fix = readiness === "BLOCKED" ? "FIX 1: GENERATION_REPORT_MISMATCH [generated_at] → generated_at is outside report_date\n" : ""
@@ -164,6 +167,7 @@ async function setup(options: {
   watchdogMs?: number
   sandboxRunner?: SandboxRunner
   usedPercent?: number | null
+  fault?: (point: FaultPoint) => void | Promise<void>
 } = {}) {
   const dataDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-data-"))
   const projectDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-project-"))
@@ -182,17 +186,20 @@ async function setup(options: {
   const orchestrator = new ChatOrchestrator({ store, agent, commands: createChatCommands({ store, agent, analytics: NoopAnalyticsReporter }), push: () => {} })
   const calls: string[][] = []
   const logs: string[] = []
-  const workflow = new BriefingWorkflow({
+  const controller = (fault = options.fault) => new BriefingWorkflow({
     chats: orchestrator, python: fakePython(calls), settleGraceMs: 10, home, now: options.now, watchdogMs: options.watchdogMs,
-    sandboxRunner: options.sandboxRunner ?? ENFORCING_SANDBOX, providerUsedPercent: () => options.usedPercent ?? null, log: (line) => logs.push(line),
+    sandboxRunner: options.sandboxRunner ?? ENFORCING_SANDBOX, providerUsedPercent: () => options.usedPercent ?? null, log: (line) => logs.push(line), fault,
   })
+  // The live controller; `restart` replaces it with one that knows only what is on disk.
+  const live = { workflow: controller() }
+  const workflow = live.workflow
   agent.orchestration = orchestrator
   agent.briefing = workflow
-  agent.onChatSettled = (chatId) => { orchestrator.handleChatSettled(chatId); workflow.handleChatSettled(chatId) }
-  agent.onChatStopped = (chatId) => { orchestrator.handleChatStopped(chatId); workflow.handleChatSettled(chatId) }
+  agent.onChatSettled = (chatId) => { orchestrator.handleChatSettled(chatId); live.workflow.handleChatSettled(chatId) }
+  agent.onChatStopped = (chatId) => { orchestrator.handleChatStopped(chatId); live.workflow.handleChatSettled(chatId) }
   store.onTurnStarted = (chatId) => orchestrator.handleTurnStarted(chatId)
   cleanups.push(async () => {
-    workflow.dispose()
+    live.workflow.dispose()
     orchestrator.dispose()
     agent.dispose()
     for (const dir of [dataDir, projectDir, home]) await rm(dir, { recursive: true, force: true })
@@ -242,7 +249,52 @@ async function setup(options: {
     return { scout, waited }
   }
 
-  return { store, project, projectDir, codex, orchestrator, workflow, calls, logs, userChat, startRun, researchCountry, writeOutput, usageLanded }
+  /** A crash and restart of the Nex server: the old controller is gone, a new one loads the project's runs from disk. */
+  async function restart() {
+    live.workflow.dispose()
+    live.workflow = controller(undefined)
+    agent.briefing = live.workflow
+    await live.workflow.loadProjects([projectDir])
+    return live.workflow
+  }
+
+  return { store, project, projectDir, codex, orchestrator, workflow, calls, logs, userChat, startRun, researchCountry, writeOutput, usageLanded, restart }
+}
+
+
+/** Plays both country branches to accepted leads and returns once the chief has their results. */
+async function researchBoth(context: Awaited<ReturnType<typeof setup>>, run: Awaited<ReturnType<Awaited<ReturnType<typeof setup>>["startRun"]>>) {
+  await context.researchCountry(run.usLead, run.usDir, "us-lead")
+  await context.researchCountry(run.cnLead, run.cnDir, "cn-lead")
+  context.codex.finish(run.usLead)
+  context.codex.finish(run.cnLead)
+  await context.workflow.wait(run.chief, context.projectDir, {})
+  await writeFile(path.join(run.runDir, "report.json"), "{}")
+  await writeFile(path.join(run.runDir, "evidence_ledger.json"), JSON.stringify({ claims: [
+    { id: "C001", text: "One", provenance: [{ task: "us-lead", id: "C001" }] },
+    { id: "C002", text: "Two", provenance: [{ task: "cn-lead", id: "C001" }] },
+  ] }))
+  await writeFile(path.join(run.runDir, "events.json"), JSON.stringify({ events: [
+    { id: "E001", decision: "include", claim_ids: ["C001"], provenance: [{ task: "us-lead", id: "E001" }] },
+    { id: "E002", decision: "include", claim_ids: ["C002"], provenance: [{ task: "cn-lead", id: "E001" }] },
+  ] }))
+  await writeFile(path.join(run.runDir, "fixture-printed-claims.json"), JSON.stringify({ claims: [{ id: "C001", text: "One" }, { id: "C002", text: "Two" }] }))
+}
+
+type Finding = { id: string; severity: "blocker" | "major" | "minor"; category?: string; target?: Record<string, string> }
+
+/** The reviewer of the current round hands in a verdict and ends its turn. */
+async function review(context: Awaited<ReturnType<typeof setup>>, runId: string, verdict: "pass" | "rework", findings: Finding[], previous: Array<{ key: string; status: string }> = []) {
+  const run = context.workflow.getRun(runId)!
+  const reviewer = [...run.tasks].reverse().find((task) => task.role === "reviewer")!
+  await writeFile(path.join(run.runDir, reviewer.dir, "findings.json"), JSON.stringify({
+    verdict, summary: "s",
+    findings: findings.map((finding) => ({ category: "unsupported_claim", target: { claim_id: "C001" }, problem: "p", evidence: "e", ...finding })),
+    previous: previous.map((entry) => ({ note: "checked", ...entry })),
+  }))
+  const result = await context.workflow.submit(reviewer.chatId!, context.projectDir, {})
+  if (result.accepted) context.codex.finish(reviewer.chatId!)
+  return { reviewer, result }
 }
 
 describe("briefing workflow", () => {
@@ -369,7 +421,8 @@ describe("briefing workflow", () => {
     expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true, reviewTask: "review-2" })
     const second = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "review-2")!
     expect(second.chatId).not.toBe(reviewer.chatId)
-    await writeFile(path.join(run.runDir, second.dir, "findings.json"), JSON.stringify({ verdict: "pass", summary: "Fixed.", findings: [] }))
+    await writeFile(path.join(run.runDir, second.dir, "findings.json"), JSON.stringify({ verdict: "pass", summary: "Fixed.", findings: [],
+      previous: [{ key: "review-1/R001", status: "resolved", note: "The claim now matches its quote." }] }))
     expect(await workflow.submit(second.chatId!, projectDir, {})).toMatchObject({ accepted: true })
     const final = workflow.getRun(run.runId)!
     expect(final.status).toBe("ready_for_human_review")
@@ -503,7 +556,7 @@ describe("briefing workflow", () => {
     await workflow.wait(run.chief, projectDir, {})
     await writeFile(path.join(run.runDir, "report.json"), "{}")
     await writeFile(path.join(run.runDir, "fixture-not-ready"), "")
-    expect((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems).toEqual([expect.stringContaining("\"deck\" is empty")])
+    expect((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems).toEqual([expect.stringContaining("\"deck\" is empty"), "3 validation attempt(s) left in this cycle."])
     await rm(path.join(run.runDir, "fixture-not-ready"))
     await writeFile(path.join(run.runDir, "fixture-blocked"), "")
     expect((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems).toEqual(expect.arrayContaining([expect.stringContaining("validator blocked")]))
@@ -685,7 +738,8 @@ describe("briefing workflow", () => {
   })
 
   test("token use is counted per task and per run, and a task over its budget is stopped", async () => {
-    const { startRun, workflow, codex, projectDir, usageLanded } = await setup({ budgets: { token_budget: { run_fresh_tokens: 1_000_000, task_fresh_tokens: { scout: 10_000 } } } })
+    const { startRun, workflow, codex, projectDir, usageLanded } = await setup({ budgets: { token_budget: { run_fresh_tokens: 1_000_000, task_fresh_tokens: { scout: 10_000, lead: 100_000 },
+      reserve_fresh_tokens: { synthesis: 0, review: 0, rework: 0 } } } })
     const run = await startRun()
     const scout = await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })
     codex.usage(scout.chatId!, { input: 6_000, cached: 4_000, output: 1_000 })
@@ -701,19 +755,133 @@ describe("briefing workflow", () => {
     expect(status.tasks.find((task) => task.taskId === "us-s01")).toMatchObject({ state: "failed", failure: "task token budget exhausted (12000 of 10000 fresh tokens)" })
   })
 
-  test("a run over its budget stops every agent; near the budget no new research starts but the review may", async () => {
-    const { startRun, workflow, codex, projectDir, usageLanded } = await setup({ budgets: { token_budget: { run_fresh_tokens: 100_000 } } })
+  test("a run over its budget stops every agent; research the run can no longer afford is refused with the reason", async () => {
+    const { startRun, workflow, codex, projectDir, usageLanded } = await setup({ budgets: { token_budget: {
+      run_fresh_tokens: 100_000, task_fresh_tokens: { lead: 10_000, scout: 10_000 }, in_flight_margin: 1_000,
+      reserve_fresh_tokens: { synthesis: 5_000, review: 5_000, rework: 5_000 },
+    } } })
     const run = await startRun()
     codex.usage(run.chief, { input: 91_000, output: 0 })
     await usageLanded(run.chief, 1)
     await workflow.status(run.chief, projectDir, {})
-    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })).rejects.toThrow("no new research starts")
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })).rejects.toThrow("the run cannot afford it")
     codex.usage(run.chief, { input: 10_000, output: 0 })
     await usageLanded(run.chief, 2)
     const status = await workflow.status(run.chief, projectDir, {})
     expect(status.status).toBe("budget_exhausted")
     expect(status.tasks.map((task) => task.state)).toEqual(["cancelled", "cancelled", "cancelled"])
     expect(await readFile(path.join(run.runDir, "qa", "workflow_summary.md"), "utf8")).toContain("**budget_exhausted**")
+  })
+
+  test("several scouts near their caps are each told once to wrap up, and keep working until they hand in", async () => {
+    const { startRun, workflow, codex, projectDir, usageLanded } = await setup({ budgets: { max_concurrent_scouts: 3, token_budget: {
+      task_fresh_tokens: { scout: 10_000 }, wrap_up_at: 0.8 } } })
+    const run = await startRun()
+    const scouts = [
+      await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "a" }),
+      await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "b" }),
+      await workflow.delegate(run.cnLead, projectDir, { role: "scout", topic: "c" }),
+    ]
+    for (const [index, scout] of scouts.entries()) {
+      codex.usage(scout.chatId!, { input: 8_000 + index * 500, output: 200 })
+      await usageLanded(scout.chatId!, 1)
+    }
+    await workflow.status(run.chief, projectDir, {})
+    await workflow.status(run.chief, projectDir, {})
+    for (const scout of scouts) {
+      await until(() => codex.turnsFor(scout.chatId!).length === 2, "the wrap-up turn")
+      expect(codex.turnsFor(scout.chatId!)[1]!.content).toContain("Budget notice")
+    }
+    const state = workflow.getRun(run.runId)!
+    expect(state.tasks.filter((task) => task.role === "scout").map((task) => [task.state, Boolean(task.wrapUpSent)]))
+      .toEqual([["running", true], ["running", true], ["running", true]])
+  })
+
+  test("usage that arrives after a task's handoff was accepted counts, but does not change the accepted task", async () => {
+    const { startRun, workflow, codex, projectDir, writeOutput, usageLanded } = await setup({ budgets: { token_budget: { task_fresh_tokens: { scout: 10_000 } } } })
+    const run = await startRun()
+    const scout = await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })
+    await writeOutput(scout.dir, { task_id: scout.taskId })
+    expect(await workflow.submit(scout.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    // The request in flight when it submitted ends over the cap.
+    codex.usage(scout.chatId!, { input: 15_000, output: 1_000 })
+    await usageLanded(scout.chatId!, 1)
+    const status = await workflow.status(run.usLead, projectDir, {})
+    expect(status.tasks.find((task) => task.taskId === scout.taskId)).toMatchObject({ state: "accepted", freshTokens: 16_000 })
+    expect(status.usage.freshTokens).toBe(16_000)
+  })
+
+  test("a run too small for its research degrades honestly: research is refused with reasons and the report is never marked ready", async () => {
+    const { userChat, workflow, codex, projectDir } = await setup({ budgets: { token_budget: {
+      run_fresh_tokens: 300_000, reserve_fresh_tokens: { synthesis: 100_000, review: 100_000, rework: 50_000 } } } })
+    const root = await userChat()
+    const started = await workflow.start(root, projectDir, { request: "x", end: "2030-03-10", discovery: false })
+    await writeFile(path.join(started.runDir, "plan.json"), JSON.stringify({ focus: "f", countries: {
+      us: { brief: "b", categories: ["export_controls_sanctions"] }, cn: { brief: "b", categories: ["ai_models_capabilities"] } } }))
+    await workflow.submit(started.chiefChatId, projectDir, { kind: "plan" })
+    await expect(workflow.delegate(started.chiefChatId, projectDir, { role: "lead", country: "us" })).rejects.toThrow(/keeping 250000 for synthesis, review and rework/)
+    await writeFile(path.join(started.runDir, "report.json"), "{}")
+    expect((await workflow.submit(started.chiefChatId, projectDir, { kind: "draft" })).problems).toEqual([expect.stringContaining("No accepted US and China lead research")])
+    expect(await workflow.submit(started.chiefChatId, projectDir, { kind: "draft", partialReason: "budget too small for research" })).toMatchObject({ accepted: true })
+    const reviewer = workflow.getRun(started.runId)!.tasks.find((task) => task.role === "reviewer")!
+    await writeFile(path.join(started.runDir, reviewer.dir, "findings.json"), JSON.stringify({ verdict: "pass", summary: "s", findings: [] }))
+    await workflow.submit(reviewer.chatId!, projectDir, {})
+    expect(workflow.getRun(started.runId)!.status).toBe("incomplete")
+    void codex
+  })
+
+  test("usage on a chat shared by a lead and its cross-border reply is counted once, by the task it was spent on", async () => {
+    const { startRun, researchCountry, workflow, codex, projectDir, writeOutput, usageLanded } = await setup()
+    const run = await startRun()
+    await researchCountry(run.usLead, run.usDir, "us-lead")
+    await researchCountry(run.cnLead, run.cnDir, "cn-lead")
+    codex.usage(run.cnLead, { input: 5_000, output: 500 })
+    await usageLanded(run.cnLead, 1)
+    await workflow.status(run.chief, projectDir, {})
+    codex.finish(run.usLead)
+    codex.finish(run.cnLead)
+    await workflow.wait(run.chief, projectDir, {})
+    await writeFile(path.join(run.usDir, "events.json"), JSON.stringify({ events: [{ id: "E001", title: "t" }] }))
+    await workflow.crossBorder(run.chief, projectDir, { fromTaskId: "us-lead", toCountry: "cn", question: "q", eventIds: ["E001"], scope: "s", evidenceRequired: "e" })
+    await until(() => Boolean(codex.openTurn(run.cnLead)), "the cross-border turn")
+    codex.usage(run.cnLead, { input: 2_000, output: 300 })
+    await usageLanded(run.cnLead, 2)
+    for (let index = 0; index < 3; index += 1) await workflow.status(run.chief, projectDir, {})
+    await writeOutput(path.join(run.cnDir, "xb-01"), { task_id: "xb-01", answer: "a", remaining_uncertainty: "u" })
+    await workflow.submit(run.cnLead, projectDir, {})
+    const status = await workflow.status(run.chief, projectDir, {})
+    const fresh = (id: string) => status.tasks.find((task) => task.taskId === id)!.freshTokens
+    expect([fresh("cn-lead"), fresh("xb-01")]).toEqual([5_500, 2_300])
+    expect(status.usage).toMatchObject({ freshTokens: 7_800, requests: 2 })
+  })
+
+  test("a lead reopened for rework gets its own allowance instead of its exhausted research cap", async () => {
+    const { startRun, researchCountry, workflow, codex, projectDir, usageLanded } = await setup({ budgets: { token_budget: {
+      task_fresh_tokens: { lead: 50_000 }, rework_fresh_tokens: 20_000 } } })
+    const run = await startRun()
+    codex.usage(run.usLead, { input: 45_000, output: 0 })
+    await usageLanded(run.usLead, 1)
+    await researchCountry(run.usLead, run.usDir, "us-lead")
+    await researchCountry(run.cnLead, run.cnDir, "cn-lead")
+    codex.finish(run.usLead)
+    codex.finish(run.cnLead)
+    await workflow.wait(run.chief, projectDir, {})
+    await writeFile(path.join(run.runDir, "evidence_ledger.json"), JSON.stringify({ claims: [{ id: "C001", provenance: [{ task: "us-lead", id: "C001" }] }] }))
+    await writeFile(path.join(run.runDir, "report.json"), "{}")
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    const reviewer = workflow.getRun(run.runId)!.tasks.find((task) => task.role === "reviewer")!
+    await writeFile(path.join(run.runDir, reviewer.dir, "findings.json"), JSON.stringify({ verdict: "rework", summary: "s", findings: [
+      { id: "R001", severity: "major", category: "omission", target: { claim_id: "C001" }, problem: "p", evidence: "e" }] }))
+    await workflow.submit(reviewer.chatId!, projectDir, {})
+    await workflow.delegate(run.chief, projectDir, { role: "lead", reworkOf: "us-lead", findings: ["R001"] })
+    await until(() => Boolean(codex.openTurn(run.usLead)), "the rework turn")
+    codex.usage(run.usLead, { input: 10_000, output: 0 })
+    await usageLanded(run.usLead, 2)
+    expect((await workflow.status(run.chief, projectDir, {})).tasks.find((task) => task.taskId === "us-lead")).toMatchObject({ state: "running" })
+    codex.usage(run.usLead, { input: 11_000, output: 0 })
+    await usageLanded(run.usLead, 3)
+    expect((await workflow.status(run.chief, projectDir, {})).tasks.find((task) => task.taskId === "us-lead"))
+      .toMatchObject({ state: "failed", failure: "task token budget exhausted (21000 of 20000 fresh tokens)" })
   })
 
   test("after a restart an agent's chat is still recognised and confined before its first turn", async () => {
@@ -754,5 +922,313 @@ describe("briefing workflow", () => {
     const refused = await runtime.execute("briefing_delegate", { role: "scout", topic: "x" })
     expect(refused).toMatchObject({ isError: true, content: [{ text: "Only a country lead delegates scouts." }] })
     expect(store.getChat(run.chief)).toBeTruthy()
+  })
+})
+
+/**
+ * The review cycle, scripted end to end: each step is a tool call an agent
+ * would make, against the same controller and fake Skill scripts as above.
+ */
+describe("review lifecycle", () => {
+  const major = (id: string, claim = "C001"): Finding => ({ id, severity: "major", category: "fact_status", target: { claim_id: claim } })
+
+  async function rework(context: Awaited<ReturnType<typeof setup>>, run: { chief: string; usLead: string }, findings: string[]) {
+    const turns = context.codex.turnsFor(run.usLead).length
+    await context.workflow.delegate(run.chief, context.projectDir, { role: "lead", reworkOf: "us-lead", findings })
+    await until(() => context.codex.turnsFor(run.usLead).length === turns + 1, "the rework turn")
+  }
+
+  test("refused drafts are counted apart from versions, review rounds and rework rounds; each cycle has its own attempts", async () => {
+    const context = await setup()
+    const { workflow, codex, projectDir } = context
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await writeFile(path.join(run.runDir, "fixture-not-ready"), "")
+    expect((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems).toContain("3 validation attempt(s) left in this cycle.")
+    expect((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems).toContain("2 validation attempt(s) left in this cycle.")
+    await rm(path.join(run.runDir, "fixture-not-ready"))
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true, version: 1, reviewTask: "review-1" })
+    await review(context, run.runId, "rework", [major("R001")])
+    await rework(context, run, ["R001"])
+    expect(workflow.getRun(run.runId)!.findings!["review-1/R001"]!.status).toBe("in_rework")
+    expect(await workflow.submit(run.usLead, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(run.usLead)
+    await workflow.wait(run.chief, projectDir, { taskIds: ["us-lead"] })
+    // The rework cycle starts with its full allowance, whatever the first draft used.
+    await writeFile(path.join(run.runDir, "fixture-not-ready"), "")
+    expect((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems).toContain("3 validation attempt(s) left in this cycle.")
+    await rm(path.join(run.runDir, "fixture-not-ready"))
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true, version: 2, reviewTask: "review-2" })
+    await review(context, run.runId, "pass", [], [{ key: "review-1/R001", status: "resolved" }])
+    const state = workflow.getRun(run.runId)!
+    expect(state.status).toBe("ready_for_human_review")
+    expect({ submissions: state.draftAttempts, rejected: state.drafts!.rejectionsTotal, versions: state.drafts!.versions.length, reviews: state.reviewRounds, reworks: state.reworkRounds })
+      .toEqual({ submissions: 5, rejected: 3, versions: 2, reviews: 2, reworks: 1 })
+    expect(state.findings!["review-1/R001"]!.history.map((entry) => entry.status)).toEqual(["open", "in_rework", "resolved"])
+  })
+
+  test("a draft that cannot start its review is not counted as a submission", async () => {
+    const context = await setup()
+    const run = await context.startRun()
+    await writeFile(path.join(run.runDir, "report.json"), "{}")
+    // Leads still running: a precondition, refused before anything is counted.
+    expect(((await context.workflow.submit(run.chief, context.projectDir, { kind: "draft" })).problems as string[])[0]).toContain("Still running")
+    expect(context.workflow.getRun(run.runId)!.draftAttempts).toBe(0)
+  })
+
+  test("a blocker the reviewer still finds is not cleared by the chief and escalates the run", async () => {
+    const context = await setup({ budgets: { max_rework_rounds: 1 } })
+    const { workflow, codex, projectDir } = context
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    await review(context, run.runId, "rework", [{ id: "R001", severity: "blocker", category: "omission", target: { claim_id: "C001" } }])
+    await rework(context, run, ["R001"])
+    await workflow.submit(run.usLead, projectDir, {})
+    codex.finish(run.usLead)
+    await workflow.wait(run.chief, projectDir, { taskIds: ["us-lead"] })
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    // A pass that ignores the earlier blocker, or keeps it open, is refused.
+    expect((await review(context, run.runId, "pass", [])).result.problems).toEqual([expect.stringContaining("assess each earlier blocker or major finding")])
+    expect((await review(context, run.runId, "pass", [], [{ key: "review-1/R001", status: "unresolved" }])).result.problems)
+      .toEqual([expect.stringContaining("review-1/R001 is still unresolved")])
+    expect((await review(context, run.runId, "pass", [], [{ key: "review-9/R001", status: "resolved" }])).result.problems)
+      .toEqual(expect.arrayContaining([expect.stringContaining("not a finding of this run")]))
+    // The chief has no tool to resolve a finding; a draft submitted now is refused while the review runs.
+    expect(((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems as string[])[0]).toContain("under independent review")
+    await review(context, run.runId, "rework", [], [{ key: "review-1/R001", status: "unresolved" }])
+    const state = workflow.getRun(run.runId)!
+    expect(state.status).toBe("escalated")
+    expect(state.final!.unresolvedFindings.map((finding) => [finding.key, finding.severity, finding.status])).toEqual([["review-1/R001", "blocker", "escalated"]])
+    expect(await readFile(path.join(run.runDir, "qa", "workflow_summary.md"), "utf8")).toContain("## Unresolved review findings")
+  })
+
+  test("a rework that ends without a handoff leaves the finding unresolved, and the run cannot be marked ready", async () => {
+    const context = await setup({ budgets: { max_rework_rounds: 1 } })
+    const { workflow, codex, projectDir } = context
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    await review(context, run.runId, "rework", [major("R001")])
+    await rework(context, run, ["R001"])
+    codex.finish(run.usLead, "Could not find a better source.")
+    const waited = await workflow.wait(run.chief, projectDir, { taskIds: ["us-lead"] })
+    expect(waited.tasks[0]).toMatchObject({ taskId: "us-lead", state: "failed" })
+    expect(((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems as string[])[0]).toContain("No accepted US lead research")
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft", partialReason: "US rework failed" })).toMatchObject({ accepted: true })
+    await review(context, run.runId, "rework", [], [{ key: "review-1/R001", status: "unresolved" }])
+    expect(workflow.getRun(run.runId)!.final).toMatchObject({ status: "escalated", unresolvedFindings: [expect.objectContaining({ key: "review-1/R001" })] })
+  })
+
+  test("a reviewer that times out is relaunched once on the same version, then the run is escalated rather than left waiting", async () => {
+    let clock = Date.parse("2030-03-10T00:00:00Z")
+    const context = await setup({ now: () => clock, watchdogMs: 20, budgets: { task_minutes: { reviewer: 1 } } })
+    const { workflow, projectDir } = context
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true, reviewTask: "review-1" })
+    clock += 2 * 60_000
+    await until(() => workflow.getRun(run.runId)!.tasks.some((task) => task.id === "review-1-a2" && task.state === "running"), "the reviewer retry")
+    const state = workflow.getRun(run.runId)!
+    expect(state.tasks.find((task) => task.id === "review-1")).toMatchObject({ state: "failed", failure: "timed out after 1 minutes" })
+    expect(state.drafts!.versions).toEqual([expect.objectContaining({ version: 1, reviewTasks: ["review-1", "review-1-a2"] })])
+    expect(state.reviewRounds).toBe(1)
+    clock += 2 * 60_000
+    await until(() => workflow.getRun(run.runId)!.status !== "running", "the run to end")
+    expect(workflow.getRun(run.runId)!.final).toMatchObject({ status: "escalated", reasons: [expect.stringContaining("independent review of draft version 1 did not complete")] })
+    expect(workflow.getRun(run.runId)!.tasks.filter((task) => task.role === "reviewer")).toHaveLength(2)
+  })
+
+  test("rework the run cannot afford is refused with the reason, and the finding stays open", async () => {
+    const context = await setup({ budgets: { token_budget: {
+      run_fresh_tokens: 200_000, in_flight_margin: 0, rework_fresh_tokens: 30_000,
+      task_fresh_tokens: { scout: 10_000, lead: 20_000, reviewer: 20_000, chief: 500_000 },
+      reserve_fresh_tokens: { synthesis: 10_000, review: 30_000, rework: 30_000 } } } })
+    const { workflow, codex, projectDir, usageLanded } = context
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    await review(context, run.runId, "rework", [major("R001")])
+    // The chief's own synthesis spent most of the run.
+    codex.usage(run.chief, { input: 150_000, output: 0 })
+    await usageLanded(run.chief, 1)
+    await expect(workflow.delegate(run.chief, projectDir, { role: "lead", reworkOf: "us-lead", findings: ["R001"] }))
+      .rejects.toThrow(/rework needs up to 30000 fresh tokens but only 20000 remain, keeping 30000 for a second review; the run cannot afford it/)
+    const state = workflow.getRun(run.runId)!
+    expect(state.findings!["review-1/R001"]!.status).toBe("open")
+    expect(state.tasks.find((task) => task.id === "us-lead")!.state).toBe("accepted")
+    // The second review is still affordable, and an open major finding keeps the run from being marked ready.
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true, reviewTask: "review-2" })
+    expect((await review(context, run.runId, "pass", [], [{ key: "review-1/R001", status: "unresolved" }])).result.accepted).toBe(false)
+  })
+
+  test("records a scout changes after its handoff was accepted are not merged", async () => {
+    const context = await setup()
+    const { workflow, codex, projectDir, writeOutput } = context
+    const run = await context.startRun()
+    const scout = await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "t" })
+    await writeOutput(scout.dir, { task_id: scout.taskId })
+    expect(await workflow.submit(scout.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    await mkdir(path.join(scout.dir, "sources"), { recursive: true })
+    await writeFile(path.join(scout.dir, "sources", "S009.txt"), "added after acceptance")
+    codex.finish(scout.chatId!)
+    await writeOutput(run.usDir, { task_id: "us-lead" })
+    expect((await workflow.submit(run.usLead, projectDir, {})).problems).toEqual([expect.stringContaining(`gaps must list ${scout.taskId}`)])
+    expect(workflow.getRun(run.runId)!.tasks.find((task) => task.id === scout.taskId)).toMatchObject({
+      state: "failed", failure: "records changed after acceptance: sources/S009.txt" })
+    expect(workflow.getRun(run.runId)!.tasks.find((task) => task.id === scout.taskId)!.merged).toBeFalsy()
+    expect(context.calls.some((args) => args.some((arg) => arg.startsWith(`${scout.taskId}=`)))).toBe(false)
+  })
+
+  test("a revision may not silently drop or reword a claim an earlier version printed", async () => {
+    const context = await setup()
+    const { workflow, codex, projectDir } = context
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    const printed = path.join(run.runDir, "fixture-printed-claims.json")
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    await review(context, run.runId, "rework", [major("R001", "C001")])
+    await rework(context, run, ["R001"])
+    await workflow.submit(run.usLead, projectDir, {})
+    codex.finish(run.usLead)
+    await workflow.wait(run.chief, projectDir, { taskIds: ["us-lead"] })
+    // C001 was the target of the finding and may go; C002 was correct and may not.
+    await writeFile(printed, JSON.stringify({ claims: [] }))
+    expect((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems).toEqual([expect.stringContaining("DRAFT_CLAIM_DROPPED: C002"), expect.any(String)])
+    await writeFile(printed, JSON.stringify({ claims: [{ id: "C002", text: "Two, reworded" }] }))
+    expect((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems).toEqual([expect.stringContaining("DRAFT_CLAIM_CHANGED: C002"), expect.any(String)])
+    // Withdrawn with a reason, or its event no longer included: both are recorded decisions.
+    await writeFile(printed, JSON.stringify({ claims: [] }))
+    await writeFile(path.join(run.runDir, "evidence_ledger.json"), JSON.stringify({ claims: [{ id: "C001", text: "One", provenance: [{ task: "us-lead", id: "C001" }] }],
+      withdrawn: [{ claim: { id: "C002", text: "Two", provenance: [{ task: "cn-lead", id: "C001" }] }, reason: "superseded" }] }))
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true, version: 2 })
+  })
+})
+
+/**
+ * Crashes injected at the points where a side effect has happened but the
+ * state recording it is not yet saved. The restart is a new controller that
+ * knows only workflow.json; the chats and their store outlive it, as they do
+ * when the Nex server restarts.
+ */
+describe("restart recovery", () => {
+  function crashes() {
+    const plan = { at: null as FaultPoint | null }
+    return {
+      arm: (point: FaultPoint) => { plan.at = point },
+      fault: (point: FaultPoint) => {
+        if (plan.at !== point) return
+        plan.at = null
+        throw new InjectedCrash(`injected crash at ${point}`)
+      },
+    }
+  }
+
+  test("a crash before an agent's chat exists: the task fails visibly, is not relaunched, and can be retried once", async () => {
+    const crash = crashes()
+    const context = await setup({ fault: crash.fault })
+    const run = await context.startRun()
+    crash.arm("launch:saved")
+    await expect(context.workflow.delegate(run.usLead, context.projectDir, { role: "scout", topic: "t" })).rejects.toThrow("injected crash")
+    const chatsBefore = context.codex.sessions.length
+    const workflow = await context.restart()
+    const scout = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "us-s01")!
+    expect(scout).toMatchObject({ state: "failed", failure: expect.stringContaining("launch interrupted by a restart") })
+    expect(scout.chatId).toBeUndefined()
+    await workflow.status(run.chief, context.projectDir, {})
+    expect(context.codex.sessions.length).toBe(chatsBefore)
+    const retry = await workflow.delegate(run.usLead, context.projectDir, { role: "scout", retryOf: "us-s01" })
+    expect(retry).toMatchObject({ taskId: "us-s01-a2", state: "running" })
+  })
+
+  test("a crash after the chat was created but before its first message: the chat is confined and gets its prompt once", async () => {
+    const crash = crashes()
+    const context = await setup({ fault: crash.fault })
+    const run = await context.startRun()
+    crash.arm("launch:chat-created")
+    await expect(context.workflow.delegate(run.usLead, context.projectDir, { role: "scout", topic: "t" })).rejects.toThrow("injected crash")
+    const workflow = await context.restart()
+    const scout = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "us-s01")!
+    expect(scout.state).toBe("running")
+    expect(await workflow.executionPolicy(scout.chatId!, context.projectDir)).toMatchObject({ restriction: { profile: "nex-briefing-scout" } })
+    await until(() => context.codex.turnsFor(scout.chatId!).length === 1, "the first message")
+    expect(context.codex.turnsFor(scout.chatId!)[0]!.content).toContain("Task ID: us-s01")
+    // A second restart does not send it again.
+    await context.restart()
+    await new Promise((resolve) => setTimeout(resolve, 30))
+    expect(context.codex.turnsFor(scout.chatId!)).toHaveLength(1)
+  })
+
+  test("the chief's chat is never left unconfined, even if the restart came before it was recorded", async () => {
+    const crash = crashes()
+    const context = await setup({ fault: crash.fault })
+    const root = await context.userChat()
+    crash.arm("launch:chat-created")
+    await expect(context.workflow.start(root, context.projectDir, { request: "r", end: "2030-03-10", discovery: false })).rejects.toThrow("injected crash")
+    const workflow = await context.restart()
+    const [run] = [...(workflow as unknown as { runs: Map<string, { tasks: Array<{ chatId?: string; state: string }> }> }).runs.values()]
+    const chief = run!.tasks[0]!
+    expect(chief.state).toBe("running")
+    expect(await workflow.executionPolicy(chief.chatId!, context.projectDir)).toMatchObject({ restriction: { profile: "nex-briefing-chief" } })
+    // Had the chat not been recorded, its name and creator alone would refuse it.
+    await expect(context.orchestrator.createChat(root, { message: "x", title: "Briefing · Chief Editor", provider: "codex" })).rejects.toThrow("outside the workflow")
+  })
+
+  test("a crash after the records were checked but before the acceptance was saved: the agent was not told it was accepted and can hand in again", async () => {
+    const crash = crashes()
+    const context = await setup({ fault: crash.fault })
+    const run = await context.startRun()
+    const scout = await context.workflow.delegate(run.usLead, context.projectDir, { role: "scout", topic: "t" })
+    await context.writeOutput(scout.dir, { task_id: scout.taskId })
+    crash.arm("accept:records-written")
+    await expect(context.workflow.submit(scout.chatId!, context.projectDir, {})).rejects.toThrow("injected crash")
+    const workflow = await context.restart()
+    expect(workflow.getRun(run.runId)!.tasks.find((task) => task.id === scout.taskId)!.state).toBe("running")
+    expect(await workflow.submit(scout.chatId!, context.projectDir, {})).toMatchObject({ accepted: true })
+    // Accepted is durable from here on: once more, and the restarted controller agrees; a repeat submission is refused.
+    const again = await context.restart()
+    expect(again.getRun(run.runId)!.tasks.find((task) => task.id === scout.taskId)!.state).toBe("accepted")
+    await expect(again.submit(scout.chatId!, context.projectDir, {})).rejects.toThrow("already accepted")
+  })
+
+  test("a retried delegate call does not start a second scout for the same topic", async () => {
+    const context = await setup()
+    const run = await context.startRun()
+    const first = await context.workflow.delegate(run.usLead, context.projectDir, { role: "scout", topic: "chips" })
+    const second = await context.workflow.delegate(run.usLead, context.projectDir, { role: "scout", topic: "chips" })
+    expect(second.taskId).toBe(first.taskId)
+    expect(context.workflow.getRun(run.runId)!.tasks.filter((task) => task.role === "scout")).toHaveLength(1)
+  })
+
+  test("a crash after the rework was recorded: the retried call sends nothing twice", async () => {
+    const crash = crashes()
+    const context = await setup({ fault: crash.fault })
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await context.workflow.submit(run.chief, context.projectDir, { kind: "draft" })
+    await review(context, run.runId, "rework", [{ id: "R001", severity: "major", category: "fact_status", target: { claim_id: "C001" } }])
+    crash.arm("rework:saved")
+    await expect(context.workflow.delegate(run.chief, context.projectDir, { role: "lead", reworkOf: "us-lead", findings: ["R001"] })).rejects.toThrow("injected crash")
+    const workflow = await context.restart()
+    await expect(workflow.delegate(run.chief, context.projectDir, { role: "lead", reworkOf: "us-lead", findings: ["R001"] })).rejects.toThrow("not an accepted lead task")
+    expect(context.codex.turnsFor(run.usLead)).toHaveLength(1)
+    expect(workflow.getRun(run.runId)!.findings!["review-1/R001"]!.status).toBe("in_rework")
+  })
+
+  test("a crash after the review was accepted but before its outcome was saved: the restart finishes the decision once", async () => {
+    const crash = crashes()
+    const context = await setup({ fault: crash.fault })
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await context.workflow.submit(run.chief, context.projectDir, { kind: "draft" })
+    crash.arm("finalize:done")
+    await expect(review(context, run.runId, "pass", [])).rejects.toThrow("injected crash")
+    const workflow = await context.restart()
+    const state = workflow.getRun(run.runId)!
+    expect(state.status).toBe("ready_for_human_review")
+    expect(state.tasks.filter((task) => task.role === "reviewer")).toHaveLength(1)
+    const finalAt = state.final!.at
+    const reloaded = await context.restart()
+    expect(reloaded.getRun(run.runId)!.final!.at).toBe(finalAt)
   })
 })

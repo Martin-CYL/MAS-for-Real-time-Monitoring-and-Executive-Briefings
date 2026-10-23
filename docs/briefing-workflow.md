@@ -59,8 +59,18 @@ record keeper (`scripts/brief.py`, now able to render the English template), `me
 - A draft is accepted only if the chief's records pass, `check_provenance.py` finds no lost or altered evidence and no
   record changed after its handoff, and the Skill's renderer and validator do not block it. The reviewer then runs in
   a fresh chat; its findings must name claims/events that exist and are routed to the responsible tasks by provenance.
+- Drafts, reviews and rework are counted apart. A draft refused before validation (still-running tasks, a review in
+  progress, no budget for the review) costs nothing; a validation refusal uses one of the current cycle's
+  `max_draft_rejections`, and the first draft and each rework round are separate cycles. Each accepted draft is a
+  numbered version recording the claims it printed; a later version may drop or reword one only by withdrawing it,
+  by a review finding naming it, or by excluding its event (`DRAFT_CLAIM_DROPPED`, `DRAFT_CLAIM_CHANGED`).
+- Review findings have a lifecycle in `workflow.json` `findings`: key (`review-1/R001`), severity, target, evidence,
+  responsible tasks, correction, status (`open`, `in_rework`, `resolved`, `unresolved`, `escalated`) and history.
+  Each later reviewer must assess every earlier blocker and major finding in `previous`; only a reviewer can resolve
+  one, a `pass` with one unresolved is refused, and a run never ends `ready_for_human_review` with one open.
 - Rework is bounded (`max_rework_rounds`); a review that still fails ends the run `escalated` with the open findings.
-  Draft attempts, scouts per lead, concurrent scouts, attempts per task, cross-border requests and per-role time are
+  A reviewer that fails or times out is relaunched once on the same version (`max_review_attempts`), then the run is
+  escalated rather than left waiting. Scouts per lead, concurrent scouts, attempts per task, cross-border requests and per-role time are
   budgeted in the Skill's `references/roles/workflow.json`. Time budgets are re-checked every minute while a run is
   active, so a task whose provider request hangs is stopped and recorded as timed out even when no agent is calling
   a tool.
@@ -108,10 +118,33 @@ Seatbelt); on Linux it depends on that host's Codex sandbox and is checked by `v
 Usage is read from the provider's per-request reports in each agent's transcript and attributed to the task that
 chat was working on: input, cached input, output and reasoning tokens per task and per run (`briefing_status`,
 `qa/workflow_summary.md`). Budgets count fresh tokens (uncached input + output) and live in the Skill's
-`workflow.json` (`token_budget`). At 90 % of the run budget no new research starts (a review still may); past a task
-budget the task is stopped; past the run budget every agent is stopped and the run ends `budget_exhausted`. Checks
-run after each tool call and every minute, and a request in flight is invisible until it ends, so the budgets are
-best-effort ceilings, not hard caps.
+`workflow.json` (`token_budget`). The allocation policy is `src/server/briefing-budget.ts`:
+
+- A reserve (`reserve_fresh_tokens`: synthesis, review, rework) is held back from research. A new lead or scout
+  starts only if, with every running agent spending its whole cap plus `in_flight_margin`, the reserve stays
+  untouched. A review may use the reserve; rework must leave room for a second review.
+- A refused start says why, with figures, and whether waiting for running agents can help; a queued task the run can
+  no longer afford is cancelled with that reason instead of waiting for ever.
+- A research agent at `wrap_up_at` of its cap, or all of them when the research pool runs short, gets one steer
+  message to stop searching and hand in what it has.
+- A lead reopened for rework gets `rework_fresh_tokens`, counted from the reopening.
+- Past a task budget the task is stopped; past the run budget every agent is stopped and the run ends
+  `budget_exhausted`.
+
+Checks run after each tool call and every minute, and a request in flight is invisible until it ends, so the budgets
+are best-effort ceilings, not hard caps. `briefing_status` shows the plan (`budgetPlan`) and the controller's own
+cost (`controller`: reconciles, Skill-script calls and their time).
+
+## Restarts and repeated calls
+
+State is saved before each external effect and after each acceptance, so a restart finds the run as the agents last
+saw it. A task's launch is saved before its chat exists and again, with the chat ID, before its first message. After
+a restart a task whose launch was interrupted is running if its chat was recorded (the first message is sent then if
+it never was), and otherwise fails as "launch interrupted": it is not relaunched behind anyone's back, and its
+requester may retry it. A chat named like a briefing agent but not recorded is refused, never run unconfined. An
+accepted review whose outcome was not yet saved is decided on load; finalising twice changes nothing. A repeated
+delegate call for the same scout topic returns the existing task. `merge_runs.py` replaces its four files as one step
+and takes over a lock left by a dead process.
 
 A turn that ends on a provider error is classified from its message and, where Nex knows it, the account's usage
 window: `auth`, `forbidden`, `quota`, `rate_limit`, `transient` or unknown. A 403 is `forbidden`, not quota, unless the
@@ -125,8 +158,9 @@ back off (1, 2, 4… up to 15 minutes). A chief lost to a provider error ends th
 `workflow_summary.md`), `discovery/`, and `tasks/<task-id>/` for every lead, scout, cross-border reply and review,
 each with `assignment.json`, its records, `narrative.md`, `output.json` and `submission.json`.
 
-Directory separation and hash checks keep agents' files apart and make changes visible. They are not a sandbox:
-agents run with the provider's normal file access.
+Directory separation and hash checks keep agents' files apart and make changes visible; the OS sandbox described
+above is what confines the agents. Records a task changes after its acceptance are not merged: the task fails with
+the changed files named.
 
 ## Running
 
@@ -141,7 +175,9 @@ the account's Codex skills directory), then ask in a chat: `/us-china-ai-chip-br
 
 - `src/server/briefing-workflow.test.ts`: real coordinator, store and orchestrator with a scripted provider and a
   stand-in for the Skill scripts. Covers delegation depth, result return, queueing, budgets, refusal, failure, retry,
-  timeout, cancellation, cross-border, review/rework bounds, partial runs, restart and tool wiring.
+  timeout, cancellation, cross-border, review/rework bounds and the review lifecycle, partial runs, tool wiring, and
+  restart recovery with crashes injected at each save point (`fault`).
+- `src/server/briefing-budget.test.ts`: the allocation policy over 2,000 generated runs.
 - `src/server/briefing-workflow.skill.test.ts`: the same hierarchy through the real Skill scripts (records, merges,
   handoff and provenance checks, English render and validator): a proposal written as enacted is refused, a
   post-handoff edit is refused, review rework is routed to the responsible lead and resubmitted. Skipped unless

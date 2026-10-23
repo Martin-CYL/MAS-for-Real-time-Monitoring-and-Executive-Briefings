@@ -81,16 +81,25 @@ export const reviewFindingSchema = z.object({
   suggested_fix: z.string().optional(),
 })
 
+/** A later reviewer's verdict on a finding from an earlier round, by its key (`review-1/R001`). */
+export const previousAssessmentSchema = z.object({
+  key: z.string().regex(/^review-\d+(-a\d+)?\/R\d{3,}$/, "keys look like review-1/R001"),
+  status: z.enum(["resolved", "unresolved"]),
+  note: text,
+})
+
 export const reviewSchema = z.object({
   verdict: z.enum(["pass", "rework"]),
   summary: text,
   findings: z.array(reviewFindingSchema).default([]),
+  previous: z.array(previousAssessmentSchema).default([]),
 }).superRefine((value, ctx) => {
   const serious = value.findings.some((finding) => finding.severity !== "minor")
   if (value.verdict === "pass" && serious) {
     ctx.addIssue({ code: "custom", path: ["verdict"], message: "a blocker or major finding means verdict rework" })
   }
-  if (value.verdict === "rework" && !serious) {
+  // An earlier finding still unresolved also justifies rework; its severity is checked by the workflow.
+  if (value.verdict === "rework" && !serious && !value.previous.some((entry) => entry.status === "unresolved")) {
     ctx.addIssue({ code: "custom", path: ["verdict"], message: "rework needs at least one blocker or major finding" })
   }
   const ids = value.findings.map((finding) => finding.id)

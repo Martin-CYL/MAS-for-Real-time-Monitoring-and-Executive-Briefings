@@ -252,7 +252,8 @@ describe("briefing workflow with the real Skill scripts", () => {
     expect(await readFile(path.join(runDir, "report.html"), "utf8")).toContain("Comments on the proposed rule are due by April 9, 2030.")
     const second = workflow.getRun(started.runId)!.tasks.find((task) => task.id === "review-2")!
     expect(second.chatId).not.toBe(reviewer.chatId)
-    await writeFile(path.join(runDir, second.dir, "findings.json"), JSON.stringify({ verdict: "pass", summary: "The deadline is now stated.", findings: [] }))
+    await writeFile(path.join(runDir, second.dir, "findings.json"), JSON.stringify({ verdict: "pass", summary: "The deadline is now stated.", findings: [],
+      previous: [{ key: "review-1/R001", status: "resolved", note: "The deadline claim is in the report with its quote." }] }))
     expect(await workflow.submit(second.chatId!, projectDir, {})).toMatchObject({ accepted: true, verdict: "pass" })
     const final = workflow.getRun(started.runId)!
     expect(["ready_for_human_review", "incomplete"]).toContain(final.status)

@@ -17,6 +17,7 @@ import {
 import { parseFrontmatter, scanCodexSkills } from "./harness-skills"
 import { buildRestriction, type CodexRestriction, ROLE_TOOLS, type SandboxRunner, verifySandbox } from "./briefing-sandbox"
 import { backoffMs, classifyProviderError, type ProviderError, providerAction } from "./briefing-provider"
+import { authorize, type BudgetPlan, type BudgetStage, type BudgetTask, snapshot as budgetSnapshot, wrapUpCandidates } from "./briefing-budget"
 import type { AgentChatStatus, AgentChatSummary, ChatOutcome } from "./orchestrator"
 
 /**
@@ -86,7 +87,10 @@ export interface BriefingBudgets {
   maxTaskAttempts: number
   maxCrossBorderRequests: number
   maxReworkRounds: number
+  /** Validation refusals allowed per draft cycle (first draft, then each rework). Was `max_draft_attempts`. */
   maxDraftAttempts: number
+  /** Reviewer launches allowed per accepted draft version, when a reviewer fails or times out. */
+  maxReviewAttempts?: number
   taskMinutes: Record<BriefingRole, number>
   /**
    * Token budgets in fresh tokens (uncached input + output, as the provider
@@ -94,7 +98,18 @@ export interface BriefingBudgets {
    * Enforced after each reported request, so a request in flight can exceed
    * them: they are best-effort ceilings, not hard caps.
    */
-  tokens: { run: number; task: Record<BriefingRole, number> }
+  tokens: {
+    run: number
+    task: Record<BriefingRole, number>
+    /** Held back from research for synthesis, review and rework (see `briefing-budget.ts`). */
+    reserve?: BudgetPlan["reserve"]
+    /** Allowance per request in flight, beyond the last reported usage. */
+    inFlightMargin?: number
+    /** Fraction of its cap at which a research agent is told to wrap up. */
+    wrapUpAt?: number
+    /** The budget of a lead reopened for rework, counted from the reopening. */
+    rework?: number
+  }
   discovery: boolean
   days: number
 }
@@ -116,6 +131,44 @@ export function freshTokens(usage: UsageTotals) {
   return Math.max(0, usage.input - usage.cachedInput) + usage.output
 }
 
+function tokenBudgets(raw: Record<string, unknown> | undefined): BriefingBudgets["tokens"] {
+  const base = DEFAULT_BUDGETS.tokens
+  const num = (value: unknown, fallback: number) => (typeof value === "number" && value >= 0 ? value : fallback)
+  const reserve = (raw?.reserve_fresh_tokens ?? {}) as Partial<BudgetPlan["reserve"]>
+  return {
+    run: num(raw?.run_fresh_tokens, base.run),
+    task: { ...base.task, ...((raw?.task_fresh_tokens ?? {}) as Partial<Record<BriefingRole, number>>) },
+    reserve: { ...base.reserve!, ...reserve },
+    inFlightMargin: num(raw?.in_flight_margin, base.inFlightMargin!),
+    wrapUpAt: Math.min(1, num(raw?.wrap_up_at, base.wrapUpAt!)),
+    rework: num(raw?.rework_fresh_tokens, base.rework!),
+  }
+}
+
+/** The run's plan, with defaults for runs saved before reserves existed. */
+function budgetPlan(run: { budgets: BriefingBudgets }): BudgetPlan {
+  const tokens = run.budgets.tokens ?? DEFAULT_BUDGETS.tokens
+  const base = DEFAULT_BUDGETS.tokens
+  return {
+    run: tokens.run,
+    task: tokens.task,
+    reserve: tokens.reserve ?? { synthesis: 0, review: 0, rework: 0 },
+    inFlightMargin: tokens.inFlightMargin ?? base.inFlightMargin!,
+    wrapUpAt: tokens.wrapUpAt ?? base.wrapUpAt!,
+  }
+}
+
+function subtractUsage(total: UsageTotals, baseline: UsageTotals | undefined): UsageTotals {
+  if (!baseline) return total
+  return {
+    input: total.input - baseline.input,
+    cachedInput: total.cachedInput - baseline.cachedInput,
+    output: total.output - baseline.output,
+    reasoning: total.reasoning - baseline.reasoning,
+    requests: total.requests - baseline.requests,
+  }
+}
+
 export const DEFAULT_BUDGETS: BriefingBudgets = {
   maxScoutsPerLead: 4,
   maxConcurrentScouts: 4,
@@ -124,7 +177,14 @@ export const DEFAULT_BUDGETS: BriefingBudgets = {
   maxReworkRounds: 2,
   maxDraftAttempts: 4,
   taskMinutes: { scout: 30, lead: 90, cross_border: 30, reviewer: 30, chief: 240 },
-  tokens: { run: 3_000_000, task: { scout: 300_000, lead: 600_000, cross_border: 200_000, reviewer: 300_000, chief: 600_000 } },
+  tokens: {
+    run: 3_000_000,
+    task: { scout: 250_000, lead: 400_000, cross_border: 150_000, reviewer: 250_000, chief: 500_000 },
+    reserve: { synthesis: 250_000, review: 250_000, rework: 250_000 },
+    inFlightMargin: 25_000,
+    wrapUpAt: 0.8,
+    rework: 150_000,
+  },
   discovery: true,
   days: 7,
 }
@@ -170,9 +230,32 @@ export interface BriefingTask {
   merged?: boolean
   mergeResult?: unknown
   usage?: UsageTotals
+  /** Usage when the task was reopened for rework; its rework budget counts from here. */
+  usageBaseline?: UsageTotals
+  /** Set once the agent has been told to wrap up for budget reasons. */
+  wrapUpSent?: string
+  /** Saved before its chat is created and cleared once the task runs, so a restart in between is recognised. */
+  launchingAt?: string
   providerError?: ProviderError
   delivered?: boolean
   failure?: string
+}
+
+export type FindingStatus = "open" | "in_rework" | "resolved" | "unresolved" | "escalated"
+
+export interface FindingRecord {
+  key: string
+  id: string
+  review: string
+  severity: "blocker" | "major" | "minor"
+  category: string
+  target: Record<string, string | undefined>
+  problem: string
+  evidence: string
+  correction?: string
+  responsible: string[]
+  status: FindingStatus
+  history: Array<{ at: string; status: FindingStatus; by: string; note?: string }>
 }
 
 export interface BriefingRun {
@@ -196,7 +279,19 @@ export interface BriefingRun {
   tasks: BriefingTask[]
   plan?: BriefingPlan
   discovery?: { ok: boolean; note: string }
+  /** Draft submissions that got past the preconditions (kept under its old name for saved runs). */
   draftAttempts: number
+  /**
+   * Draft accounting kept apart: validation refusals in the current cycle and in total, and the accepted
+   * versions (with the claims each printed, to catch content lost in a later version).
+   */
+  drafts?: {
+    rejectionsThisCycle: number
+    rejectionsTotal: number
+    versions: Array<{ version: number; at: string; readiness?: string; reviewTasks: string[]; claims: Record<string, string> }>
+  }
+  /** Every reviewer finding with its resolution, keyed `review-N/R001`. */
+  findings?: Record<string, FindingRecord>
   reviewRounds: number
   reworkRounds: number
   crossBorderCount: number
@@ -204,6 +299,8 @@ export interface BriefingRun {
   usage?: { totals: UsageTotals; cursors: Record<string, number> }
   /** Provider health as the run has seen it: halted after auth, forbidden or quota errors; backing off after rate limits. */
   provider?: { state: "ok" | "backoff" | "halted"; consecutive: number; until?: string; lastError?: ProviderError & { task: string; at: string } }
+  /** The controller's own cost: reconcile passes and Skill script calls, with wall time. No model calls. */
+  controller?: { reconciles: number; reconcileMs: number; pythonCalls: number; pythonMs: number }
   /** The pre-run check that the host enforces the agents' permission profiles. */
   sandbox?: { verified: boolean; at: string; results: Record<string, string>; problems: string[] }
   draft?: { at: string; hashes: Record<string, string>; readiness?: string }
@@ -213,7 +310,7 @@ export interface BriefingRun {
     readiness?: string
     provenance?: string
     reasons: string[]
-    unresolvedFindings: unknown[]
+    unresolvedFindings: FindingRecord[]
   }
 }
 
@@ -235,7 +332,7 @@ export interface BriefingChats {
     effort?: string
     onCreated?: (chatId: string) => void | Promise<void>
   }): Promise<AgentChatSummary>
-  sendMessage(actorChatId: string, input: { chatId: string; message: string }): Promise<unknown>
+  sendMessage(actorChatId: string, input: { chatId: string; message: string; delivery?: "queue" | "steer"; provider?: "codex"; model?: string; effort?: string }): Promise<unknown>
   waitForChats(actorChatId: string, input: { chatIds: string[]; mode?: "all" | "any"; timeoutMs?: number }, signal?: AbortSignal): Promise<{ timedOut: boolean; chats: ChatOutcome[] }>
   cancelChat(actorChatId: string, chatId: string): Promise<unknown>
   getChatSummary(chatId: string): AgentChatSummary | null
@@ -395,6 +492,9 @@ export function locateBriefingSkill(cwd: string, home?: string) {
 
 class WorkflowError extends Error {}
 
+/** Thrown by a test's fault hook to stand in for the process dying: nothing may catch and carry on after it. */
+export class InjectedCrash extends Error {}
+
 interface Deps {
   chats: BriefingChats
   python?: PythonRunner
@@ -412,7 +512,13 @@ interface Deps {
   deniedPaths?: string[]
   /** The account's fullest provider usage window in percent, when Nex knows it. Disambiguates 403/429. */
   providerUsedPercent?: () => number | null
+  /** Tests inject a crash at a named point (by throwing). See `FaultPoint`. */
+  fault?: (point: FaultPoint) => void | Promise<void>
 }
+
+/** Where a crash leaves state that a restart must handle. Each is just after a side effect and before the save that records it. */
+export type FaultPoint =
+  | "launch:saved" | "launch:chat-created" | "accept:records-written" | "merge:merged" | "rework:saved" | "finalize:done"
 
 export class BriefingWorkflow {
   private readonly chats: BriefingChats
@@ -430,6 +536,7 @@ export class BriefingWorkflow {
   private readonly sandboxRunner?: SandboxRunner
   private readonly deniedPaths: string[]
   private readonly providerUsedPercent: () => number | null
+  private readonly faultHook?: (point: FaultPoint) => void | Promise<void>
 
   constructor(deps: Deps) {
     this.chats = deps.chats
@@ -442,6 +549,11 @@ export class BriefingWorkflow {
     this.sandboxRunner = deps.sandboxRunner
     this.deniedPaths = deps.deniedPaths ?? []
     this.providerUsedPercent = deps.providerUsedPercent ?? (() => null)
+    this.faultHook = deps.fault
+  }
+
+  private async fault(point: FaultPoint) {
+    await this.faultHook?.(point)
   }
 
   dispose() {
@@ -482,9 +594,45 @@ export class BriefingWorkflow {
       const run = await readJson<BriefingRun>(path.join(runsDir, name, "workflow.json"))
       if (run?.schema === WORKFLOW_SCHEMA && !this.runs.has(run.runId)) {
         this.runs.set(run.runId, run)
-        if (run.status === "running") this.armWatchdog()
+        if (run.status === "running") {
+          await this.withLock(run, () => this.recover(run))
+          this.armWatchdog()
+        }
       }
     }
+  }
+
+  /**
+   * After a restart: a task whose launch was interrupted. With its chat
+   * recorded, the chat exists and its first message follows the record, so the
+   * task is running. Without, it is unknown whether an agent started, and it is
+   * not relaunched behind anyone's back: it fails, and its requester may retry.
+   */
+  private async recover(run: BriefingRun) {
+    const interrupted = run.tasks.filter((task) => task.launchingAt && !isTerminal(task.state))
+    for (const task of interrupted) {
+      const chat = task.chatId ? this.chats.getChatSummary(task.chatId) : null
+      if (chat) {
+        // The first message goes out after the chat is recorded. A chat that never had a turn did not get it, so nothing ran yet.
+        const unsent = chat.turnCount === 0 && chat.queuedMessages === 0
+        if (unsent) {
+          await this.chats.sendMessage(this.requesterChat(run, task)!, { chatId: chat.chatId, message: await this.prompt(run, task), provider: "codex",
+            ...(run.run?.model ? { model: run.run.model } : {}), ...(run.run?.effort ? { effort: run.run.effort } : {}) })
+        }
+        this.markStarted(run, task)
+        await this.setTaskState(run, task, "running", `recovered after a restart: chat ${chat.chatId}${unsent ? ", first message sent now" : ""}`)
+      } else {
+        task.launchingAt = undefined
+        await this.setTaskState(run, task, "failed", "launch interrupted by a restart; not relaunched, since it is unknown whether its agent started")
+      }
+    }
+    const reviewer = [...run.tasks].reverse().find((task) => task.role === "reviewer")
+    const decide = reviewer?.state === "accepted" && run.stage === "independent_review" && !run.final
+    if (decide) {
+      await this.record(run, { task: reviewer.id, recovered: "review decision after a restart" })
+      await this.decideAfterReview(run, reviewer)
+    }
+    if (interrupted.length > 0 || decide) await this.save(run)
   }
 
   private findByChat(chatId: string) {
@@ -571,7 +719,14 @@ export class BriefingWorkflow {
 
   private async py(run: BriefingRun, args: string[], timeoutMs = PYTHON_TIMEOUT_MS) {
     const [script, ...rest] = args
-    return this.python([path.join(run.skillDir, "scripts", script!), ...rest], { cwd: run.skillDir, timeoutMs })
+    const started = performance.now()
+    try {
+      return await this.python([path.join(run.skillDir, "scripts", script!), ...rest], { cwd: run.skillDir, timeoutMs })
+    } finally {
+      const cost = run.controller ??= { reconciles: 0, reconcileMs: 0, pythonCalls: 0, pythonMs: 0 }
+      cost.pythonCalls += 1
+      cost.pythonMs += Math.round(performance.now() - started)
+    }
   }
 
   private async initTaskDir(run: BriefingRun, task: BriefingTask) {
@@ -620,7 +775,16 @@ export class BriefingWorkflow {
 
   /** Merges accepted, unmerged tasks into `target`. Called only while target's own agent waits in a briefing tool. */
   private async mergeInto(run: BriefingRun, target: BriefingTask) {
-    const pending = run.tasks.filter((task) => task.mergeInto === target.id && task.state === "accepted" && !task.merged)
+    const candidates = run.tasks.filter((task) => task.mergeInto === target.id && task.state === "accepted" && !task.merged)
+    // Only the records that were checked at acceptance travel up. A task whose files changed since is not merged.
+    const pending: BriefingTask[] = []
+    for (const task of candidates) {
+      const now = await hashRecords(this.taskDir(run, task))
+      const accepted = task.accepted?.hashes ?? {}
+      const changed = [...new Set([...Object.keys(now), ...Object.keys(accepted)])].filter((name) => now[name] !== accepted[name]).sort()
+      if (changed.length === 0) pending.push(task)
+      else await this.setTaskState(run, task, "failed", `records changed after acceptance: ${changed.slice(0, 5).join(", ")}${changed.length > 5 ? ", …" : ""}`)
+    }
     if (pending.length === 0) return []
     const args = ["merge_runs.py", this.taskDir(run, target), ...pending.flatMap((task) => ["--from", `${task.id}=${this.taskDir(run, task)}`]), "--json"]
     const parsed = this.parseJson<{ ok: boolean; error?: string; results?: Array<Record<string, unknown>> }>(await this.py(run, args))
@@ -630,6 +794,8 @@ export class BriefingWorkflow {
       task.mergeResult = parsed.results?.find((entry) => entry.task === task.id)
       await this.record(run, { task: task.id, merged_into: target.id })
     }
+    await this.fault("merge:merged")
+    await this.save(run)
     if (target.role === "lead" && run.stage === "topic_research_completed") await this.advance(run, "country_consolidation")
     return parsed.results ?? []
   }
@@ -671,6 +837,9 @@ export class BriefingWorkflow {
     const actor = this.requesterChat(run, task)
     if (!actor) throw new WorkflowError(`Task ${task.id} has no requesting chat.`)
     await this.initTaskDir(run, task)
+    task.launchingAt = iso(this.now())
+    await this.save(run)
+    await this.fault("launch:saved")
     const created = await this.chats.createChat(actor, {
       message: await this.prompt(run, task),
       title: `Briefing · ${task.title}`,
@@ -679,13 +848,23 @@ export class BriefingWorkflow {
       ...(run.run?.model ? { model: run.run.model } : {}),
       ...(run.run?.effort ? { effort: run.run.effort } : {}),
       // Before the first turn starts: that turn's session takes its profile from this task.
-      onCreated: (chatId) => { task.chatId = chatId },
+      // Saved as well, so a restart before the turn still knows the chat is an agent's.
+      onCreated: async (chatId) => {
+        task.chatId = chatId
+        await this.save(run)
+        await this.fault("launch:chat-created")
+      },
     })
     task.chatId = created.chatId
-    task.startedAt = iso(this.now())
-    task.deadlineAt = iso(this.now() + run.budgets.taskMinutes[task.role] * 60_000)
+    this.markStarted(run, task)
     await this.setTaskState(run, task, "running", `chat ${created.chatId}`)
     if (task.role === "scout") await this.advance(run, "topic_research_running")
+  }
+
+  private markStarted(run: BriefingRun, task: BriefingTask) {
+    task.launchingAt = undefined
+    task.startedAt ??= iso(this.now())
+    task.deadlineAt ??= iso(Date.parse(task.startedAt) + run.budgets.taskMinutes[task.role] * 60_000)
   }
 
   /** Starts queued tasks while the budgets allow. A full Nex chat budget leaves them queued. */
@@ -696,7 +875,12 @@ export class BriefingWorkflow {
         await this.setTaskState(run, task, "cancelled", "its requester is no longer running")
         continue
       }
-      if (this.launchBlocked(run, task.role)) continue
+      const blocked = this.launchBlocked(run, task.role)
+      if (blocked) {
+        // Waiting cannot help a start the run can no longer afford: say so instead of queueing forever.
+        if (/the run cannot afford it/.test(blocked)) await this.setTaskState(run, task, "cancelled", `not started: ${blocked}`)
+        continue
+      }
       if (task.role === "scout") {
         const running = run.tasks.filter((entry) => entry.role === "scout" && entry.state === "running").length
         if (running >= run.budgets.maxConcurrentScouts) continue
@@ -704,6 +888,7 @@ export class BriefingWorkflow {
       try {
         await this.launch(run, task)
       } catch (error) {
+        if (error instanceof InjectedCrash) throw error
         const message = error instanceof Error ? error.message : String(error)
         if (/still running, which is the limit/.test(message)) return
         await this.setTaskState(run, task, "failed", `could not start: ${message}`)
@@ -715,7 +900,11 @@ export class BriefingWorkflow {
 
   /** Loads every project's runs at boot, so a chat resumed after a restart is still recognised as an agent. */
   async loadProjects(projectPaths: string[]) {
-    for (const projectPath of projectPaths) await this.loadProject(projectPath).catch(() => {})
+    for (const projectPath of projectPaths) {
+      await this.loadProject(projectPath).catch((error) => {
+        this.log(`[briefing] loading runs of ${projectPath} failed: ${error instanceof Error ? error.message : String(error)}`)
+      })
+    }
   }
 
   private restrictionFor(run: BriefingRun, task: BriefingTask): CodexRestriction {
@@ -734,8 +923,12 @@ export class BriefingWorkflow {
 
   /** A chat created by a briefing agent but not registered as a task. Such a chat is never run unconfined. */
   private isStrayAgentChat(chatId: string) {
-    const creator = this.chats.getChatSummary(chatId)?.createdByChatId
-    return Boolean(creator && this.findByChat(creator))
+    const summary = this.chats.getChatSummary(chatId)
+    const creator = summary?.createdByChatId
+    if (!creator) return false
+    if (this.findByChat(creator)) return true
+    // A chief whose launch a restart interrupted before its chat was recorded: named like an agent, started from a run's requesting chat.
+    return Boolean(summary.title.startsWith("Briefing · ") && [...this.runs.values()].some((run) => run.rootChatId === creator))
   }
 
   /**
@@ -780,9 +973,11 @@ export class BriefingWorkflow {
   }
 
   private async reconcile(run: BriefingRun) {
+    const started = performance.now()
     const wasRunning = run.status === "running"
     this.collectUsage(run)
     await this.enforceTokenBudgets(run)
+    await this.sendWrapUps(run)
     // A parent is judged only once its children are, so settle bottom-up until nothing changes.
     for (let pass = 0; pass < 4; pass += 1) {
       if (!(await this.judgeTasks(run))) break
@@ -801,8 +996,12 @@ export class BriefingWorkflow {
     if (leads.every((lead) => lead && isTerminal(lead.state)) && ["country_tasks_assigned", "topic_research_running", "topic_research_completed", "country_consolidation"].includes(run.stage)) {
       await this.advance(run, "cross_border_synthesis")
     }
+    await this.handleReviewerFailure(run)
     await this.pump(run)
     if (wasRunning && run.status !== "running") await this.writeSummary(run)
+    const cost = run.controller ??= { reconciles: 0, reconcileMs: 0, pythonCalls: 0, pythonMs: 0 }
+    cost.reconciles += 1
+    cost.reconcileMs += Math.round(performance.now() - started)
     await this.save(run)
   }
 
@@ -855,8 +1054,8 @@ export class BriefingWorkflow {
       return
     }
     for (const task of run.tasks.filter((entry) => entry.state === "running" && entry.chatId)) {
-      const used = freshTokens(task.usage ?? emptyUsage())
-      const limit = budgets.task[task.role]
+      const used = this.taskFresh(task)
+      const limit = this.capOf(run, task)
       if (used < limit) continue
       // A cross-border reply shares its lead's chat; stopping that chat would stop the lead too, which is accepted.
       await this.chats.cancelChat(this.requesterChat(run, task) ?? run.rootChatId, task.chatId!).catch(() => {})
@@ -878,24 +1077,80 @@ export class BriefingWorkflow {
       ...(run.provider.until ? { until: run.provider.until } : {}) })
   }
 
+  /** A task's cap: its role's, or the rework allowance once it was reopened. */
+  private capOf(run: BriefingRun, task: BriefingTask) {
+    const tokens = run.budgets.tokens ?? DEFAULT_BUDGETS.tokens
+    return task.usageBaseline ? tokens.rework ?? DEFAULT_BUDGETS.tokens.rework! : tokens.task[task.role]
+  }
+
+  /** Fresh tokens counted against the task's current cap. */
+  private taskFresh(task: BriefingTask) {
+    return freshTokens(subtractUsage(task.usage ?? emptyUsage(), task.usageBaseline))
+  }
+
+  private budgetTasks(run: BriefingRun): BudgetTask[] {
+    return run.tasks.map((task) => ({ id: task.id, role: task.role, state: task.state, fresh: this.taskFresh(task), cap: this.capOf(run, task) }))
+  }
+
+  private stageOf(role: BriefingRole): BudgetStage {
+    return role === "reviewer" ? "review" : "research"
+  }
+
   /**
    * Why no new agent may start now, or null. A halted provider stops all
-   * starts; a backoff delays them; a run near its token budget starts no new
-   * research (a reviewer may still start to finish the run).
+   * starts and a backoff delays them. Otherwise the budget plan decides:
+   * research may not touch what synthesis, review and rework need.
    */
-  private launchBlocked(run: BriefingRun, role: BriefingRole): string | null {
+  private launchBlocked(run: BriefingRun, role: BriefingRole, stage: BudgetStage = this.stageOf(role)): string | null {
     if (run.provider?.state === "halted") {
       return `the provider refused this run (${run.provider.lastError?.class}); no new agent starts until it is restarted`
     }
     if (run.provider?.state === "backoff" && run.provider.until && Date.parse(run.provider.until) > this.now()) {
       return `the provider asked to slow down (${run.provider.lastError?.class}); retry after ${run.provider.until}`
     }
-    const budgets = run.budgets.tokens ?? DEFAULT_BUDGETS.tokens
-    const fresh = freshTokens(run.usage?.totals ?? emptyUsage())
-    if (role !== "reviewer" && fresh >= budgets.run * 0.9) {
-      return `the run has used ${fresh} of its ${budgets.run} fresh-token budget; no new research starts`
+    if (role === "chief") return null
+    const tokens = run.budgets.tokens ?? DEFAULT_BUDGETS.tokens
+    const cap = stage === "rework" ? tokens.rework ?? DEFAULT_BUDGETS.tokens.rework! : tokens.task[role]
+    const decision = authorize(stage, cap, freshTokens(run.usage?.totals ?? emptyUsage()), this.budgetTasks(run), budgetPlan(run))
+    return decision.ok ? null : decision.reason!
+  }
+
+  /** Refuses a start the provider state or the budget plan does not allow, saying which and why. */
+  private assertCanStart(run: BriefingRun, role: BriefingRole, stage: BudgetStage) {
+    const blocked = this.launchBlocked(run, role, stage)
+    if (!blocked) return
+    const advice = /may release enough/.test(blocked)
+      ? "Wait for running tasks (briefing_wait) and try again, or record the gap and hand off what you have."
+      : "Record the gap and hand off what you have."
+    throw new WorkflowError(`Not delegated: ${blocked}. ${advice}`)
+  }
+
+  /**
+   * Tells research agents, once, to stop searching and hand in what they have:
+   * near their own cap, or when research as a whole would eat into the
+   * reserve. A steer interrupts the agent's current request, which also stops
+   * spending on it.
+   */
+  private async sendWrapUps(run: BriefingRun) {
+    if (run.status !== "running") return
+    const warned = new Set(run.tasks.filter((task) => task.wrapUpSent).map((task) => task.id))
+    const spent = freshTokens(run.usage?.totals ?? emptyUsage())
+    for (const candidate of wrapUpCandidates(spent, this.budgetTasks(run), budgetPlan(run), warned)) {
+      const task = this.task(run, candidate.id)
+      if (!task.chatId) continue
+      task.wrapUpSent = iso(this.now())
+      await this.record(run, { task: task.id, wrap_up: candidate.reason, fresh_tokens: this.taskFresh(task), cap: this.capOf(run, task) })
+      await this.chats.sendMessage(this.requesterChat(run, task) ?? run.rootChatId, {
+        chatId: task.chatId,
+        delivery: "steer",
+        message: [
+          `Budget notice for task ${task.id} (${candidate.reason}): stop searching now.`,
+          "Decide every event, record only facts you have already read, write narrative.md and output.json, and call briefing_submit.",
+          "If coverage is incomplete, submit with status \"partial\" and say what is missing in partial_reason (leads: list it in gaps).",
+          "Do not start new scouts or new topics.",
+        ].join("\n"),
+      }).catch(() => {})
     }
-    return null
   }
 
   /** Judges running tasks whose chats have ended. True when any task changed state. */
@@ -1065,13 +1320,10 @@ export class BriefingWorkflow {
       maxTaskAttempts: Math.max(1, number("max_task_attempts", DEFAULT_BUDGETS.maxTaskAttempts)),
       maxCrossBorderRequests: number("max_cross_border_requests", DEFAULT_BUDGETS.maxCrossBorderRequests),
       maxReworkRounds: number("max_rework_rounds", DEFAULT_BUDGETS.maxReworkRounds),
-      maxDraftAttempts: Math.max(1, number("max_draft_attempts", DEFAULT_BUDGETS.maxDraftAttempts)),
+      maxDraftAttempts: Math.max(1, number("max_draft_rejections", number("max_draft_attempts", DEFAULT_BUDGETS.maxDraftAttempts))),
+      maxReviewAttempts: Math.max(1, number("max_review_attempts", 2)),
       taskMinutes: { ...DEFAULT_BUDGETS.taskMinutes, ...minutes },
-      tokens: {
-        run: typeof (raw.token_budget as Record<string, unknown> | undefined)?.run_fresh_tokens === "number"
-          ? (raw.token_budget as { run_fresh_tokens: number }).run_fresh_tokens : DEFAULT_BUDGETS.tokens.run,
-        task: { ...DEFAULT_BUDGETS.tokens.task, ...((raw.token_budget as { task_fresh_tokens?: Partial<Record<BriefingRole, number>> } | undefined)?.task_fresh_tokens ?? {}) },
-      },
+      tokens: tokenBudgets(raw.token_budget as Record<string, unknown> | undefined),
       discovery: typeof raw.discovery === "boolean" ? raw.discovery : DEFAULT_BUDGETS.discovery,
       days: number("days", DEFAULT_BUDGETS.days),
     }
@@ -1095,8 +1347,6 @@ export class BriefingWorkflow {
     return this.withLock(run, async () => {
       if (run.status !== "running") throw new WorkflowError(`Run ${run.runId} is ${run.status}; nothing more can be delegated.`)
       if (isTerminal(requester.state)) throw new WorkflowError(`Task ${requester.id} is ${requester.state}; it cannot delegate.`)
-      const blocked = this.launchBlocked(run, input.role)
-      if (blocked) throw new WorkflowError(`Not delegated: ${blocked}. Record the gap and hand off what you have.`)
       if (input.reworkOf) return this.reopenForRework(run, requester, input.reworkOf, input.findings ?? [], input.brief ?? "")
       const previous = input.retryOf ? this.task(run, input.retryOf) : null
       if (previous) {
@@ -1108,6 +1358,7 @@ export class BriefingWorkflow {
       let task: BriefingTask
       if (input.role === "lead") {
         if (requester.role !== "chief") throw new WorkflowError("Only the Chief Editor delegates country leads.")
+        this.assertCanStart(run, "lead", "research")
         if (!run.plan) throw new WorkflowError("Submit the research plan first (write plan.json, then briefing_submit with kind plan).")
         const country = input.country ?? previous?.country
         if (!country) throw new WorkflowError("A lead needs country us or cn.")
@@ -1141,6 +1392,12 @@ export class BriefingWorkflow {
           throw new WorkflowError(`${requester.id} has used its budget of ${run.budgets.maxScoutsPerLead} scouts. Fill the gap yourself or record it in gaps.`)
         }
         if (!previous && !input.topic?.trim()) throw new WorkflowError("A scout needs a topic.")
+        // The same request again (a retried call): the task it already made, not a second scout.
+        const same = own.find((entry) => !isTerminal(entry.state) && entry.assignment.topic === input.topic)
+        if (!previous && same) {
+          return { taskId: same.id, state: same.state, chatId: same.chatId ?? null, dir: this.taskDir(run, same), note: "Already delegated with this topic; use briefing_wait for it." }
+        }
+        this.assertCanStart(run, "scout", "research")
         const attempt = previous ? previous.attempt + 1 : 1
         const sequence = run.tasks.filter((entry) => entry.role === "scout" && entry.country === country && !entry.retryOf).length + 1
         task = this.newTask(run, {
@@ -1189,14 +1446,30 @@ export class BriefingWorkflow {
     if (target.role !== "lead" || target.state !== "accepted" || !target.chatId) throw new WorkflowError(`${taskId} is not an accepted lead task.`)
     const review = [...run.tasks].reverse().find((task) => task.role === "reviewer" && task.state === "accepted")
     const known = new Map(((review?.accepted?.output as { findings?: Array<{ id: string }> })?.findings ?? []).map((finding) => [finding.id, finding]))
+    // Earlier findings still unresolved may be named by key as well.
+    for (const finding of Object.values(run.findings ?? {})) if (finding.status === "unresolved") known.set(finding.key, finding)
     const unknown = findings.filter((id) => !known.has(id))
     if (findings.length === 0 || unknown.length > 0) throw new WorkflowError(`Name the review findings to fix (unknown: ${unknown.join(", ") || "none given"}).`)
+    this.assertCanStart(run, "lead", "rework")
     target.previous = [...(target.previous ?? []), { at: target.accepted!.at, hashes: target.accepted!.hashes }]
+    // The rework has its own allowance: what the lead spent on its research does not count against it.
+    target.usageBaseline = { ...(target.usage ?? emptyUsage()) }
+    for (const id of findings) {
+      const finding = run.findings?.[id.includes("/") ? id : `${review!.id}/${id}`]
+      if (finding) {
+        finding.status = "in_rework"
+        finding.history.push({ at: iso(this.now()), status: "in_rework", by: requester.id, note: `sent to ${target.id}` })
+      }
+    }
+    target.wrapUpSent = undefined
     target.accepted = null
     target.merged = false
     target.delivered = false
     target.deadlineAt = iso(this.now() + run.budgets.taskMinutes.lead * 60_000)
     await this.setTaskState(run, target, "running", `reopened for rework: ${findings.join(", ")}`)
+    // Saved before the message goes out: a retried call after a restart finds the lead running and sends nothing twice.
+    await this.save(run)
+    await this.fault("rework:saved")
     await this.chats.sendMessage(requester.chatId!, {
       chatId: target.chatId,
       message: [
@@ -1322,7 +1595,10 @@ export class BriefingWorkflow {
     await writeJsonAtomic(path.join(this.taskDir(run, task), "submission.json"), {
       task_id: task.id, accepted_at: task.accepted.at, hashes: task.accepted.hashes, findings, summary,
     })
+    await this.fault("accept:records-written")
     await this.setTaskState(run, task, "accepted")
+    // The agent is told it was accepted only after this is on disk.
+    await this.save(run)
   }
 
   private async submitResult(run: BriefingRun, task: BriefingTask) {
@@ -1364,16 +1640,24 @@ export class BriefingWorkflow {
     return { accepted: true, next: "Delegate both country leads with briefing_delegate (role lead, country us and cn), then briefing_wait." }
   }
 
+  /** The reviewer still working on the current draft, if any. */
+  private activeReviewer(run: BriefingRun) {
+    return run.tasks.find((task) => task.role === "reviewer" && (task.state === "queued" || task.state === "running"))
+  }
+
+  /**
+   * A draft goes through preconditions (which cost nothing), then counts as a
+   * submission, then validation. A validation refusal uses one of this
+   * cycle's attempts: the first draft and each rework round are separate
+   * cycles, so refusals before the review cannot use up the rework.
+   * Submissions as a whole are capped as well, so nothing loops for ever.
+   */
   private async submitDraft(run: BriefingRun, chief: BriefingTask, partialReason?: string) {
     if (!run.plan) return this.refuse(["Submit the plan first."])
-    if (run.stage === "independent_review") return this.refuse(["The draft is under independent review; briefing_wait for the review task."])
+    const reviewing = this.activeReviewer(run)
+    if (reviewing) return this.refuse([`The draft is under independent review (${reviewing.id}); briefing_wait for it.`])
     const blocked = this.launchBlocked(run, "reviewer")
     if (blocked) return this.refuse([`The independent review cannot start now: ${blocked}.`])
-    run.draftAttempts += 1
-    if (run.draftAttempts > run.budgets.maxDraftAttempts) {
-      await this.finalize(run, { reason: `all ${run.budgets.maxDraftAttempts} draft attempts used`, status: "blocked" })
-      return { accepted: false, problems: ["Draft budget used up; the run is closed as blocked. Report this to the user."], runStatus: run.status }
-    }
     const pending = run.tasks.filter((task) => task.id !== chief.id && !isTerminal(task.state))
     if (pending.length > 0) return this.refuse([`Still running: ${pending.map((task) => task.id).join(", ")}. briefing_wait for them first.`])
     const missing = (["us", "cn"] as const).filter((country) => this.latestLead(run, country)?.state !== "accepted")
@@ -1383,46 +1667,147 @@ export class BriefingWorkflow {
       }
       run.partialReason = `${missing.map((country) => `${COUNTRY_NAMES[country]} lead research missing`).join("; ")}: ${partialReason.trim()}`
     }
+    const drafts = run.drafts ??= { rejectionsThisCycle: 0, rejectionsTotal: 0, versions: [] }
+    run.draftAttempts += 1
+    const maxSubmissions = (run.budgets.maxDraftAttempts + 1) * (run.budgets.maxReworkRounds + 1)
+    if (run.draftAttempts > maxSubmissions) {
+      await this.finalize(run, { reason: `all ${maxSubmissions} draft submissions used`, status: "blocked" })
+      return { accepted: false, problems: ["Draft submissions used up; the run is closed as blocked. Report this to the user."], runStatus: run.status }
+    }
+    const validation = await this.validateDraft(run, chief)
+    if ("problems" in validation) {
+      drafts.rejectionsThisCycle += 1
+      drafts.rejectionsTotal += 1
+      await this.record(run, { draft: "rejected", cycle_rejections: drafts.rejectionsThisCycle, of: run.budgets.maxDraftAttempts })
+      if (drafts.rejectionsThisCycle >= run.budgets.maxDraftAttempts) {
+        await this.finalize(run, { reason: `the draft failed validation ${drafts.rejectionsThisCycle} times in this cycle`, status: "blocked" })
+        return { accepted: false, problems: [...validation.problems, "Validation attempts for this cycle are used up; the run is closed as blocked."], runStatus: run.status }
+      }
+      return this.refuse([...validation.problems, `${run.budgets.maxDraftAttempts - drafts.rejectionsThisCycle} validation attempt(s) left in this cycle.`])
+    }
+    run.draft = { at: iso(this.now()), hashes: await this.draftHashes(run), readiness: validation.readiness }
+    run.reviewRounds += 1
+    const version = { version: drafts.versions.length + 1, at: run.draft.at, readiness: validation.readiness, reviewTasks: [] as string[], claims: validation.claims }
+    drafts.versions.push(version)
+    await this.advance(run, "editorial_draft_completed", `version ${version.version}, validator readiness ${validation.readiness}`)
+    const reviewer = await this.launchReviewer(run, chief, version, `review-${run.reviewRounds}`)
+    await this.advance(run, "independent_review", reviewer.id)
+    return { accepted: true, readiness: validation.readiness, provenance: validation.provenance, version: version.version, reviewTask: reviewer.id,
+      next: `Draft version ${version.version} built (${path.join(run.runDir, "report.html")}). Independent review ${reviewer.id} started: briefing_wait for it.` }
+  }
+
+  /** Every check a draft must pass. Problems, or what the accepted version records. */
+  private async validateDraft(run: BriefingRun, chief: BriefingTask): Promise<{ problems: string[] } | { readiness: string; provenance: string; claims: Record<string, string> }> {
     await this.mergeInto(run, chief)
-    if (!existsSync(path.join(run.runDir, "report.json"))) return this.refuse(["report.json is missing in the run root."])
+    if (!existsSync(path.join(run.runDir, "report.json"))) return { problems: ["report.json is missing in the run root."] }
     const check = await this.checkHandoff(run, chief)
     const handoffFails = check.findings.filter((finding) => finding.status === "FAIL")
-    if (handoffFails.length > 0) return this.refuse(handoffFails.map((finding) => `${finding.code}: ${finding.message}`))
+    if (handoffFails.length > 0) return { problems: handoffFails.map((finding) => `${finding.code}: ${finding.message}`) }
     const provenance = this.parseJson<{ outcome: string; findings: CheckFinding[] }>(await this.py(run, ["check_provenance.py", run.runDir, "--json"]))
-    if (!provenance) return this.refuse(["check_provenance.py gave no result"])
+    if (!provenance) return { problems: ["check_provenance.py gave no result"] }
     if (provenance.outcome === "FAIL") {
-      return this.refuse(provenance.findings.filter((finding) => finding.status === "FAIL").map((finding) => `${finding.code}: ${finding.message}`))
+      return { problems: provenance.findings.filter((finding) => finding.status === "FAIL").map((finding) => `${finding.code}: ${finding.message}`) }
     }
     await this.advance(run, "render_and_validate", "draft build")
-    const build = await this.py(run, ["brief.py", "build", run.runDir])
+    const build = await this.py(run, ["brief.py", "build", run.runDir, "--issue-date", this.issueDate(run)])
     const builtAt = existsSync(path.join(run.runDir, "report.html")) ? (await stat(path.join(run.runDir, "report.html"))).mtimeMs : 0
     if (build.stdout.includes("Not ready to build") || builtAt === 0) {
-      return this.refuse(build.stdout.split("\n").filter((line) => line.startsWith("TODO")).concat(build.exitCode !== 0 && !build.stdout ? [build.stderr.slice(-500)] : []))
+      return { problems: build.stdout.split("\n").filter((line) => line.startsWith("TODO")).concat(build.exitCode !== 0 && !build.stdout ? [build.stderr.slice(-500)] : []) }
     }
     const qa = await readJson<{ readiness: string }>(path.join(run.runDir, "qa", "review_report.json"))
     if (!qa || qa.readiness === "BLOCKED") {
-      return this.refuse(["The validator blocked the report (qa/review_report.md):", ...build.stdout.split("\n").filter((line) => /^\s*(FIX|\d+\.)/.test(line)).slice(0, 25)])
+      return { problems: ["The validator blocked the report (qa/review_report.md):", ...build.stdout.split("\n").filter((line) => /^\s*(FIX|\d+\.)/.test(line)).slice(0, 25)] }
     }
-    run.draft = { at: iso(this.now()), hashes: await this.draftHashes(run), readiness: qa.readiness }
-    await this.advance(run, "editorial_draft_completed", `validator readiness ${qa.readiness}`)
-    run.reviewRounds += 1
+    const claims = await this.printedClaims(run)
+    const lost = await this.lostClaims(run, claims)
+    if (lost.length > 0) return { problems: lost }
+    return { readiness: qa.readiness, provenance: provenance.outcome, claims }
+  }
+
+  /** The issue date of a build: today in the run's time zone. The coverage window and cutoff do not move. */
+  private issueDate(run: BriefingRun) {
+    return new Intl.DateTimeFormat("en-CA", { timeZone: run.timezone }).format(new Date(this.now()))
+  }
+
+  /** Claims printed in the built report, by ID, with a hash of their text. */
+  private async printedClaims(run: BriefingRun) {
+    const ledger = await readJson<{ claims?: Array<{ id: string; text: string }> }>(path.join(run.runDir, "report_ledger.json"))
+    return Object.fromEntries((ledger?.claims ?? []).map((claim) => [claim.id, createHash("sha256").update(claim.text).digest("hex").slice(0, 16)]))
+  }
+
+  /**
+   * Claims the last accepted version printed that this one silently dropped or
+   * changed. A claim may leave the report only by being withdrawn (with a
+   * reason), by being the target of a review finding, or because its event is
+   * no longer included (a recorded decision).
+   */
+  private async lostClaims(run: BriefingRun, claims: Record<string, string>) {
+    const previous = run.drafts?.versions.at(-1)
+    if (!previous) return []
+    const ledger = await readJson<{ withdrawn?: Array<{ claim: { id: string } }> }>(path.join(run.runDir, "evidence_ledger.json"))
+    const withdrawn = new Set((ledger?.withdrawn ?? []).map((entry) => entry.claim.id))
+    const events = (await readJson<{ events?: Array<{ claim_ids?: string[]; decision?: string }> }>(path.join(run.runDir, "events.json")))?.events ?? []
+    const targeted = new Set(Object.values(run.findings ?? {}).map((finding) => finding.target.claim_id).filter(Boolean))
+    const problems: string[] = []
+    for (const [id, hash] of Object.entries(previous.claims)) {
+      if (claims[id] === hash) continue
+      if (claims[id]) {
+        problems.push(`DRAFT_CLAIM_CHANGED: ${id} printed in version ${previous.version} has different text now; withdraw it and record the correction instead`)
+        continue
+      }
+      const event = events.find((entry) => entry.claim_ids?.includes(id))
+      if (withdrawn.has(id) || targeted.has(id) || (event && event.decision !== "include")) continue
+      problems.push(`DRAFT_CLAIM_DROPPED: ${id} was printed in version ${previous.version} and is missing now; withdraw it with a reason (brief.py withdraw) or restore it`)
+    }
+    return problems
+  }
+
+  private async launchReviewer(run: BriefingRun, chief: BriefingTask, version: { version: number; reviewTasks: string[] }, id: string) {
+    const open = Object.values(run.findings ?? {}).filter((finding) => finding.status !== "resolved" && finding.status !== "escalated")
     const reviewer = this.newTask(run, {
-      id: `review-${run.reviewRounds}`,
+      id,
       role: "reviewer",
-      title: `Independent Reviewer · round ${run.reviewRounds}`,
+      title: `Independent Reviewer · round ${run.reviewRounds}${id.includes("-a") ? " (retry)" : ""}`,
       parentTaskId: chief.id,
-      attempt: 1,
+      attempt: version.reviewTasks.length + 1,
       assignment: {
         round: run.reviewRounds,
+        draft_version: version.version,
         narratives: run.tasks.filter((task) => task.state === "accepted" && task.role !== "reviewer" && existsSync(path.join(this.taskDir(run, task), "narrative.md")))
           .map((task) => path.join(this.taskDir(run, task), "narrative.md")),
         partial: run.partialReason ?? null,
+        // Assess each of these in findings.json "previous"; blocker and major ones are required.
+        previous_findings: open.map((finding) => ({ key: finding.key, severity: finding.severity, target: finding.target, problem: finding.problem, status: finding.status })),
       },
     })
+    version.reviewTasks.push(reviewer.id)
     await this.launch(run, reviewer)
-    await this.advance(run, "independent_review", reviewer.id)
-    return { accepted: true, readiness: qa.readiness, provenance: provenance.outcome, reviewTask: reviewer.id,
-      next: `Draft built (${path.join(run.runDir, "report.html")}). Independent review ${reviewer.id} started: briefing_wait for it.` }
+    return reviewer
+  }
+
+  /**
+   * A reviewer that failed or timed out leaves the draft unreviewed. It is
+   * relaunched on the same version while attempts remain; after that the run
+   * is escalated rather than left waiting.
+   */
+  private async handleReviewerFailure(run: BriefingRun) {
+    if (run.status !== "running") return
+    const latest = [...run.tasks].reverse().find((task) => task.role === "reviewer")
+    if (!latest || (latest.state !== "failed" && latest.state !== "cancelled")) return
+    const version = run.drafts?.versions.find((entry) => entry.reviewTasks.includes(latest.id))
+    if (!version || version.reviewTasks.at(-1) !== latest.id) return
+    const chief = run.tasks.find((task) => task.role === "chief")
+    const blocked = this.launchBlocked(run, "reviewer")
+    if (!chief || isTerminal(chief.state) || version.reviewTasks.length >= (run.budgets.maxReviewAttempts ?? 2) || blocked) {
+      await this.finalize(run, {
+        reason: `independent review of draft version ${version.version} did not complete (${latest.failure ?? latest.state})${blocked ? `; ${blocked}` : ""}`,
+        status: run.provider?.state === "halted" ? "provider_unavailable" : "escalated",
+      })
+      return
+    }
+    const base = version.reviewTasks[0]!
+    const retry = await this.launchReviewer(run, chief, version, `${base}-a${version.reviewTasks.length + 1}`)
+    await this.record(run, { task: retry.id, review_retry_of: latest.id, reason: latest.failure ?? latest.state })
   }
 
   private async draftHashes(run: BriefingRun) {
@@ -1445,6 +1830,19 @@ export class BriefingWorkflow {
       if (finding.target.claim_id && !claims.some((claim) => claim.id === finding.target.claim_id)) issues.push(`${finding.id}: claim ${finding.target.claim_id} is not in RUN/evidence_ledger.json`)
       if (finding.target.event_id && !events.some((event) => event.id === finding.target.event_id)) issues.push(`${finding.id}: event ${finding.target.event_id} is not in RUN/events.json`)
     }
+    // Earlier blocker and major findings stay open until a reviewer says they are resolved; the chief cannot.
+    const registry = run.findings ??= {}
+    const outstanding = Object.values(registry).filter((finding) => finding.severity !== "minor"
+      && (finding.status === "open" || finding.status === "in_rework" || finding.status === "unresolved"))
+    const assessed = new Map(review.previous.map((entry) => [entry.key, entry]))
+    for (const key of assessed.keys()) if (!registry[key]) issues.push(`previous: ${key} is not a finding of this run`)
+    const unassessed = outstanding.filter((finding) => !assessed.has(finding.key))
+    if (unassessed.length > 0) issues.push(`previous: assess each earlier blocker or major finding (resolved or unresolved): ${unassessed.map((finding) => finding.key).join(", ")}`)
+    const stillOpen = outstanding.filter((finding) => assessed.get(finding.key)?.status === "unresolved")
+    if (review.verdict === "pass" && stillOpen.length > 0) issues.push(`verdict pass, but ${stillOpen.map((finding) => finding.key).join(", ")} is still unresolved: the verdict is rework`)
+    if (review.verdict === "rework" && stillOpen.length === 0 && !review.findings.some((finding) => finding.severity !== "minor")) {
+      issues.push("verdict rework needs a blocker or major finding, new or still unresolved")
+    }
     if (issues.length > 0) return this.refuse(issues)
     const routed = review.findings.map((finding) => {
       const origin = finding.target.claim_id
@@ -1453,23 +1851,49 @@ export class BriefingWorkflow {
       const responsible = [...new Set((origin ?? []).map((entry) => entry.task))].filter((id) => run.tasks.some((entry) => entry.id === id))
       return { ...finding, responsible: responsible.length > 0 ? responsible : ["chief"] }
     })
-    await this.accept(run, task, { ...review, findings: routed }, [])
+    // The registry changes first, so the acceptance saves them together and a restart can finish the decision.
+    const at = iso(this.now())
+    for (const entry of review.previous) {
+      const finding = registry[entry.key]!
+      finding.status = entry.status
+      finding.history.push({ at, status: entry.status, by: task.id, note: entry.note })
+    }
+    for (const finding of routed) {
+      const key = `${task.id}/${finding.id}`
+      registry[key] = {
+        key, id: finding.id, review: task.id, severity: finding.severity, category: finding.category, target: finding.target,
+        problem: finding.problem, evidence: finding.evidence, ...(finding.suggested_fix ? { correction: finding.suggested_fix } : {}),
+        responsible: finding.responsible, status: "open", history: [{ at, status: "open", by: task.id }],
+      }
+    }
     const count = (key: "severity" | "category") => Object.fromEntries([...new Set(review.findings.map((finding) => finding[key]))]
       .map((value) => [value, review.findings.filter((finding) => finding[key] === value).length]))
+    await this.accept(run, task, { ...review, findings: routed }, [])
     await this.record(run, { task: task.id, review: review.verdict, findings: review.findings.length, severity: count("severity"), category: count("category") })
-    if (review.verdict === "pass") {
-      await this.finalize(run, { reason: "independent review passed" })
-    } else if (run.reworkRounds >= run.budgets.maxReworkRounds) {
-      await this.finalize(run, { reason: `review still asks for rework after ${run.reworkRounds} round(s)`, status: "escalated", unresolved: routed })
-    } else {
-      run.reworkRounds += 1
-      await this.advance(run, "rework", `round ${run.reworkRounds}: ${routed.length} finding(s)`)
-    }
+    await this.decideAfterReview(run, task)
     return { accepted: true, verdict: review.verdict, next: "Accepted. End your turn with a one-line summary." }
   }
 
+  /** What an accepted review leads to. Reads only saved state, so recovery can run it again after a restart. */
+  private async decideAfterReview(run: BriefingRun, task: BriefingTask) {
+    const review = task.accepted!.output as BriefingReview
+    if (run.final || run.stage !== "independent_review") return
+    if (review.verdict === "pass") {
+      await this.finalize(run, { reason: "independent review passed" })
+    } else if (run.reworkRounds >= run.budgets.maxReworkRounds) {
+      await this.finalize(run, { reason: `review still asks for rework after ${run.reworkRounds} round(s)`, status: "escalated" })
+    } else {
+      run.reworkRounds += 1
+      // A new cycle: validation refusals of the first draft do not count against the rework.
+      if (run.drafts) run.drafts.rejectionsThisCycle = 0
+      await this.advance(run, "rework", `round ${run.reworkRounds}: ${review.findings.length} finding(s)`)
+    }
+  }
+
   /** Closes the run with a status that says exactly what is and is not established. */
-  private async finalize(run: BriefingRun, input: { reason: string; status?: BriefingRunStatus; unresolved?: unknown[] }) {
+  private async finalize(run: BriefingRun, input: { reason: string; status?: BriefingRunStatus }) {
+    // Finalising twice (a retried call, a recovery pass) must not rewrite the outcome.
+    if (run.final) return
     const reasons = [input.reason]
     let status: BriefingRunStatus = input.status ?? "ready_for_human_review"
     let readiness: string | undefined
@@ -1496,13 +1920,27 @@ export class BriefingWorkflow {
       status = "incomplete"
       reasons.push(run.partialReason ?? "validator readiness INCOMPLETE")
     }
+    const open = Object.values(run.findings ?? {}).filter((finding) => finding.status !== "resolved" && finding.status !== "escalated")
+    const openSerious = open.filter((finding) => finding.severity !== "minor")
+    if ((status === "ready_for_human_review" || status === "incomplete") && openSerious.length > 0) {
+      status = "escalated"
+      reasons.push(`review findings still open: ${openSerious.map((finding) => finding.key).join(", ")}`)
+    }
+    // What the run ends with unresolved goes to the human reviewer, marked as such.
+    const at = iso(this.now())
+    const unresolved = status === "ready_for_human_review" || status === "incomplete" ? open.filter((finding) => finding.severity === "minor") : open
+    for (const finding of unresolved) {
+      finding.status = "escalated"
+      finding.history.push({ at, status: "escalated", by: "workflow", note: reasons[0] })
+    }
     run.status = status
-    run.final = { at: iso(this.now()), status, readiness, provenance: provenanceOutcome, reasons, unresolvedFindings: input.unresolved ?? [] }
+    run.final = { at, status, readiness, provenance: provenanceOutcome, reasons, unresolvedFindings: unresolved }
     await this.advance(run, "finalized", status)
     const chief = run.tasks.find((task) => task.role === "chief")
     if (chief && !isTerminal(chief.state)) await this.accept(run, chief, run.final, [])
     await this.writeSummary(run)
     await this.record(run, { status, reasons })
+    await this.fault("finalize:done")
   }
 
   private summaryMarkdown(run: BriefingRun) {
@@ -1626,7 +2064,14 @@ export class BriefingWorkflow {
         runBudget: (run.budgets.tokens ?? DEFAULT_BUDGETS.tokens).run,
         note: "Counted from requests the provider has reported; a request in flight is not included.",
       },
+      // Committed = running agents' remaining caps plus an in-flight margin each; research may only use what is
+      // left after the reserve for synthesis, review and rework.
+      budgetPlan: {
+        ...budgetSnapshot(freshTokens(run.usage?.totals ?? emptyUsage()), this.budgetTasks(run), budgetPlan(run)),
+        reserveParts: budgetPlan(run).reserve,
+      },
       provider: run.provider ?? { state: "ok", consecutive: 0 },
+      controller: run.controller ?? null,
       sandbox: run.sandbox ?? null,
       tasks: run.tasks.map((task) => ({
         taskId: task.id, role: task.role, country: task.country, state: task.state, chatId: task.chatId ?? null, failure: task.failure,

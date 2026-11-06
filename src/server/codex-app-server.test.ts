@@ -2518,6 +2518,7 @@ describe("Codex shared tools", () => {
         })
         expect(config.url).toStartWith("http://127.0.0.1:")
         expect(config.tool_timeout_sec).toBeGreaterThan(3600)
+        expect(config.default_tools_approval_mode).toBe("approve")
         expect((await fetch(config.url)).status).toBe(401)
         manager.stopSession("tools")
         await expect(fetch(config.url)).rejects.toThrow()

@@ -1365,7 +1365,7 @@ const ChatInputInner = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <label
             aria-label={t("Add attachment")}
             className={cn(
-              "relative md:hidden shrink-0 self-center overflow-hidden mr-0.5 cursor-pointer",
+              "relative shrink-0 self-center overflow-hidden mr-0.5 cursor-pointer",
               "flex items-center gap-1.5 px-2 py-1 text-sm rounded-md transition-colors text-muted-foreground [&>svg]:shrink-0 [&>span]:whitespace-nowrap hover:bg-muted/50",
               disabled && "pointer-events-none opacity-70",
             )}

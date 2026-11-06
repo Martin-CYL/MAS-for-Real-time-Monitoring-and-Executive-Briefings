@@ -11,6 +11,8 @@ os.umask(0o077)
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('root',type=pathlib.Path);p.add_argument('action',choices=['init','invite','reset','render','activate'])
 p.add_argument('email',nargs='?');p.add_argument('--name');p.add_argument('--origin');p.add_argument('--app-image');p.add_argument('--gateway-image');p.add_argument('--port',type=int,default=3211)
+p.add_argument('--briefing-workflow',action='store_true')
+p.add_argument('--briefing-execution-mode',choices=['sandbox','container'],default='sandbox')
 p.add_argument('--skills-dir',type=pathlib.Path)
 p.add_argument('--import-data',type=pathlib.Path);p.add_argument('--codex-auth',type=pathlib.Path)
 a=p.parse_args();root=a.root.resolve();root.mkdir(parents=True,exist_ok=True)
@@ -23,7 +25,7 @@ def owner_tree(path,uid):
 if a.action=='init':
     if (root/'config.json').exists(): raise SystemExit('Already initialized')
     if not all([a.origin,a.app_image,a.gateway_image]):raise SystemExit('Origin and both images required')
-    write(root/'config.json',dict(origin=a.origin,app_image=a.app_image,gateway_image=a.gateway_image,port=a.port))
+    write(root/'config.json',dict(origin=a.origin,app_image=a.app_image,gateway_image=a.gateway_image,port=a.port,briefing_workflow=a.briefing_workflow,briefing_execution_mode=a.briefing_execution_mode))
     (root/'gateway').mkdir(mode=0o700)
     (root/'gateway.env').write_text('NEX_PUBLIC_ORIGIN='+a.origin+'\nNEX_AUTH_SECRET='+secrets.token_urlsafe(48)+'\n')
     write(root/'gateway'/'tenants.json',[]);owner_tree(root/'gateway',10002)
@@ -55,7 +57,7 @@ services={};networks={}
 for tenant in tenants:
     uid=tenant['userId'];name='user-'+uid;networks[name]={}
     data=root/'users'/uid/'data'
-    services[name]=dict(image=config['app_image'],init=True,user='10001:10001',restart='unless-stopped',stop_grace_period='60s',mem_limit='1200m',pids_limit=256,cap_drop=['ALL'],security_opt=['no-new-privileges:true'],networks=[name],environment=dict(HOME='/home/nex',CODEX_HOME='/home/nex/.codex',NEX_RUNTIME_PROFILE='prod',NEX_DEFAULT_PROVIDER='codex',NEX_PROJECTS_DIR='/workspace/projects',NODE_ENV='production',TZ='Asia/Hong_Kong',NEX_PASSWORD=tenant['password']),volumes=[dict(type='bind',source=str(data/folder),target=dest,bind=dict(create_host_path=False)) for folder,dest in [('nex','/home/nex/.nex'),('codex','/home/nex/.codex'),('projects','/workspace/projects')]],healthcheck=dict(test=['CMD','bun','-e',"const r=await fetch('http://localhost:3210/health');if(!r.ok)process.exit(1)"],interval='30s',timeout='5s',start_period='30s',retries=3),logging=dict(driver='json-file',options={'max-size':'10m','max-file':'3'}))
+    services[name]=dict(image=config['app_image'],init=True,user='10001:10001',restart='unless-stopped',stop_grace_period='60s',mem_limit='1200m',pids_limit=256,cap_drop=['ALL'],security_opt=['no-new-privileges:true'],networks=[name],environment=dict(HOME='/home/nex',CODEX_HOME='/home/nex/.codex',NEX_RUNTIME_PROFILE='prod',NEX_BRIEFING_WORKFLOW='1' if config.get('briefing_workflow',False) else '0',NEX_BRIEFING_EXECUTION_MODE=config.get('briefing_execution_mode','sandbox'),NEX_DEFAULT_PROVIDER='codex',NEX_PROJECTS_DIR='/workspace/projects',NODE_ENV='production',TZ='Asia/Hong_Kong',NEX_PASSWORD=tenant['password']),volumes=[dict(type='bind',source=str(data/folder),target=dest,bind=dict(create_host_path=False)) for folder,dest in [('nex','/home/nex/.nex'),('codex','/home/nex/.codex'),('projects','/workspace/projects')]],healthcheck=dict(test=['CMD','bun','-e',"const r=await fetch('http://localhost:3210/health');if(!r.ok)process.exit(1)"],interval='30s',timeout='5s',start_period='30s',retries=3),logging=dict(driver='json-file',options={'max-size':'10m','max-file':'3'}))
 services['gateway']=dict(image=config['gateway_image'],restart='unless-stopped',init=True,user='10002:10002',env_file=[str(root/'gateway.env')],ports=['127.0.0.1:'+str(config['port'])+':3220'],volumes=[str(root/'gateway')+':/data'],networks=list(networks) or ['gateway'],mem_limit='256m',pids_limit=128,cap_drop=['ALL'],security_opt=['no-new-privileges:true'],healthcheck=dict(test=['CMD','bun','-e',"const r=await fetch('http://localhost:3220/health');if(!r.ok)process.exit(1)"],interval='30s',timeout='5s',retries=3),logging=dict(driver='json-file',options={'max-size':'10m','max-file':'3'}))
 if not networks:networks['gateway']={}
 write(root/'compose.json',dict(services=services,networks=networks))

@@ -999,7 +999,7 @@ export class CodexAppServerManager {
               url: customTools.url,
               http_headers: customTools.headers,
               tool_timeout_sec: 86400,
-              ...(args.restriction ? nexMcpApproval(args.restriction) : {}),
+              ...(args.restriction ? nexMcpApproval(args.restriction) : { default_tools_approval_mode: "approve" }),
             },
           } : {}),
           ...(args.restriction ? restrictionConfig(args.restriction) : {}),

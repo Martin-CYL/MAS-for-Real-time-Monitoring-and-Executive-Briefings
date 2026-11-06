@@ -14,6 +14,8 @@ services:
       HOME: /home/nex
       CODEX_HOME: /home/nex/.codex
       NEX_RUNTIME_PROFILE: prod
+      NEX_BRIEFING_WORKFLOW: ${NEX_BRIEFING_WORKFLOW:-0}
+      NEX_BRIEFING_EXECUTION_MODE: ${NEX_BRIEFING_EXECUTION_MODE:-sandbox}
       NEX_DEFAULT_PROVIDER: codex
       NEX_PROJECTS_DIR: /workspace/projects
       NODE_ENV: production

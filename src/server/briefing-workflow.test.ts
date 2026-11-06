@@ -165,6 +165,7 @@ async function setup(options: {
   budgets?: Record<string, unknown>
   now?: () => number
   watchdogMs?: number
+  executionMode?: "sandbox" | "container"
   sandboxRunner?: SandboxRunner
   usedPercent?: number | null
   fault?: (point: FaultPoint) => void | Promise<void>
@@ -188,6 +189,7 @@ async function setup(options: {
   const logs: string[] = []
   const controller = (fault = options.fault) => new BriefingWorkflow({
     chats: orchestrator, python: fakePython(calls), settleGraceMs: 10, home, now: options.now, watchdogMs: options.watchdogMs,
+    executionMode: options.executionMode ?? "sandbox",
     sandboxRunner: options.sandboxRunner ?? ENFORCING_SANDBOX, providerUsedPercent: () => options.usedPercent ?? null, log: (line) => logs.push(line), fault,
   })
   // The live controller; `restart` replaces it with one that knows only what is on disk.
@@ -379,8 +381,8 @@ describe("briefing workflow", () => {
     expect(reply.tasks[0]).toMatchObject({ taskId: "xb-01", state: "accepted", output: { answer: "None named in the window." } })
   })
 
-  test("draft → independent review → targeted rework → second review → ready for human review", async () => {
-    const { startRun, researchCountry, workflow, codex, projectDir, store } = await setup()
+  test.each(["sandbox", "container"] as const)("draft → review → rework → ready (%s)", async (executionMode) => {
+    const { startRun, researchCountry, workflow, codex, projectDir, store } = await setup({ executionMode })
     const run = await startRun()
     await researchCountry(run.usLead, run.usDir, "us-lead")
     await researchCountry(run.cnLead, run.cnDir, "cn-lead")
@@ -661,6 +663,23 @@ describe("briefing workflow", () => {
     expect(codex.turnsFor(stray.id)).toHaveLength(0)
     expect(codex.sessions.some((session) => session.chatId === stray.id)).toBe(false)
     expect(workflow.allowedTools(stray.id)).toEqual([])
+  })
+
+  test("container mode is explicit, retains role tools, persists and refuses a mode change on restart", async () => {
+    let checks = 0
+    const context = await setup({ executionMode: "container", sandboxRunner: async () => { checks++; throw new Error("must not probe") } })
+    const run = await context.startRun()
+    expect(checks).toBe(0)
+    expect(context.workflow.getRun(run.runId)).toMatchObject({ executionMode: "container", sandbox: { verified: false } })
+    expect(context.workflow.allowedTools(run.usLead)).toEqual(["briefing_status", "briefing_delegate", "briefing_wait", "briefing_submit"])
+    expect(context.codex.turnsFor(run.chief)[0]!.content).toContain("NO inner OS sandbox")
+    expect(context.codex.turnsFor(run.chief)[0]!.content).not.toContain("Your shell runs in an OS sandbox")
+    const reloaded = await context.restart()
+    expect(await reloaded.executionPolicy(run.chief, context.projectDir)).toMatchObject({ restriction: { executionMode: "container" } })
+    const changed = new BriefingWorkflow({ chats: context.orchestrator, executionMode: "sandbox" })
+    try {
+      expect(await changed.executionPolicy(run.chief, context.projectDir)).toMatchObject({ refuse: expect.stringContaining("Execution mode changed") })
+    } finally { changed.dispose() }
   })
 
   test("a host that does not enforce the profile never starts a run", async () => {

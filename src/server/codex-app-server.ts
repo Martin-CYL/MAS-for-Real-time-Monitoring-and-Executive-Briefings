@@ -186,8 +186,9 @@ export interface StartCodexSessionArgs {
   sessionToken: string | null
   pendingForkSessionToken?: string | null
   /**
-   * A least-privilege profile instead of `danger-full-access` (multi-agent
-   * briefing chats only; see `briefing-sandbox.ts`). Its cwd replaces `cwd`.
+   * Briefing role policy, including explicit execution mode. Sandbox mode uses
+   * a permission profile; container mode retains tool/feature/env restrictions.
+   * Its cwd replaces `cwd`.
    */
   restriction?: CodexRestriction
 }
@@ -1004,9 +1005,10 @@ export class CodexAppServerManager {
           ...(args.restriction ? restrictionConfig(args.restriction) : {}),
         },
       } : {}
-      // A restricted session takes its sandbox from the permission profile in
-      // its config; an explicit sandbox mode would override the profile.
-      const sandbox = args.restriction ? {} : { sandbox: "danger-full-access" as const }
+      // Sandbox mode takes its permissions from the profile; container mode
+      // explicitly overrides the inner sandbox while retaining the role policy.
+      const sandbox = args.restriction && args.restriction.executionMode !== "container"
+        ? {} : { sandbox: "danger-full-access" as const }
       // Standard speed is an explicit null. An omitted tier inherits the
       // user's config.toml (`service_tier = "priority"` runs fast while the
       // UI shows "Standard"), and on turn/start it keeps the thread's tier, so

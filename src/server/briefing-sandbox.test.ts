@@ -5,6 +5,7 @@ import { homedir, tmpdir } from "node:os"
 import path from "node:path"
 import { PassThrough } from "node:stream"
 import {
+  parseBriefingExecutionMode,
   buildRestriction,
   DISABLED_CODEX_FEATURES,
   restrictionCliArgs,
@@ -112,7 +113,7 @@ class FakeCodexProcess extends EventEmitter {
         const message = JSON.parse(line)
         this.messages.push(message)
         if (message.method === "initialize") this.stdout.write(`${JSON.stringify({ id: message.id, result: { userAgent: "codex-test" } })}\n`)
-        if (message.method === "thread/start") this.stdout.write(`${JSON.stringify({ id: message.id, result: { thread: { id: `thread-${this.messages.length}` }, model: "m" } })}\n`)
+        if (["thread/start", "thread/resume", "thread/fork"].includes(message.method)) this.stdout.write(`${JSON.stringify({ id: message.id, result: { thread: { id: `thread-${this.messages.length}` }, model: "m" } })}\n`)
       }
     })
   }
@@ -145,6 +146,31 @@ describe("Codex sessions", () => {
     // server is approved, offering only the role's tools.
     expect(start.params.config["mcp_servers.nex"]).toMatchObject({ default_tools_approval_mode: "approve", enabled_tools: ["briefing_status", "briefing_submit"] })
     manager.stopAll()
+  })
+
+  test.each(["thread/start", "thread/resume", "thread/fork"])("container mode retains restrictions on %s", async (method) => {
+    const process = new FakeCodexProcess()
+    const manager = new CodexAppServerManager({ spawnProcess: () => process as never })
+    try {
+      await manager.startSession({ chatId: "container", cwd: BASE.projectDir, model: "m",
+        sessionToken: method === "thread/resume" ? "old" : null,
+        pendingForkSessionToken: method === "thread/fork" ? "parent" : undefined,
+        restriction: { ...restriction, executionMode: "container" }, customTools: { execute: async () => ({ content: [] }) } })
+      const message = process.messages.find((entry) => entry.method === method)!
+      expect(message.params.sandbox).toBe("danger-full-access")
+      expect(message.params.cwd).toBe(restriction.cwd)
+      expect(message.params.config.default_permissions).toBeUndefined()
+      expect(message.params.config["features.multi_agent"]).toBe(false)
+      expect(message.params.config["shell_environment_policy.exclude"]).toContain("*TOKEN*")
+      expect(message.params.config["mcp_servers.nex"].enabled_tools).toEqual(["briefing_status", "briefing_submit"])
+    } finally { manager.stopAll() }
+  })
+
+  test("execution mode defaults closed and rejects typos", () => {
+    expect(parseBriefingExecutionMode(undefined)).toBe("sandbox")
+    expect(parseBriefingExecutionMode("container")).toBe("container")
+    expect(() => parseBriefingExecutionMode("containers")).toThrow("Invalid")
+    expect(() => parseBriefingExecutionMode("")).toThrow("Invalid")
   })
 
   test("an ordinary chat keeps today's parameters", async () => {

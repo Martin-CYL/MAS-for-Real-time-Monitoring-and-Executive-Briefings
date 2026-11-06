@@ -6,7 +6,7 @@ import type { BriefingRole } from "./briefing-contracts"
 /**
  * Least-privilege execution for briefing agents.
  *
- * Every other Nex chat runs Codex with `danger-full-access`. A briefing agent
+ * Every other Nex chat runs Codex with `danger-full-access`. By default, a briefing agent
  * instead gets a Codex permission profile built here and enforced by Codex's
  * OS sandbox (Seatbelt on macOS): it may write only its own task directory,
  * may not read the other agents' directories, the workflow state, Nex's data
@@ -18,6 +18,7 @@ import type { BriefingRole } from "./briefing-contracts"
  * the user's Codex configuration. `verifySandbox` runs the same profile
  * through `codex sandbox` before a run starts: a host where the denials do not
  * hold refuses to run the workflow rather than running it unconfined.
+ * Explicit container mode omits the OS profile, retaining feature/tool/env restrictions.
  *
  * Reads outside the denied paths stay allowed (system tools, Python, the
  * Skill, the rest of the user's files). That is a deliberate limit: a
@@ -41,7 +42,17 @@ export const ROLE_TOOLS: Record<BriefingRole, readonly string[]> = {
   reviewer: ["briefing_status", "briefing_submit"],
 }
 
+export type BriefingExecutionMode = "sandbox" | "container"
+
+export function parseBriefingExecutionMode(value: string | undefined): BriefingExecutionMode {
+  if (value === undefined || value === "sandbox") return "sandbox"
+  if (value === "container") return "container"
+  throw new Error(`Invalid NEX_BRIEFING_EXECUTION_MODE: ${value}`)
+}
+
 export interface CodexRestriction {
+  /** Missing on older runs means sandbox. Container mode retains tool and environment restrictions. */
+  executionMode?: BriefingExecutionMode
   /** Permission profile name, unique per role. */
   profile: string
   /** Working directory for the agent's session. */
@@ -139,10 +150,12 @@ export function buildRestriction(input: RestrictionInput): CodexRestriction {
 export function restrictionConfig(restriction: CodexRestriction): Record<string, unknown> {
   const prefix = `permissions.${restriction.profile}`
   return {
-    default_permissions: restriction.profile,
-    [`${prefix}.extends`]: ":read-only",
-    [`${prefix}.network.enabled`]: restriction.network,
-    [`${prefix}.filesystem`]: restriction.filesystem,
+    ...(restriction.executionMode === "container" ? { sandbox_mode: "danger-full-access" } : {
+      default_permissions: restriction.profile,
+      [`${prefix}.extends`]: ":read-only",
+      [`${prefix}.network.enabled`]: restriction.network,
+      [`${prefix}.filesystem`]: restriction.filesystem,
+    }),
     ...Object.fromEntries(restriction.disabledFeatures.map((feature) => [`features.${feature}`, false])),
     "shell_environment_policy.inherit": "all",
     "shell_environment_policy.exclude": restriction.env.exclude,

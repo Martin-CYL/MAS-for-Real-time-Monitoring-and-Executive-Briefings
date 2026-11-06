@@ -79,7 +79,10 @@ record keeper (`scripts/brief.py`, now able to render the English template), `me
 
 ## Agent permissions
 
-Ordinary Nex chats run Codex with `danger-full-access`. Briefing agents do not. Each agent's Codex session gets a
+The filesystem guarantees and pre-run probe below describe the default `sandbox` mode.
+For the explicit test-only `container` option, see the final section; those filesystem guarantees do not apply.
+
+Ordinary Nex chats run Codex with `danger-full-access`. In sandbox mode, each briefing agent's Codex session gets a
 permission profile for its role, passed as thread config overrides (`default_permissions`, `permissions.<profile>`),
 and Codex enforces it with the OS sandbox (Seatbelt on macOS). Nothing is written to the user's Codex config.
 
@@ -187,3 +190,38 @@ the account's Codex skills directory), then ask in a chat: `/us-china-ai-chip-br
 - `src/server/briefing-provider.test.ts`: provider error classes and backoff.
 
 Both play the agents by hand. They show the workflow's rules and handoffs, not what a model researches or writes.
+
+## Explicit container execution (test deployments only)
+
+`NEX_BRIEFING_EXECUTION_MODE` accepts `sandbox` (default) or `container`.
+Invalid values fail startup. This is a server setting, not a prompt or tool argument.
+Sandbox mode retains the pre-run enforcement probe and refuses failed checks.
+Container mode deliberately does not invoke that probe and explicitly selects
+Codex `danger-full-access` inside the outer container. It is never an automatic
+fallback. It retains role-specific Nex tool allowlists, disabled Codex features,
+working directories and shell environment filtering. Filesystem permission
+profiles are not installed in container mode.
+
+There is **no per-task OS filesystem or network isolation** in container mode.
+Agents can access files readable/writable by their container user, including
+mounted data and credential files. Tool allowlists and environment filtering do
+not prevent shell access to such files. Controller state and evidence integrity
+are no longer protected against direct shell writes; provenance checks alone do
+not restore this boundary. Deployment must use a dedicated test environment,
+non-root containers, exclusive data mounts, no Docker socket or privileged mode,
+and appropriate network/resource limits. The application does not verify the
+outer container boundary or claim a successful sandbox check.
+
+Each run persists its execution mode; older runs default to sandbox. Agent
+launch/resume refuses a mismatch with the server mode: start a new run after
+changing modes. Summaries expose explicitly disabled isolation. Do not resume
+these runs in an older application version without assessing compatibility.
+Skills that claim an OS sandbox must be reviewed separately before live testing.
+This change does not update Skill sources or provision a server environment.
+
+Deployment: build and test a candidate, deploy its exact SHA/image digest only
+to the new test environment, then replay the complete briefing with real Codex.
+Verify cancellation, retry, output delivery and isolation from other environments.
+Back up persistent data/config and retain the previous image. Rollback requires
+checking persisted runs and stopping active tasks; changing the mode is not a
+substitute for restoring compatible application/config versions.

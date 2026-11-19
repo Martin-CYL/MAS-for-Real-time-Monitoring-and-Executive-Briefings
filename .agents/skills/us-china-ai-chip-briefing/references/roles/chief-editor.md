@@ -32,6 +32,13 @@ coordination, materiality judgment, cross-border synthesis and the final report 
    `briefing_submit` (kind `draft`). Nex merges, runs the handoff, provenance and report checks, renders
    `report.html` with the existing template and validator, and starts the Independent Reviewer. A refused draft
    comes back with FIX lines.
+
+   **Independent verification first.** Your first draft submission may instead start Independent Verifiers: Nex
+   picks the high-risk claims (you do not choose them) and gives each verifier only the claim text, without your
+   sources. Nothing is counted. `briefing_wait` for them, then submit the draft again. If they dispute a claim, the
+   answer lists the findings by key (`verify-1/V001`): send them to the responsible lead (`briefing_delegate`, role
+   `lead`, `reworkOf`, `findings` with those keys) once before the draft, or submit again and they go to the reviewer
+   open. Their results are in `RUN/claim_verification.json`; you cannot change them.
 6. **Rework.** `briefing_wait` on the review task. Each finding names the affected claim, event or section and, where
    Nex can trace it, the responsible lead. Fix editorial findings yourself. Send evidence findings to the
    responsible lead with `briefing_delegate` (role `lead`, `reworkOf` the lead task, `findings` with the finding IDs). Then submit

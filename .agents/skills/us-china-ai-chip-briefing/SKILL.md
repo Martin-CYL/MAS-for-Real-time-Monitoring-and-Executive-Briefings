@@ -21,7 +21,7 @@ The goal is a report a person can release after a short sign-off of the riskiest
 
 Use it only when the user explicitly asks for the multi-agent briefing and the Nex tool `briefing_start` is
 available. Call `briefing_start` with the user's request and window, report the run ID and status it returns, and
-stop: Nex runs the Chief Editor, country leads, scouts and reviewer as separate chats, using the role files in
+stop: Nex runs the Chief Editor, country leads, scouts, independent verifiers and reviewer as separate chats, using the role files in
 `references/roles/` and the records and checks of `scripts/brief.py`. Otherwise follow the steps below.
 
 ## Files

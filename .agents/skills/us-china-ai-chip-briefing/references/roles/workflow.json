@@ -7,16 +7,24 @@
   "max_rework_rounds": 2,
   "max_draft_rejections": 4,
   "max_review_attempts": 2,
-  "task_minutes": {"scout": 30, "lead": 90, "cross_border": 30, "reviewer": 30, "chief": 240},
+  "task_minutes": {"scout": 30, "lead": 90, "cross_border": 30, "reviewer": 30, "verifier": 20, "chief": 240},
   "token_budget": {
     "note": "Fresh tokens = uncached input + output, as the provider reports them per request. Best-effort: checked after each reported request and about once a minute, so a request in flight can overshoot.",
     "run_fresh_tokens": 3000000,
-    "task_fresh_tokens": {"scout": 250000, "lead": 400000, "cross_border": 150000, "reviewer": 250000, "chief": 500000},
+    "task_fresh_tokens": {"scout": 250000, "lead": 400000, "cross_border": 150000, "reviewer": 250000, "verifier": 60000, "chief": 500000},
     "reserve_note": "Held back from research for the stages every report needs. New research may start only if, with every running agent spending its whole cap plus the in-flight margin, the reserve stays untouched.",
-    "reserve_fresh_tokens": {"synthesis": 250000, "review": 250000, "rework": 250000},
+    "reserve_fresh_tokens": {"synthesis": 250000, "review": 250000, "rework": 250000, "verification": 150000},
     "in_flight_margin": 25000,
     "wrap_up_at": 0.8,
     "rework_fresh_tokens": 150000
+  },
+  "verification": {
+    "note": "Independent verifiers check high-risk claims before the draft, without the author's sources (references/roles/verifier.md). Claims are chosen by brief.py verify-select.",
+    "enabled": true,
+    "max_claims": 12,
+    "claims_per_verifier": 4,
+    "max_concurrent": 3,
+    "max_rework_rounds": 1
   },
   "discovery": true,
   "days": 7

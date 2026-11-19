@@ -5,7 +5,7 @@
   TEMPLATE RULES
   - Replace every {{...}} placeholder. Delete any block you do not need.
   - Copy component blocks (story, compactstory, matrix-panel, policy-timeline, data-figure) as many times as needed.
-  - Status classes: st confirmed (green, Official or company announcement) / st reported (amber, Media report, not independently confirmed) / st pending (blue-grey, Proposed, pending approval or not yet in force).
+  - Status classes: st confirmed (green, Official or company announcement) / st reported (amber, Media report, not independently confirmed) / st pending (blue-grey, Proposed, pending approval or not yet in force) / st unverified (grey, No supporting source located).
   - Mark explained terms: <abbr class="term" title="plain-English explanation">TERM</abbr>
   - Wrap each material factual claim in a span with data-claim-id; exact span text must match evidence_ledger.json.
   - Use separate claim IDs for independently checkable facts. Source hyperlinks are not verification.
@@ -47,7 +47,7 @@ h1{font:400 clamp(30px,3.6vw,48px)/1.28 var(--serif);letter-spacing:-.03em;margi
 .status-key{display:flex;gap:15px;flex-wrap:wrap;font-size:11px;color:#626870;padding:9px 0 0}
 .status-key b{color:#30343a}
 .dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:5px;vertical-align:middle}
-.dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.s{background:var(--slate)}
+.dot.g{background:var(--green)}.dot.a{background:var(--amber)}.dot.s{background:var(--slate)}.dot.u{background:#9da2a7}
 /* sections */
 .section{padding:34px 0 0}
 .kicker{font-size:10px;letter-spacing:.15em;color:var(--red);font-weight:800;display:flex;align-items:center;gap:14px;margin:0 0 7px}.kicker:after{content:'';height:1px;background:var(--line);flex:1}
@@ -59,7 +59,7 @@ h2{font:400 27px/1.42 var(--serif);letter-spacing:-.02em;margin:0 0 11px}
 .labelrow{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin-bottom:9px}
 .eyebrow{font-size:10px;letter-spacing:.06em;font-weight:800;color:var(--red)}
 .st{font-size:10px;color:#71757a;display:inline-flex;align-items:center;gap:6px}.st:before{content:'';width:6px;height:6px;border-radius:50%;background:#9da2a7}
-.st.confirmed:before{background:var(--green)}.st.reported:before{background:var(--amber)}.st.pending:before{background:var(--slate)}
+.st.confirmed:before{background:var(--green)}.st.reported:before{background:var(--amber)}.st.pending:before{background:var(--slate)}.st.unverified:before{background:#9da2a7}
 .story h3,.compactstory h3{font:400 21px/1.5 var(--serif);margin:0 0 10px}
 .story p,.compactstory p{font-size:13px;line-height:1.92;color:#454b51;margin:0}.story p+p,.compactstory p+p{margin-top:11px}
 .story p>strong:first-child,.compactstory p>strong:first-child{color:#272d32}
@@ -143,7 +143,7 @@ footer{border-top:1px solid var(--line);padding:16px 0 22px;display:flex;justify
 <!-- First rows: last issue's tracked items with outcome (resolved / changed / no change / overdue). Then new items. -->
 <tr><td data-label="Item">{{Item}}<br><span class="muted">{{Carried over: outcome, or New this period}}</span></td><td data-label="Evidence status">{{…}}</td><td data-label="Next milestone">{{Exact date}}</td><td data-label="Relevant work">{{KYC / underwriting / …}}</td></tr>
 </tbody></table>
-<div class="status-key"><b>Key</b><span><i class="dot g"></i>Official or company announcement</span><span><i class="dot a"></i>Media report, not independently confirmed</span><span><i class="dot s"></i>Proposed, pending approval or not yet in force</span></div>
+<div class="status-key"><b>Key</b><span><i class="dot g"></i>Official or company announcement</span><span><i class="dot a"></i>Media report, not independently confirmed</span><span><i class="dot s"></i>Proposed, pending approval or not yet in force</span><span><i class="dot u"></i>No supporting source located</span></div>
 </div>
 
 <section class="section" id="ch1"><div class="kicker">01 / {{Chapter category}}</div><h2>{{Chapter title (states the conclusion)}}</h2>

@@ -47,3 +47,8 @@ resolved, each with its `key`. Check each against this draft version and record 
 when the fix is in the report and its evidence, `unresolved` otherwise. Every earlier blocker and major finding must
 be assessed. One still unresolved means verdict `rework`; do not repeat it as a new finding. Only a reviewer can
 resolve a finding: the Chief Editor's word that it was fixed is not evidence.
+
+**Independent verification.** Keys starting `verify-` are disputes raised by Independent Verifiers, who checked
+claims without the author's sources; assess them like any earlier finding. `RUN/claim_verification.json` lists every
+checked claim with its outcome (independent, media only, not found, disputed, or unverified when a check did not
+finish). A claim marked not found or disputed deserves your own look at its source.

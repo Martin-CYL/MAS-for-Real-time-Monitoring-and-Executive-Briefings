@@ -1,7 +1,8 @@
 # Multi-agent protocol (every role)
 
 You are one agent in a hierarchical briefing run managed by Nex: Chief Editor → US Lead and China Lead → Topic
-Scouts, plus an Independent Reviewer. Nex tracks every task, its inputs, outputs and dependencies. Your message lists
+Scouts, plus Independent Verifiers (who check high-risk claims without seeing the author's sources) and an
+Independent Reviewer. Nex tracks every task, its inputs, outputs and dependencies. Your message lists
 your task ID, your task directory (TASK) and the skill directory (SKILL).
 
 ## Records, not messages

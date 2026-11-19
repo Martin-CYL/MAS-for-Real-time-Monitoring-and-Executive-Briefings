@@ -21,6 +21,7 @@ Commands (run from the skill folder):
   brief.py search RUN "query" [--found "what it turned up"]
   brief.py status RUN
   brief.py build RUN [--network] [--issue-date YYYY-MM-DD]
+  brief.py verify-select RUN [--max 12]      (multi-agent: the claims an independent verifier checks, as JSON)
 
 The report language is set once at init (zh by default; en renders the English template wording).
 """
@@ -41,7 +42,7 @@ from check_evidence import KINDS  # noqa: E402
 import evidence_tools as ev  # noqa: E402
 
 STATUS = {'confirmed': ('g', '官方或公司正式公告'), 'reported': ('a', '媒体报道或未经独立验证'),
-          'pending': ('s', '拟议、待审批或待生效')}
+          'pending': ('s', '拟议、待审批或待生效'), 'unverified': ('u', '尚未找到来源支持')}
 PRIMARY = {'official_document', 'company_statement', 'dataset'}
 SIDE_CN = {'us': '美国', 'cn': '中国', 'both': '中美', 'other': '其他'}
 DECISIONS = ('include', 'track', 'exclude')
@@ -66,7 +67,7 @@ LABELS = {
         'view_lead': '可能改变下一期判断的证据：', 'disclaimer': '本简报仅使用公开资料，不代表任何金融机构的立场或内部风险评级。',
         'glossary': 'GLOSSARY / 术语速查', 'term_sep': '：', 'footer': '事实 / 指控 / 拟议政策 / 分析推断明确区分',
         'status': {k: v[1] for k, v in STATUS.items()}, 'side': SIDE_CN, 'evidence': EVIDENCE_CN,
-        'mixed': '部分说法仅有媒体报道', 'proposed': '拟议：',
+        'mixed': '部分说法仅有媒体报道', 'proposed': '拟议：', 'verify_gap': '独立核验未能找到关键说法的来源',
     },
     'en': {
         'lang': 'en', 'title': 'US-China AI &amp; Semiconductor Risk Briefing | {d:%Y.%m.%d}', 'brand': 'US-China AI &amp; Semiconductor Monitor',
@@ -86,11 +87,12 @@ LABELS = {
                       'represent the position or internal risk rating of any financial institution.',
         'glossary': 'GLOSSARY / Terms', 'term_sep': ': ', 'footer': 'Facts, allegations, proposed policy and analysis are clearly distinguished',
         'status': {'confirmed': 'Official or company announcement', 'reported': 'Media report, not independently confirmed',
-                   'pending': 'Proposed, pending approval or not yet in force'},
+                   'pending': 'Proposed, pending approval or not yet in force', 'unverified': 'No supporting source located'},
         'side': {'us': 'US', 'cn': 'China', 'both': 'US-China', 'other': 'Other'},
         'evidence': {'supported': 'Official or company source opened', 'partial': 'Media reports only',
                      'unresolved': 'Original not obtained or not yet checked', 'unsupported': 'Core claim not supported by a source'},
         'mixed': 'some claims rest on media reports only', 'proposed': 'Proposed: ',
+        'verify_gap': 'an independent check found no source for a key claim',
     },
 }
 
@@ -459,20 +461,43 @@ def link(url, name):
 
 
 def label_for(e):
-    """Status label from the evidence, never from the writer: confirmed needs an opened primary source."""
+    """Status label from the evidence, never from the writer: confirmed needs an opened primary source.
+    Nothing located is shown as unverified, not as a media report."""
     if e.get('proposed'):
         return 'pending'
+    if e['evidence_status'] in ('unresolved', 'unsupported'):
+        return 'unverified'
     return 'confirmed' if e['evidence_status'] == 'supported' else 'reported'
+
+
+# Kinds whose claims decide what a reader takes as settled; an independent check that finds no source for one
+# keeps its story from reading as an official announcement.
+KEY_KINDS = {'legal', 'list'}
+# Verifier outcomes (RUN/claim_verification.json, written by the multi-agent workflow) that leave a claim unsupported.
+VERIFY_GAPS = {'not_found', 'contradicted', 'status_differs', 'scope_differs'}
+
+
+def load_verification(run):
+    """Independent-check results by claim ID; empty for single-agent runs."""
+    return (load(Path(run) / 'claim_verification.json', {}) or {}).get('claims') or {}
+
+
+def verify_gap(shown, verification):
+    return any(set(c.get('kinds') or []) & KEY_KINDS and (verification.get(c['id']) or {}).get('status') in VERIFY_GAPS
+               for c in shown)
 
 
 def is_primary(claim):
     return any(s.get('evidence_type') in PRIMARY for s in claim.get('sources') or [])
 
 
-def labels_for(e, shown):
+def labels_for(e, shown, verification=None):
     """Labels for a story, claim by claim: an official source for one claim does not make the others official.
-    `shown` are the claims printed for it. Mixed evidence gets both labels."""
+    `shown` are the claims printed for it. Mixed evidence gets both labels. A legal or list claim an independent
+    check could not support keeps the story from being labelled confirmed."""
     first = label_for(e)
+    if first == 'confirmed' and verify_gap(shown, verification or {}):
+        return ['unverified']
     if first != 'confirmed' or all(is_primary(c) for c in shown):
         return [first]
     return ['confirmed', 'reported']
@@ -496,6 +521,7 @@ def page(run, issue_date=None):
     lang = cfg.get('language', 'zh')
     L = LABELS[lang]
     events, ledger, claims, risk, sources = snapshot_state(run)
+    verification = load_verification(run)
     evs = {e['id']: e for e in events['events']}
     w = Writer()
     d = date.fromisoformat(issue_date or cfg['report_date'])
@@ -530,10 +556,12 @@ def page(run, issue_date=None):
     rows = []
     c1, c2, c3, c4 = L['columns']
     for e in order:
-        st = label_for(e)
         shown = [claims[c] for c in e.get('claim_ids') or [] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
+        labels = labels_for(e, shown, verification)
+        st = labels[0]
         ev_text = (L['proposed'] if e.get('proposed') else '') + L['evidence'][e['evidence_status']] \
-            + (f'{L["join"]}{L["mixed"]}' if len(labels_for(e, shown)) > 1 else '') \
+            + (f'{L["join"]}{L["mixed"]}' if len(labels) > 1 else '') \
+            + (f'{L["join"]}{L["verify_gap"]}' if verify_gap(shown, verification) else '') \
             + ('' if e['decision'] == 'include' else f'{L["join"]}{e.get("reason", "")}')
         where = L['chapter'].format(n=e['_chapter']) if e.get('_chapter') else L['tracking']
         rows.append(f'<tr><td data-label="{c1}">{w(e["title"])}<br><span class="muted">{L["carried"] if e.get("case_id") else L["new"]}</span></td>'
@@ -552,7 +580,7 @@ def page(run, issue_date=None):
             e = evs[s['event']]
             cl = [claims[c] for c in e['claim_ids'] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
             facts = (' ' if lang == 'en' else '').join(f'<span data-claim-id="{c["id"]}">{w(c["text"])}</span>' for c in cl)
-            sts = labels_for(e, cl)
+            sts = labels_for(e, cl, verification)
             first = cl[0]['sources'][0] if cl else {}
             eyebrow = f'{L["side"].get(e.get("side"), "")} / {first.get("source_name", "")} / {md_date(e.get("date"), lang)}'
             body = (f'<p><strong>{L["background"]}</strong>{w(s["background"])}</p>' if s.get('background') else '') \
@@ -658,7 +686,8 @@ def cmd_build(a):
     from validate import run_all, print_next_steps
     from qa_common import exit_code
     result, md, signoff = run_all(run / 'report.html', run / 'report_ledger.json', expected_date=a.issue_date or cfg['report_date'],
-                                  glossary=SKILL / 'references' / 'glossary.md', network=a.network, coverage_path=run / 'coverage.json')
+                                  glossary=SKILL / 'references' / 'glossary.md', network=a.network, coverage_path=run / 'coverage.json',
+                                  verification=load_verification(run))
     qa = run / 'qa'
     qa.mkdir(exist_ok=True)
     save(qa / 'review_report.json', result)
@@ -712,9 +741,42 @@ def main():
     p = sub.add_parser('status'); p.add_argument('run')
     p = sub.add_parser('build'); p.add_argument('run'); p.add_argument('--network', action='store_true')
     p.add_argument('--issue-date', help='YYYY-MM-DD the report is issued (default: run_config report_date, the window end)')
+    p = sub.add_parser('verify-select'); p.add_argument('run'); p.add_argument('--max', type=int, default=12)
     a = ap.parse_args()
     return {'init': cmd_init, 'fetch': cmd_fetch, 'event': cmd_event, 'add-claim': cmd_add_claim, 'search': cmd_search,
-            'withdraw': cmd_withdraw, 'status': cmd_status, 'build': cmd_build}[a.cmd](a)
+            'withdraw': cmd_withdraw, 'status': cmd_status, 'build': cmd_build, 'verify-select': cmd_verify_select}[a.cmd](a)
+
+
+def verification_targets(run, limit):
+    """Claims an independent verifier should check, highest risk first: high-risk kinds (the validator's risk tier),
+    and the claims that decide a shown event's status label. Each entry says what the report asserts, never where
+    the author found it: the verifier looks for its own source."""
+    events, _, claims, risk, _ = snapshot_state(run)
+    picked = {}
+    for e in events['events']:
+        if e.get('decision') not in ('include', 'track'):
+            continue
+        shown = [claims[c] for c in e.get('claim_ids') or [] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
+        label = label_for(e)
+        for c in shown:
+            r = risk.get(c['id'], {})
+            decides = e.get('proposed') or (label == 'confirmed' and is_primary(c))
+            if r.get('tier') != 'high' and not decides:
+                continue
+            picked[c['id']] = {
+                'claim_id': c['id'], 'text': c['text'], 'kinds': c.get('kinds') or [], 'risk_score': r.get('score', 0),
+                'event_id': e['id'], 'event_title': e.get('title'), 'event_date': e.get('date'), 'side': e.get('side'),
+                # What a reader is told about it: the label its story carries.
+                'asserted_status': 'proposed' if e.get('proposed') else 'official' if is_primary(c) else 'reported',
+            }
+    ranked = sorted(picked.values(), key=lambda t: (-t['risk_score'], t['asserted_status'] != 'official', t['claim_id']))
+    return ranked[:limit], max(0, len(ranked) - limit)
+
+
+def cmd_verify_select(a):
+    targets, left = verification_targets(Path(a.run), a.max)
+    print(json.dumps({'claims': targets, 'not_selected': left}, ensure_ascii=False))
+    return 0
 
 
 def cmd_search(a):

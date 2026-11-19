@@ -10,6 +10,12 @@ never typed by a person; editing the report or ledger afterwards makes the form 
 import re
 
 BOX = {'支持': 'supported', '不支持': 'unsupported', '未能确认': 'unverified'}
+# Independent checks by the multi-agent workflow's verifiers (RUN/claim_verification.json). A hint for the person
+# signing off, never a substitute for opening the source.
+VERIFIED = {'independent': '独立核验找到一手来源支持', 'media_only': '独立核验仅找到媒体报道',
+            'not_found': '独立核验未能找到来源', 'contradicted': '独立核验发现来源与说法矛盾',
+            'status_differs': '独立核验发现法律状态不符', 'scope_differs': '独立核验发现适用范围不符',
+            'unverified': '核验员未完成，未独立核验'}
 DECISIONS = {'approve': 'approve', 'hold': 'hold', 'reject': 'reject',
              '批准': 'approve', '暂缓': 'hold', '退回': 'reject'}
 
@@ -21,7 +27,7 @@ def first_quoted_source(c):
     return None
 
 
-def render_signoff(ledger, risk, report_sha, ledger_sha, coverage_excluded=None, limit=None):
+def render_signoff(ledger, risk, report_sha, ledger_sha, coverage_excluded=None, limit=None, verification=None):
     claims = {c['id']: c for c in (ledger or {}).get('claims', []) if isinstance(c, dict) and isinstance(c.get('id'), str)}
     high = sorted((cid for cid, r in risk.items() if r['tier'] == 'high' and cid in claims),
                   key=lambda cid: -risk[cid]['score'])
@@ -47,6 +53,10 @@ def render_signoff(ledger, risk, report_sha, ledger_sha, coverage_excluded=None,
                     f"- 摘录：“{s.get('quote')}”（定位：{s.get('anchor')}）"]
         else:
             out.append('- 来源：无已打开的摘录，需人工查找')
+        check = (verification or {}).get(cid)
+        if check:
+            out.append(f"- 独立核验：{VERIFIED.get(check.get('status'), check.get('status'))}（{check.get('by', '')}）"
+                       + (f"：{check['note']}" if check.get('note') else ''))
         out += [f"- 作者注明的不确定性：{c.get('uncertainty') or '无'}",
                 '- 结论：[ ] 支持  [ ] 不支持  [ ] 未能确认',
                 '- 备注：', '']

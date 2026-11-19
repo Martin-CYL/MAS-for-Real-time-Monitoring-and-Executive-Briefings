@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check one research task's records before its results are handed to the parent agent.
 
-  python3 scripts/check_handoff.py TASK_RUN --role scout|lead|cross_border|chief [--json]
+  python3 scripts/check_handoff.py TASK_RUN --role scout|lead|cross_border|chief|verifier [--json]
 
 TASK_RUN is a brief.py run directory with assignment.json (written by the workflow controller) and, except for the
 chief, narrative.md. Findings use the validator's PASS / FAIL / UNVERIFIED semantics: any FAIL means the handoff is
@@ -24,7 +24,8 @@ import evidence_tools as ev  # noqa: E402
 from check_evidence import KINDS  # noqa: E402
 from qa_common import finding, outcome  # noqa: E402
 
-ROLES = ('scout', 'lead', 'cross_border', 'chief')
+ROLES = ('scout', 'lead', 'cross_border', 'chief', 'verifier')
+VERDICTS = ('confirmed', 'contradicted', 'scope_differs', 'status_differs', 'not_found')
 MIN_NARRATIVE = 80
 # Record IDs mean nothing to a reader; the renderer prints tracked events' titles and reasons as they are.
 INTERNAL_ID = re.compile(r'\b[ACES]\d{3,}\b')
@@ -111,6 +112,13 @@ def check(run, role):
             add('FAIL', 'CLAIM_KINDS', f'{c["id"]}: kinds {bad or "missing"} are not accepted by the validator ({", ".join(sorted(KINDS))}); '
                 'withdraw it and add it again with valid --kind values', claim=c['id'])
 
+    if role == 'verifier':
+        # A verifier's records are its own evidence for its verdicts; it decides no events and writes no narrative.
+        check_verification(run, assignment or {}, claims, risk, add)
+        if not items or all(x['status'] == 'PASS' for x in items):
+            add('PASS', 'HANDOFF_RECORDS', 'records are complete for this role')
+        return items
+
     for e in evs:
         eid = e['id']
         if not e.get('decision'):
@@ -178,6 +186,41 @@ def check(run, role):
     if not items or all(x['status'] == 'PASS' for x in items):
         add('PASS', 'HANDOFF_RECORDS', 'records are complete for this role')
     return items
+
+
+def check_verification(run, assignment, claims, risk, add):
+    """verification.json: a verdict for every assigned claim, each but not_found backed by the verifier's own
+    recorded claims whose quotes were found in pages it saved."""
+    doc = load(run / 'verification.json')
+    if doc is None or '_invalid' in doc or not isinstance(doc.get('results'), list):
+        add('FAIL', 'VERIFICATION_MISSING', 'verification.json missing or invalid: write {"results": [...]} (verifier.md)')
+        return
+    assigned = {t.get('claim_id') for t in assignment.get('claims') or []}
+    seen = set()
+    for r in doc['results']:
+        cid = r.get('claim_id')
+        if cid not in assigned:
+            add('FAIL', 'VERIFICATION_UNASSIGNED', f'{cid}: not one of the claims assigned to you ({", ".join(sorted(assigned))})', claim=cid)
+            continue
+        if cid in seen:
+            add('FAIL', 'VERIFICATION_DUPLICATE', f'{cid}: more than one result', claim=cid)
+        seen.add(cid)
+        verdict = r.get('verdict')
+        if verdict not in VERDICTS:
+            add('FAIL', 'VERIFICATION_VERDICT', f'{cid}: verdict {verdict!r} is not one of {", ".join(VERDICTS)}', claim=cid)
+            continue
+        if not (r.get('note') or '').strip():
+            add('FAIL', 'VERIFICATION_NOTE', f'{cid}: say in note what you checked and why you concluded {verdict}', claim=cid)
+        evidence = r.get('evidence') or []
+        if verdict != 'not_found' and not evidence:
+            add('FAIL', 'VERIFICATION_EVIDENCE', f'{cid}: {verdict} needs evidence: the IDs of claims you recorded with add-claim', claim=cid)
+        for own in evidence:
+            if own not in claims:
+                add('FAIL', 'VERIFICATION_EVIDENCE', f'{cid}: evidence {own} is not a claim in your evidence_ledger.json', claim=cid)
+            elif risk.get(own, {}).get('quote_state') != 'FOUND':
+                add('FAIL', 'VERIFICATION_EVIDENCE', f'{cid}: the quote of your claim {own} was not found in its saved page', claim=cid)
+    for cid in sorted(assigned - seen):
+        add('FAIL', 'VERIFICATION_INCOMPLETE', f'{cid}: no result; give every assigned claim a verdict (not_found if you found nothing)', claim=cid)
 
 
 def summary(run):

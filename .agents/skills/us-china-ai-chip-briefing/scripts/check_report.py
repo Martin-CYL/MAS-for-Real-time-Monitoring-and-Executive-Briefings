@@ -212,14 +212,16 @@ def validate_report(raw, expected_date=None, glossary=None):
     # Map actual legend entries by dot class, accepting V17 wording variations.
     states={'confirmed':r'(官方|政府|公司).*(公告|声明)|(?i:(official|government|company).*(announcement|statement|document|filing))',
             'reported':r'(媒体|未经|尚未).*?(报道|核验|验证|数据)|(?i:media|not independently|unconfirmed|unverified|reported)',
-            'pending':r'(拟议|待审批|待生效)|(?i:proposed|pending|awaiting|not yet in force)'}
+            'pending':r'(拟议|待审批|待生效)|(?i:proposed|pending|awaiting|not yet in force)',
+            'unverified':r'(尚未找到来源|未找到来源|缺少来源|无来源|尚未核实)|(?i:no (?:supporting )?source|not (?:yet )?verified|unverified)'}
     legends=doc.selected('status-key')
     mapped={}
     for legend in legends:
         for dot in doc.nodes:
             if dot.tag=='i' and any(p is legend for p in dot.ancestors()):
                 cl=dot.classes
-                state='reported' if cl & {'a','report'} else 'pending' if cl & {'s','pending'} else 'confirmed' if cl & {'g','key-dot'} else None
+                state='reported' if cl & {'a','report'} else 'pending' if cl & {'s','pending'} else 'confirmed' if cl & {'g','key-dot'} \
+                    else 'unverified' if cl & {'u','unverified'} else None
                 if state:
                     mapped[state]=normalized(dot.parent.text())
     for n in doc.selected('st'):

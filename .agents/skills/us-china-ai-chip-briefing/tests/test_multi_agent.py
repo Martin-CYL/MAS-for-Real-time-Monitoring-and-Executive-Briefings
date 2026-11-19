@@ -447,7 +447,7 @@ class RoleFileTests(unittest.TestCase):
 
     def test_includes_resolve(self):
         roles = sorted((SKILL / 'references' / 'roles').glob('*.md'))
-        self.assertEqual({p.stem for p in roles}, {'protocol', 'topic-scout', 'country-lead', 'chief-editor', 'reviewer'})
+        self.assertEqual({p.stem for p in roles}, {'protocol', 'topic-scout', 'country-lead', 'chief-editor', 'reviewer', 'verifier'})
         for p in roles:
             if p.stem == 'protocol':
                 continue

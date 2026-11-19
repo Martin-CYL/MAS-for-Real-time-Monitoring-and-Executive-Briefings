@@ -152,6 +152,24 @@ function fakePython(calls: string[][]): PythonRunner {
   }
 }
 
+/**
+ * Ends every turn a test left open and waits until the coordinator and the store have nothing in flight, so no
+ * transcript write lands after the test's data directory is gone.
+ */
+async function quiesce(codex: FakeCodex, agent: AgentCoordinator, store: EventStore) {
+  let quiet = 0
+  for (let tick = 0; tick < 200 && quiet < 3; tick += 1) {
+    // An ended sub-chat reports to its parent, which starts a turn of its own: end those too.
+    for (const turn of codex.turns) {
+      if (!turn.open) continue
+      turn.open = false
+      turn.events.finish()
+    }
+    await Bun.sleep(5)
+    quiet = agent.getActiveStatuses().size === 0 && store.getResourceCounts().storeQueuedWrites === 0 ? quiet + 1 : 0
+  }
+}
+
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
   for (const cleanup of cleanups.splice(0)) await cleanup()
@@ -206,6 +224,7 @@ async function setup(options: {
   store.onTurnStarted = (chatId) => orchestrator.handleTurnStarted(chatId)
   cleanups.push(async () => {
     live.workflow.dispose()
+    await quiesce(codex, agent, store)
     orchestrator.dispose()
     agent.dispose()
     for (const dir of [dataDir, projectDir, home]) await rm(dir, { recursive: true, force: true })

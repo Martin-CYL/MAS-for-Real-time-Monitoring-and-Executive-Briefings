@@ -89,7 +89,14 @@ describe("briefing workflow with the real Skill scripts", () => {
     agent.onChatSettled = (chatId) => { orchestrator.handleChatSettled(chatId); workflow.handleChatSettled(chatId) }
     store.onTurnStarted = (chatId) => orchestrator.handleTurnStarted(chatId)
     cleanups.push(async () => {
-      workflow.dispose(); orchestrator.dispose(); agent.dispose()
+      workflow.dispose()
+      // Turns left open end, and their last transcript writes land, before the data directory goes.
+      for (let quiet = 0, tick = 0; tick < 200 && quiet < 3; tick += 1) {
+        for (const turn of codex.turns) if (turn.open) { turn.open = false; turn.events.finish() }
+        await Bun.sleep(5)
+        quiet = agent.getActiveStatuses().size === 0 && store.getResourceCounts().storeQueuedWrites === 0 ? quiet + 1 : 0
+      }
+      orchestrator.dispose(); agent.dispose()
       for (const dir of [dataDir, projectDir, home]) await rm(dir, { recursive: true, force: true })
     })
 

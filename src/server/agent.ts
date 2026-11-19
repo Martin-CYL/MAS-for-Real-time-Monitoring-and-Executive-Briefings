@@ -34,6 +34,7 @@ import type { ClientCommand } from "../shared/protocol"
 import { AsyncQueue } from "./async-queue"
 import { resolveClaudeExecutable } from "./claude-executable"
 import { NexToolRuntime, NexToolEventFilter, type NexToolHost } from "./nex-tools"
+import type { BriefingWorkflow } from "./briefing-workflow"
 import type { ChatOrchestrator } from "./orchestrator"
 import { createClaudeNexTools } from "./nex-tool-adapters"
 import { EventStore } from "./event-store"
@@ -1133,6 +1134,8 @@ export class AgentCoordinator {
    * because the orchestrator is built on top of this coordinator.
    */
   orchestration: ChatOrchestrator | null = null
+  /** The multi-agent briefing workflow, set when NEX_BRIEFING_WORKFLOW=1. */
+  briefing: BriefingWorkflow | null = null
   /**
    * Fired when a chat has no turn left to run: its turn ended and nothing
    * queued started another. Not fired for a steer or a shutdown, where the
@@ -1896,6 +1899,9 @@ export class AgentCoordinator {
         // No token → nothing to resume; a fork in progress must not be disturbed.
         if (!args.sessionToken || args.pendingForkSessionToken) return false
         try {
+          // The preflight starts the session the turn reuses, so it must be the confined one.
+          const policy = await this.briefing?.executionPolicy(args.chatId, args.cwd) ?? null
+          if (policy && "refuse" in policy) return false
           const started = await this.codexManager.startSession({
             chatId: args.chatId,
             cwd: args.cwd,
@@ -1903,6 +1909,7 @@ export class AgentCoordinator {
             serviceTier: args.serviceTier,
             sessionToken: args.sessionToken,
             pendingForkSessionToken: null,
+            restriction: policy?.restriction,
           })
           return started?.resumeFellBack === true
         } catch {
@@ -1997,6 +2004,13 @@ export class AgentCoordinator {
     if (!project) {
       throw new Error("Project not found")
     }
+    // A multi-agent briefing agent runs only on Codex, confined by its role's permission profile.
+    const briefingPolicy = await this.briefing?.executionPolicy(args.chatId, project.localPath) ?? null
+    if (briefingPolicy && "refuse" in briefingPolicy) throw new Error(briefingPolicy.refuse)
+    if (briefingPolicy && args.provider !== "codex") {
+      throw new Error("Multi-agent briefing agents run only on Codex, whose permission profiles confine them.")
+    }
+    const restriction = briefingPolicy?.restriction
 
     // Mid-conversation harness switch: drop the old provider's session (its
     // native context is stale the moment another harness takes a turn — we
@@ -2066,6 +2080,7 @@ export class AgentCoordinator {
           },
           requestInput: (request, callSignal) => this.requestToolInput(args.chatId, request, callSignal),
           orchestration: this.orchestration ?? undefined,
+          briefing: this.briefing ?? undefined,
         })
         return active.customTools.execute(name, input, signal)
       },
@@ -2195,6 +2210,7 @@ export class AgentCoordinator {
         serviceTier: args.serviceTier,
         sessionToken: chat.sessionToken,
         pendingForkSessionToken: chat.pendingForkSessionToken,
+        restriction,
       })
       if (chat.pendingForkSessionToken && started?.sessionToken) {
         await this.store.setPendingForkSessionToken(args.chatId, null)

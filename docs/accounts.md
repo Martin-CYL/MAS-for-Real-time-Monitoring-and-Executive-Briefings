@@ -42,3 +42,10 @@ For rollback, stop the accounts Compose stack, then restart the original develop
 ## Testing
 
 `bun test src/server/gateway/gateway.test.ts` covers routing, authentication, one-time reset, session revocation, origin checks and WebSocket logout. Also run the full suite and `bun run check`. Before live use, verify two separate browser sessions, cross-account session/file URLs, preserved administrator history, an empty new account, and a real agent task in each container. Never interpret HTTP 200 alone as authorization success: some frontend routes return the app shell.
+
+For a **new isolated test stack**, `init --briefing-workflow
+--briefing-execution-mode container` explicitly opts its tenants into the
+container briefing mode. Both settings are persisted in the stack's protected
+config.json and retained by render/activate/invite. Defaults remain workflow
+disabled and sandbox mode; existing stacks without these keys are unchanged.
+See docs/briefing-workflow.md for the loss of inner filesystem isolation.

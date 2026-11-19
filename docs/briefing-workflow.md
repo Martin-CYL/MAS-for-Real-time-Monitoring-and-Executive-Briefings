@@ -11,6 +11,7 @@ user chat ──briefing_start──▶ Chief Editor (sub-chat, depth 1)
                                 ├─ US Lead (depth 2) ──▶ topic scouts (depth 3)
                                 ├─ China Lead (depth 2) ──▶ topic scouts (depth 3)
                                 ├─ cross-border requests, answered by the other lead in its own chat
+                                ├─ Independent Verifiers (depth 2, before the first draft, when the Skill enables them)
                                 └─ Independent Reviewer (depth 2, fresh chat per review round)
 ```
 
@@ -76,6 +77,38 @@ record keeper (`scripts/brief.py`, now able to render the English template), `me
   a tool.
 - Final statuses: `ready_for_human_review`, `incomplete`, `escalated`, `blocked`, `failed`, `cancelled`,
   `budget_exhausted`, `provider_unavailable`. None of them replaces the human sign-off in `qa/signoff.md`.
+
+## Independent verification
+
+When the Skill's `workflow.json` sets `verification.enabled` and ships `references/roles/verifier.md`, the chief's
+first draft submission starts independent verification instead of building the draft. The submission is not
+counted, and older Skills and saved runs are unaffected. The design and how it is to be evaluated:
+[briefing-verifier-design.md](briefing-verifier-design.md).
+
+- **Selection.** The Skill picks the claims (`brief.py verify-select`): high-risk kinds by the validator's risk tier,
+  and the claims that decide a shown event's status label, highest risk first, up to `max_claims`. The chief does not
+  choose them.
+- **Blindness.** Each verifier gets only what the report asserts: claim text, kinds, the status a reader is told, and
+  the event's title and date. Its profile (`nex-briefing-verifier`) may write its own directory and read the Skill,
+  and nothing else of the run, so it cannot read the author's sources, ledgers or narratives. Container mode does not
+  enforce this (see the last section).
+- **Hand-in.** A verifier records its own sources and quotes with `brief.py`, then writes `verification.json`:
+  `confirmed`, `contradicted`, `scope_differs`, `status_differs` or `not_found`, each but `not_found` backed by its own
+  recorded claims (`check_handoff.py --role verifier`).
+- **Outcome.** The controller writes `RUN/claim_verification.json`, which agents can read and cannot write:
+  - `independent` (confirmed with a primary source), `media_only`, `not_found`, the three disputes, or `unverified`
+    (the verifier failed, timed out, or the run could not afford it);
+  - each dispute becomes a major finding `verify-N/V001`, routed by provenance like a review finding.
+- **The chief's options.** The chief is told about disputes once. It may send one round of rework on them before the
+  draft (`max_rework_rounds`), or submit again and take them to review open. The reviewer must assess them like any
+  earlier finding, so an unresolved dispute keeps the run from `ready_for_human_review`.
+- **The report.** A story whose legal or list claim the check could not support is labelled with the grey "No
+  supporting source located" marker instead of "Official or company announcement". The same marker now shows status
+  table rows with no located source, which used to borrow the amber media-report marker. The sign-off sheet shows each
+  claim's check.
+- **Budget.** Verifiers have their own cap (`task_fresh_tokens.verifier`), a reserve (`reserve_fresh_tokens.verification`)
+  that research may not touch, and must leave a review and its rework affordable. If they cannot, verification is
+  skipped with the reason and every selected claim stays `unverified`.
 
 ## Agent permissions
 
@@ -179,14 +212,17 @@ the account's Codex skills directory), then ask in a chat: `/us-china-ai-chip-br
 - `src/server/briefing-workflow.test.ts`: real coordinator, store and orchestrator with a scripted provider and a
   stand-in for the Skill scripts. Covers delegation depth, result return, queueing, budgets, refusal, failure, retry,
   timeout, cancellation, cross-border, review/rework bounds and the review lifecycle, partial runs, tool wiring, and
-  restart recovery with crashes injected at each save point (`fault`).
+  restart recovery with crashes injected at each save point (`fault`), and independent verification (blind
+  assignment, disputes to findings, pre-draft rework, failed or unaffordable verifiers, older Skills).
 - `src/server/briefing-budget.test.ts`: the allocation policy over 2,000 generated runs.
 - `src/server/briefing-workflow.skill.test.ts`: the same hierarchy through the real Skill scripts (records, merges,
-  handoff and provenance checks, English render and validator): a proposal written as enacted is refused, a
-  post-handoff edit is refused, review rework is routed to the responsible lead and resubmitted. Skipped unless
+  handoff and provenance checks, English render and validator): claims are verified by agents with their own records,
+  a proposal written as enacted is refused, a post-handoff edit is refused, review rework is routed to the
+  responsible lead and resubmitted. Skipped unless
   `BRIEFING_SKILL_DIR` points at the Skill.
 - `src/server/briefing-sandbox.test.ts`: profiles per role, the exact `thread/start` parameters, session reuse, the
-  pre-run check; with `NEX_CODEX_SANDBOX_TEST=1` and `codex` on PATH it runs the real OS sandbox.
+  pre-run check; with `NEX_CODEX_SANDBOX_TEST=1` and `codex` on PATH it runs the real OS sandbox, including a check
+  that a verifier cannot read the author's records.
 - `src/server/briefing-provider.test.ts`: provider error classes and backoff.
 
 Both play the agents by hand. They show the workflow's rules and handoffs, not what a model researches or writes.

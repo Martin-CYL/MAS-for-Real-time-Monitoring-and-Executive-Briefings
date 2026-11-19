@@ -69,13 +69,13 @@ const US_RULE = "The Synthetic Commerce Agency today issued a proposed rule that
 const CN_REPORT = "Synthetic Daily reported that Synthetic Foundry Co. halted shipments of synthetic wafers to a synthetic buyer on March 6, 2030, citing licensing uncertainty."
 
 describe("briefing workflow with the real Skill scripts", () => {
-  skillTest("records travel scout → lead → chief intact, a proposal written as law and tampering are caught, review rework is routed and resubmitted, and the English report is built and validated", async () => {
+  skillTest("records travel scout → lead → chief intact, claims are checked independently, a proposal written as law and tampering are caught, review rework is routed and resubmitted, and the English report is built and validated", async () => {
     const dataDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-skill-data-"))
     const projectDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-skill-project-"))
     const home = await mkdtemp(path.join(tmpdir(), "nex-briefing-skill-home-"))
     const skill = path.join(projectDir, ".agents", "skills", "us-china-ai-chip-briefing")
     await cp(SKILL_DIR!, skill, { recursive: true, filter: (source) => !source.includes("__pycache__") })
-    await writeFile(path.join(skill, "references", "roles", "workflow.json"), JSON.stringify({ discovery: false }))
+    await writeFile(path.join(skill, "references", "roles", "workflow.json"), JSON.stringify({ discovery: false, verification: { enabled: true, claims_per_verifier: 4 } }))
     const store = new EventStore(dataDir)
     await store.initialize()
     const project = await store.openProject(projectDir)
@@ -89,7 +89,14 @@ describe("briefing workflow with the real Skill scripts", () => {
     agent.onChatSettled = (chatId) => { orchestrator.handleChatSettled(chatId); workflow.handleChatSettled(chatId) }
     store.onTurnStarted = (chatId) => orchestrator.handleTurnStarted(chatId)
     cleanups.push(async () => {
-      workflow.dispose(); orchestrator.dispose(); agent.dispose()
+      workflow.dispose()
+      // Turns left open end, and their last transcript writes land, before the data directory goes.
+      for (let quiet = 0, tick = 0; tick < 200 && quiet < 3; tick += 1) {
+        for (const turn of codex.turns) if (turn.open) { turn.open = false; turn.events.finish() }
+        await Bun.sleep(5)
+        quiet = agent.getActiveStatuses().size === 0 && store.getResourceCounts().storeQueuedWrites === 0 ? quiet + 1 : 0
+      }
+      orchestrator.dispose(); agent.dispose()
       for (const dir of [dataDir, projectDir, home]) await rm(dir, { recursive: true, force: true })
     })
 
@@ -205,6 +212,44 @@ describe("briefing workflow with the real Skill scripts", () => {
       management_view: "A final rule or a second foundry pause would change this view.",
     }))
 
+    // Independent verification: the first draft starts it. Each verifier finds the page itself and records its own evidence.
+    const verifying = await workflow.submit(chief, projectDir, { kind: "draft" })
+    expect((verifying.problems as string[])[0]).toContain("Independent verification of")
+    const verifiers = workflow.getRun(started.runId)!.tasks.filter((task) => task.role === "verifier")
+    expect(verifiers.length).toBeGreaterThan(0)
+    const pages = {
+      rule: { url: "https://www.example.gov/proposed-rule", body: US_RULE, quote: "today issued a proposed rule that would require licences for synthetic accelerator exports",
+        text: "The Synthetic Commerce Agency issued a proposed rule on licences for synthetic accelerator exports.", side: "us" },
+      halt: { url: "https://www.reuters.com/synthetic-foundry", body: CN_REPORT, quote: "halted shipments of synthetic wafers to a synthetic buyer",
+        text: "According to Reuters, Synthetic Foundry Co. halted shipments of synthetic wafers to a synthetic buyer.", side: "cn" },
+    }
+    const assigned: string[] = []
+    for (const verifier of verifiers) {
+      const dir = path.join(runDir, verifier.dir)
+      const claims = (verifier.assignment.claims as Array<{ claim_id: string; text: string }>)
+      expect(JSON.stringify(claims)).not.toMatch(/reuters\.com|example\.gov|sources/)
+      const results = []
+      for (const [index, claim] of claims.entries()) {
+        assigned.push(claim.claim_id)
+        const found = claim.text.includes("Reuters") ? pages.halt : pages.rule
+        await brief("fetch", dir, found.url, "--file", await page(`verify-${claim.claim_id}.txt`, found.body), "--route", "http_tool")
+        const source = `S${String(index + 1).padStart(3, "0")}`
+        await brief("event", dir, "add", "--title", `Check of ${claim.claim_id}`, "--date", TODAY, "--side", found.side, "--source", source)
+        await brief("add-claim", dir, `E${String(index + 1).padStart(3, "0")}`, source, "--quote", found.quote, "--text", found.text, "--pub-date", TODAY)
+        results.push({ claim_id: claim.claim_id, verdict: "confirmed", evidence: [`C${String(index + 1).padStart(3, "0")}`], note: "Found on the saved page." })
+      }
+      // A verdict without its own evidence is refused by the Skill's check, then the real one is accepted.
+      await writeFile(path.join(dir, "verification.json"), JSON.stringify({ results: results.map((result) => ({ ...result, evidence: ["C099"] })) }))
+      expect((await workflow.submit(verifier.chatId!, projectDir, {})).problems).toEqual(expect.arrayContaining([expect.stringContaining("VERIFICATION_EVIDENCE")]))
+      await writeFile(path.join(dir, "verification.json"), JSON.stringify({ results }))
+      expect(await workflow.submit(verifier.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+      codex.finish(verifier.chatId!)
+    }
+    await workflow.wait(chief, projectDir, {})
+    const checks = (await json(path.join(runDir, "claim_verification.json"))).claims
+    expect(Object.keys(checks).sort()).toEqual([...assigned].sort())
+    for (const check of Object.values(checks) as Array<{ status: string }>) expect(["independent", "media_only"]).toContain(check.status)
+
     // Seeded tampering: the US lead's accepted claim is "upgraded" from proposed to enacted after the handoff.
     const usLedgerFile = path.join(us.dir, "evidence_ledger.json")
     const original = await readFile(usLedgerFile, "utf8")
@@ -218,6 +263,8 @@ describe("briefing workflow with the real Skill scripts", () => {
     expect(draft).toMatchObject({ accepted: true, provenance: "PASS", reviewTask: "review-1" })
     const html = await readFile(path.join(runDir, "report.html"), "utf8")
     expect(html).toContain("<html lang=\"en\">")
+    // Carried-over cases with no source read as such, not as media reports.
+    expect(html).toContain("<i class=\"dot u\"></i>No supporting source located")
     expect(html).toContain("issued a proposed rule that would require licences")
     expect(html).toContain("class=\"st pending\"")
     expect(html).toContain("class=\"st reported\"")
@@ -263,5 +310,6 @@ describe("briefing workflow with the real Skill scripts", () => {
     expect(await readFile(path.join(runDir, "report.html"), "utf8")).not.toMatch(/\bverified\b/i)
     expect(await readFile(path.join(runDir, "qa", "workflow_summary.md"), "utf8")).toContain("Human sign-off is still required")
     expect(final.reviewRounds).toBe(2)
+    expect(await readFile(path.join(runDir, "qa", "workflow_summary.md"), "utf8")).toContain("Independent verification:")
   }, 60_000)
 })

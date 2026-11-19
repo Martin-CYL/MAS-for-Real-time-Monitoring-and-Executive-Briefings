@@ -16,7 +16,7 @@ function rng(seed: number) {
   }
 }
 
-const ROLES: BriefingRole[] = ["lead", "scout", "cross_border", "reviewer", "chief"]
+const ROLES: BriefingRole[] = ["lead", "scout", "cross_border", "reviewer", "verifier", "chief"]
 const STATES: BudgetTask["state"][] = ["queued", "running", "accepted", "failed", "cancelled"]
 
 function generate(seed: number) {
@@ -25,8 +25,9 @@ function generate(seed: number) {
   const run = int(200_000, 5_000_000)
   const plan: BudgetPlan = {
     run,
-    task: { scout: int(10_000, run / 4), lead: int(10_000, run / 3), cross_border: int(10_000, run / 5), reviewer: int(10_000, run / 4), chief: int(10_000, run / 3) },
-    reserve: { synthesis: int(0, run / 8), review: int(0, run / 8), rework: int(0, run / 8) },
+    task: { scout: int(10_000, run / 4), lead: int(10_000, run / 3), cross_border: int(10_000, run / 5), reviewer: int(10_000, run / 4),
+      verifier: int(10_000, run / 10), chief: int(10_000, run / 3) },
+    reserve: { synthesis: int(0, run / 8), review: int(0, run / 8), rework: int(0, run / 8), verification: int(0, run / 10) },
     inFlightMargin: int(0, 50_000),
     wrapUpAt: 0.5 + random() * 0.5,
   }
@@ -65,6 +66,18 @@ describe("budget plan", () => {
     expect(checked).toBeGreaterThan(0)
   })
 
+  test("verification always leaves room for a review and its rework", () => {
+    let authorised = 0
+    for (let seed = 1; seed <= 2_000; seed += 1) {
+      const { plan, tasks, spent } = generate(seed)
+      const decision = authorize("verification", plan.task.verifier, spent, tasks, plan)
+      if (!decision.ok) continue
+      authorised += 1
+      expect(spent + decision.snapshot.outstanding + decision.requested + plan.reserve.review + plan.reserve.rework).toBeLessThanOrEqual(plan.run)
+    }
+    expect(authorised).toBeGreaterThan(0)
+  })
+
   test("rework always leaves room for the second review", () => {
     for (let seed = 1; seed <= 2_000; seed += 1) {
       const { plan, tasks, spent } = generate(seed)
@@ -74,7 +87,7 @@ describe("budget plan", () => {
   })
 
   test("a refusal says whether waiting for running agents can help", () => {
-    const plan: BudgetPlan = { run: 1_000, task: { scout: 200, lead: 300, cross_border: 100, reviewer: 200, chief: 300 },
+    const plan: BudgetPlan = { run: 1_000, task: { scout: 200, lead: 300, cross_border: 100, reviewer: 200, verifier: 100, chief: 300 },
       reserve: { synthesis: 100, review: 100, rework: 100 }, inFlightMargin: 10, wrapUpAt: 0.8 }
     const running: BudgetTask[] = [{ id: "a", role: "scout", state: "running", fresh: 0, cap: 200 }, { id: "b", role: "scout", state: "running", fresh: 0, cap: 200 }]
     const busy = authorize("research", 200, 100, running, plan)
@@ -86,14 +99,14 @@ describe("budget plan", () => {
   })
 
   test("over-cap agents are counted as committing nothing more, not a negative amount", () => {
-    const plan: BudgetPlan = { run: 1_000, task: { scout: 100, lead: 100, cross_border: 100, reviewer: 100, chief: 100 },
+    const plan: BudgetPlan = { run: 1_000, task: { scout: 100, lead: 100, cross_border: 100, reviewer: 100, verifier: 100, chief: 100 },
       reserve: { synthesis: 0, review: 0, rework: 0 }, inFlightMargin: 5, wrapUpAt: 0.8 }
     const tasks: BudgetTask[] = [{ id: "a", role: "scout", state: "running", fresh: 180, cap: 100 }]
     expect(snapshot(180, tasks, plan).outstanding).toBe(5)
   })
 
   test("wrap-up: near its own cap, or everyone when research would reach the reserve; each agent once", () => {
-    const plan: BudgetPlan = { run: 10_000, task: { scout: 1_000, lead: 2_000, cross_border: 500, reviewer: 1_000, chief: 2_000 },
+    const plan: BudgetPlan = { run: 10_000, task: { scout: 1_000, lead: 2_000, cross_border: 500, reviewer: 1_000, verifier: 500, chief: 2_000 },
       reserve: { synthesis: 1_000, review: 1_000, rework: 1_000 }, inFlightMargin: 0, wrapUpAt: 0.8 }
     const tasks: BudgetTask[] = [
       { id: "near", role: "scout", state: "running", fresh: 850, cap: 1_000 },

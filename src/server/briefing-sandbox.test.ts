@@ -10,6 +10,7 @@ import {
   DISABLED_CODEX_FEATURES,
   restrictionCliArgs,
   restrictionConfig,
+  runCodexSandbox,
   type SandboxRunner,
   verifySandbox,
 } from "./briefing-sandbox"
@@ -70,6 +71,26 @@ describe("briefing agent profiles", () => {
     const reviewer = buildRestriction({ ...BASE, role: "reviewer", taskDir: `${BASE.runDir}/tasks/review-1` }).filesystem
     expect(access(reviewer, `${BASE.runDir}/report.html`)).toBe("read")
     expect(access(reviewer, `${BASE.runDir}/tasks/review-1/findings.json`)).toBe("write")
+  })
+
+  test("a verifier sees nothing of the run but its own directory, so it cannot read the author's sources", () => {
+    const verifier = buildRestriction({ ...BASE, role: "verifier", taskDir: `${BASE.runDir}/tasks/verify-1` })
+    const fs = verifier.filesystem
+    expect(verifier.profile).toBe("nex-briefing-verifier")
+    expect(verifier.nexTools).toEqual(["briefing_status", "briefing_submit"])
+    expect(access(fs, `${BASE.runDir}/tasks/verify-1/sources/S001.txt`)).toBe("write")
+    expect(access(fs, `${BASE.runDir}/tasks/verify-1/assignment.json`)).toBe("read")
+    for (const authored of ["evidence_ledger.json", "sources/S001.txt", "report.json", "tasks/us-lead/narrative.md", "tasks/us-s01/sources.json",
+      "discovery/candidates.md", "claim_verification.json", "workflow.json", "tasks/verify-2/verification.json"]) {
+      expect(access(fs, `${BASE.runDir}/${authored}`)).toBe("deny")
+    }
+    expect(access(fs, `${BASE.skillDir}/references/roles/verifier.md`)).toBe("read")
+    expect(verifier.network).toBe(true)
+    // Everyone else may read the verification results, and no agent may write them.
+    const chief = buildRestriction({ ...BASE, role: "chief", taskDir: BASE.runDir }).filesystem
+    expect(access(chief, `${BASE.runDir}/claim_verification.json`)).toBe("read")
+    const reviewer = buildRestriction({ ...BASE, role: "reviewer", taskDir: `${BASE.runDir}/tasks/review-1` }).filesystem
+    expect(access(reviewer, `${BASE.runDir}/claim_verification.json`)).toBe("read")
   })
 
   test("the thread config switches off tools that act outside the sandbox and scrubs the shell environment", () => {
@@ -246,6 +267,29 @@ describe("pre-run sandbox check", () => {
       const check = await verifySandbox({ ...input, home: homedir() })
       expect(check.problems).toEqual([])
       expect(check.results).toMatchObject(ENFORCED)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  real("the installed Codex keeps a verifier out of the author's records", async () => {
+    const { root, input } = await runDir()
+    try {
+      const own = path.join(input.runDir, "tasks", "verify-1")
+      await mkdir(own, { recursive: true })
+      await mkdir(path.join(input.runDir, "tasks", "us-lead"), { recursive: true })
+      await writeFile(path.join(input.runDir, "evidence_ledger.json"), "{\"claims\": []}\n")
+      await writeFile(path.join(input.runDir, "tasks", "us-lead", "narrative.md"), "author notes\n")
+      const restriction = buildRestriction({ ...input, home: homedir(), role: "verifier", taskDir: own })
+      const probes: Array<[string, string]> = [
+        ["write own", `echo ok > ${JSON.stringify(path.join(own, "probe.txt"))}`],
+        ["read chief ledger", `cat ${JSON.stringify(path.join(input.runDir, "evidence_ledger.json"))}`],
+        ["read lead narrative", `cat ${JSON.stringify(path.join(input.runDir, "tasks", "us-lead", "narrative.md"))}`],
+        ["list run", `ls ${JSON.stringify(input.runDir)}`],
+      ]
+      const script = probes.map(([name, command]) => `if (${command}) >/dev/null 2>&1; then echo "${name}=allowed"; else echo "${name}=denied"; fi`).join("\n")
+      const result = await runCodexSandbox(["-P", restriction.profile, "-C", own, ...restrictionCliArgs(restriction), "--", "/bin/sh", "-c", script], own, 30_000)
+      expect(result.stdout.trim().split("\n")).toEqual(["write own=allowed", "read chief ledger=denied", "read lead narrative=denied", "list run=denied"])
     } finally {
       await rm(root, { recursive: true, force: true })
     }

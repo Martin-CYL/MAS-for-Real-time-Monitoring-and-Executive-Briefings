@@ -40,6 +40,7 @@ export const ROLE_TOOLS: Record<BriefingRole, readonly string[]> = {
   cross_border: ["briefing_status", "briefing_delegate", "briefing_wait", "briefing_submit"],
   scout: ["briefing_status", "briefing_submit"],
   reviewer: ["briefing_status", "briefing_submit"],
+  verifier: ["briefing_status", "briefing_submit"],
 }
 
 export type BriefingExecutionMode = "sandbox" | "container"
@@ -100,8 +101,10 @@ export interface RestrictionInput {
 /**
  * The profile for one role. Scouts see only their own directory of the run;
  * leads, the chief and the reviewer may read the run (they consolidate and
- * review it) and write only their own directory. Workflow state, logs and
- * discovery output belong to the controller and are never writable.
+ * review it) and write only their own directory. A verifier sees nothing of
+ * the run but its own directory: it checks claims without the author's
+ * sources, so it may not read them. Workflow state, logs, verification
+ * results and discovery output belong to the controller and are never writable.
  */
 export function buildRestriction(input: RestrictionInput): CodexRestriction {
   const fs: Record<string, FileAccess> = {}
@@ -112,7 +115,7 @@ export function buildRestriction(input: RestrictionInput): CodexRestriction {
   fs[input.skillDir] = "read"
   if (input.role === "scout") {
     fs[path.join(input.runDir, "discovery")] = "read"
-  } else {
+  } else if (input.role !== "verifier") {
     fs[input.runDir] = "read"
   }
   fs[input.taskDir] = "write"
@@ -121,7 +124,10 @@ export function buildRestriction(input: RestrictionInput): CodexRestriction {
     fs[path.join(input.runDir, name)] = "deny"
   }
   if (input.role === "chief") fs[path.join(input.runDir, "tasks")] = "read"
-  fs[path.join(input.runDir, "discovery")] = "read"
+  if (input.role !== "verifier") {
+    fs[path.join(input.runDir, "discovery")] = "read"
+    fs[path.join(input.runDir, "claim_verification.json")] = "read"
+  }
   fs[path.join(input.taskDir, "assignment.json")] = "read"
   fs[path.join(input.taskDir, "submission.json")] = "read"
   // The run's dates and window, written once by the controller (found live: a chief rewrote its report date).

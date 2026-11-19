@@ -15,10 +15,10 @@ import { authorize, type BudgetPlan, type BudgetTask } from "../src/server/brief
 
 const RUN = 3_000_000
 
-const BEFORE = { scout: 300_000, lead: 600_000, cross_border: 200_000, reviewer: 300_000, chief: 600_000 }
+const BEFORE = { scout: 300_000, lead: 600_000, cross_border: 200_000, reviewer: 300_000, verifier: 0, chief: 600_000 }
 const AFTER: BudgetPlan = {
   run: RUN,
-  task: { scout: 250_000, lead: 400_000, cross_border: 150_000, reviewer: 250_000, chief: 500_000 },
+  task: { scout: 250_000, lead: 400_000, cross_border: 150_000, reviewer: 250_000, verifier: 60_000, chief: 500_000 },
   reserve: { synthesis: 250_000, review: 250_000, rework: 250_000 },
   inFlightMargin: 25_000,
   wrapUpAt: 0.8,

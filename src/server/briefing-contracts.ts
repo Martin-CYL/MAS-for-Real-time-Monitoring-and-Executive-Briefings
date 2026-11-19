@@ -9,7 +9,7 @@ import { z } from "zod"
  * what its parent needs to act on: status, gaps, questions, verdicts.
  */
 
-export const BRIEFING_ROLES = ["chief", "lead", "scout", "cross_border", "reviewer"] as const
+export const BRIEFING_ROLES = ["chief", "lead", "scout", "cross_border", "reviewer", "verifier"] as const
 export type BriefingRole = (typeof BRIEFING_ROLES)[number]
 export const BRIEFING_COUNTRIES = ["us", "cn"] as const
 export type BriefingCountry = (typeof BRIEFING_COUNTRIES)[number]
@@ -81,9 +81,9 @@ export const reviewFindingSchema = z.object({
   suggested_fix: z.string().optional(),
 })
 
-/** A later reviewer's verdict on a finding from an earlier round, by its key (`review-1/R001`). */
+/** A later reviewer's verdict on an earlier finding (a review's or a verifier's), by its key (`review-1/R001`, `verify-1/V001`). */
 export const previousAssessmentSchema = z.object({
-  key: z.string().regex(/^review-\d+(-a\d+)?\/R\d{3,}$/, "keys look like review-1/R001"),
+  key: z.string().regex(/^(review|verify)-\d+(-a\d+)?\/[RV]\d{3,}$/, "keys look like review-1/R001 or verify-1/V001"),
   status: z.enum(["resolved", "unresolved"]),
   note: text,
 })
@@ -106,12 +106,29 @@ export const reviewSchema = z.object({
   if (new Set(ids).size !== ids.length) ctx.addIssue({ code: "custom", path: ["findings"], message: "finding IDs must be unique" })
 })
 
+export const VERIFICATION_VERDICTS = ["confirmed", "contradicted", "scope_differs", "status_differs", "not_found"] as const
+
+/**
+ * A verifier's `verification.json`. The envelope only: the Skill's `check_handoff.py --role verifier` checks that
+ * each verdict covers an assigned claim and that its evidence is the verifier's own recorded claims.
+ */
+export const verificationSchema = z.object({
+  results: z.array(z.object({
+    claim_id: claimId,
+    verdict: z.enum(VERIFICATION_VERDICTS),
+    found_status: z.enum(["enacted", "proposed", "suspended", "expired", "reported", "unknown"]).optional(),
+    evidence: z.array(claimId).default([]),
+    note: text,
+  })).min(1),
+})
+
 export type ScoutOutput = z.infer<typeof scoutOutputSchema>
 export type LeadOutput = z.infer<typeof leadOutputSchema>
 export type CrossBorderOutput = z.infer<typeof crossBorderOutputSchema>
 export type BriefingPlan = z.infer<typeof planSchema>
 export type BriefingReview = z.infer<typeof reviewSchema>
 export type ReviewFinding = z.infer<typeof reviewFindingSchema>
+export type BriefingVerification = z.infer<typeof verificationSchema>
 
 export function outputSchemaFor(role: BriefingRole) {
   switch (role) {

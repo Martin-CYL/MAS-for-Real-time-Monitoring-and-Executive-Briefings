@@ -15,15 +15,15 @@ import type { BriefingRole } from "./briefing-contracts"
  * reports usage only after each request.
  */
 
-export type BudgetStage = "research" | "review" | "rework"
+export type BudgetStage = "research" | "verification" | "review" | "rework"
 
 export interface BudgetPlan {
   /** Ceiling for the whole run. */
   run: number
   /** Ceiling per task, by role. A reopened lead gets `rework` for its rework window instead. */
   task: Record<BriefingRole, number>
-  /** Held back from research for the stages every report needs. */
-  reserve: { synthesis: number; review: number; rework: number }
+  /** Held back from research for the stages every report needs. `verification` is absent for runs without verifiers. */
+  reserve: { synthesis: number; review: number; rework: number; verification?: number }
   /** What one request may still add after the last reported one. */
   inFlightMargin: number
   /** Fraction of its cap at which a research agent is told to wrap up. */
@@ -60,7 +60,7 @@ function outstanding(tasks: BudgetTask[], plan: BudgetPlan, roles: (role: Briefi
 }
 
 export function reserveTotal(plan: BudgetPlan) {
-  return plan.reserve.synthesis + plan.reserve.review + plan.reserve.rework
+  return plan.reserve.synthesis + plan.reserve.review + plan.reserve.rework + (plan.reserve.verification ?? 0)
 }
 
 export function snapshot(spent: number, tasks: BudgetTask[], plan: BudgetPlan): BudgetSnapshot {
@@ -79,20 +79,30 @@ export interface Authorization {
   fitsLater?: boolean
 }
 
+/** What a stage must leave untouched for the stages after it, and how a refusal names it. */
+function heldFor(stage: BudgetStage, plan: BudgetPlan, reserve: number) {
+  switch (stage) {
+    case "research": return { held: reserve, label: "new research", keep: plan.reserve.verification ? "synthesis, verification, review and rework" : "synthesis, review and rework" }
+    case "verification": return { held: plan.reserve.review + plan.reserve.rework, label: "independent verification", keep: "review and rework" }
+    case "rework": return { held: plan.reserve.review, label: "rework", keep: "a second review" }
+    case "review": return { held: 0, label: "an independent review", keep: "" }
+  }
+}
+
 /**
  * May an agent for `stage` start now? Research must leave the whole reserve
- * untouched. A review may use the review and rework reserves; rework may use
- * the rework reserve but must leave a second review possible.
+ * untouched. Verification must leave a review and its rework possible; a
+ * review may use what is left; rework may use the rework reserve but must
+ * leave a second review possible.
  */
 export function authorize(stage: BudgetStage, cap: number, spent: number, tasks: BudgetTask[], plan: BudgetPlan): Authorization {
   const snap = snapshot(spent, tasks, plan)
   const requested = cap + plan.inFlightMargin
-  const held = stage === "research" ? snap.reserve : stage === "rework" ? plan.reserve.review : 0
+  const { held, label, keep: after } = heldFor(stage, plan, snap.reserve)
   const free = plan.run - spent - snap.outstanding - held
   if (requested <= free) return { ok: true, requested, snapshot: snap }
   const fitsLater = requested <= plan.run - spent - held
-  const label = stage === "research" ? "new research" : stage === "rework" ? "rework" : "an independent review"
-  const keep = held > 0 ? `, keeping ${held} for ${stage === "research" ? "synthesis, review and rework" : "a second review"}` : ""
+  const keep = held > 0 ? `, keeping ${held} for ${after}` : ""
   return {
     ok: false,
     requested,

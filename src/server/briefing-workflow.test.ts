@@ -89,7 +89,7 @@ async function writeFixtureSkill(projectDir: string, budgets: Record<string, unk
   await writeFile(path.join(skill, "SKILL.md"), "---\nname: us-china-ai-chip-briefing\ndescription: fixture\n---\n# Fixture\n\n## Ground rules\n\nGROUND-RULES-TEXT\n\n## Step 3. Select\n\nLINK-SIZE-NEW-TEXT\n\n## Step 5. Write\n\nTEMPLATE-WORKFLOW-TEXT\n")
   await writeFile(path.join(skill, "references", "sources.md"), "# Sources\n")
   await writeFile(path.join(skill, "references", "roles", "protocol.md"), "# Protocol\nPROTOCOL-TEXT\n")
-  for (const [file, title] of [["chief-editor.md", "CHIEF-ROLE"], ["country-lead.md", "LEAD-ROLE"], ["topic-scout.md", "SCOUT-ROLE"], ["reviewer.md", "REVIEWER-ROLE"]]) {
+  for (const [file, title] of [["chief-editor.md", "CHIEF-ROLE"], ["country-lead.md", "LEAD-ROLE"], ["topic-scout.md", "SCOUT-ROLE"], ["reviewer.md", "REVIEWER-ROLE"], ["verifier.md", "VERIFIER-ROLE"]]) {
     const includes = file === "reviewer.md" ? "SKILL.md#Step 3. Select" : "references/roles/protocol.md | SKILL.md#Ground rules | SKILL.md#Step 3. Select"
     await writeFile(path.join(skill, "references", "roles", file!), `${ROLE_HEAD(includes)}# ${title}\n`)
   }
@@ -142,6 +142,10 @@ function fakePython(calls: string[][]): PythonRunner {
     }
     if (script === "check_provenance.py") {
       return ok({ outcome: existsSync(path.join(args[1]!, "fixture-provenance-fail")) ? "FAIL" : "PASS", findings: [] })
+    }
+    if (script === "brief.py" && args[1] === "verify-select") {
+      const chosen = path.join(args[2]!, "fixture-verify-select.json")
+      return ok(existsSync(chosen) ? JSON.parse(await readFile(chosen, "utf8")) : { claims: [], not_selected: 0 })
     }
     if (script === "discover.py") return { exitCode: 0, stdout: "swept\n", stderr: "" }
     return { exitCode: 2, stdout: "", stderr: `unexpected script ${script}` }
@@ -1249,5 +1253,169 @@ describe("restart recovery", () => {
     const finalAt = state.final!.at
     const reloaded = await context.restart()
     expect(reloaded.getRun(run.runId)!.final!.at).toBe(finalAt)
+  })
+})
+
+/**
+ * Independent verification before the draft, scripted: the controller picks
+ * the claims (here a fixture stands in for `brief.py verify-select`), the
+ * verifiers hand in verdicts with their own evidence, and disagreements
+ * become findings the chief and the reviewer must deal with.
+ */
+describe("independent verification", () => {
+  const VERIFY = { verification: { enabled: true, claims_per_verifier: 2, max_concurrent: 3, max_rework_rounds: 1 } }
+  const SELECTED = { not_selected: 1, claims: [
+    { claim_id: "C001", text: "One", kinds: ["legal"], risk_score: 5, event_id: "E001", asserted_status: "official" },
+    { claim_id: "C002", text: "Two", kinds: ["list"], risk_score: 5, event_id: "E002", asserted_status: "official" },
+    { claim_id: "C003", text: "Three", kinds: ["statistic"], risk_score: 3, event_id: "E002", asserted_status: "reported" },
+  ] }
+
+  async function verifiedRun(budgets: Record<string, unknown> = VERIFY) {
+    const context = await setup({ budgets })
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await writeFile(path.join(run.runDir, "fixture-verify-select.json"), JSON.stringify(SELECTED))
+    return { context, run }
+  }
+
+  /** A verifier records its own evidence and verdicts, hands them in and ends its turn. */
+  async function verify(context: Awaited<ReturnType<typeof setup>>, runId: string, taskId: string,
+    evidence: Array<{ id: string; type: string; url: string; quote: string }>, results: Array<Record<string, unknown>>) {
+    const task = context.workflow.getRun(runId)!.tasks.find((entry) => entry.id === taskId)!
+    const dir = path.join(context.workflow.getRun(runId)!.runDir, task.dir)
+    await writeFile(path.join(dir, "evidence_ledger.json"), JSON.stringify({ claims: evidence.map((entry) => ({
+      id: entry.id, text: "own", sources: [{ url: entry.url, evidence_type: entry.type, quote: entry.quote }] })) }))
+    await writeFile(path.join(dir, "verification.json"), JSON.stringify({ results }))
+    const result = await context.workflow.submit(task.chatId!, context.projectDir, {})
+    if (result.accepted) context.codex.finish(task.chatId!)
+    return result
+  }
+
+  test("the first draft starts verifiers that see only what the report asserts; disputes become findings, rework and review", async () => {
+    const { context, run } = await verifiedRun()
+    const { workflow, codex, projectDir } = context
+    const started = await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    expect(started).toMatchObject({ accepted: false, problems: [expect.stringContaining("Independent verification of 3 high-risk claim(s) started (verify-1, verify-2)")] })
+    let state = workflow.getRun(run.runId)!
+    expect(state.draftAttempts).toBe(0)
+    expect(state.stage).toBe("claim_verification")
+    const verifier = state.tasks.find((task) => task.id === "verify-1")!
+    expect(verifier).toMatchObject({ role: "verifier", state: "running", parentTaskId: "chief" })
+    const assignment = await readFile(path.join(run.runDir, verifier.dir, "assignment.json"), "utf8")
+    expect(JSON.parse(assignment).claims.map((claim: { claim_id: string }) => claim.claim_id)).toEqual(["C001", "C002"])
+    expect(assignment).not.toMatch(/provenance|sources|quote|us-lead|cn-lead/)
+    expect(codex.turnsFor(verifier.chatId!)[0]!.content).toContain("VERIFIER-ROLE")
+    expect(await workflow.executionPolicy(verifier.chatId!, projectDir)).toMatchObject({ restriction: { profile: "nex-briefing-verifier" } })
+    expect(workflow.allowedTools(verifier.chatId!)).toEqual(["briefing_status", "briefing_submit"])
+    expect(((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems as string[])[0]).toContain("Still running: verify-1, verify-2")
+
+    // A verdict for a claim it was not given is refused by the envelope check; then the real hand-in.
+    expect(await verify(context, run.runId, "verify-1", [], [{ claim_id: "C001" }])).toMatchObject({ accepted: false })
+    expect(await verify(context, run.runId, "verify-1", [
+      { id: "C001", type: "official_document", url: "https://www.example.gov/rule", quote: "the rule takes effect" },
+      { id: "C002", type: "official_document", url: "https://www.example.gov/notice", quote: "suspended until 10 November" },
+    ], [
+      { claim_id: "C001", verdict: "confirmed", evidence: ["C001"], note: "The rule's text says so." },
+      { claim_id: "C002", verdict: "status_differs", found_status: "suspended", evidence: ["C002"], note: "The listing is suspended, not in force." },
+    ])).toMatchObject({ accepted: true })
+    expect(await verify(context, run.runId, "verify-2", [], [{ claim_id: "C003", verdict: "not_found", note: "No dataset publishes the figure." }]))
+      .toMatchObject({ accepted: true })
+    const waited = await workflow.wait(run.chief, projectDir, {})
+    expect(waited.tasks.filter((task) => task.role === "verifier").map((task) => task.state)).toEqual(["accepted", "accepted"])
+    const file = JSON.parse(await readFile(path.join(run.runDir, "claim_verification.json"), "utf8"))
+    expect(Object.fromEntries(Object.entries(file.claims).map(([id, claim]) => [id, (claim as { status: string }).status])))
+      .toEqual({ C001: "independent", C002: "status_differs", C003: "not_found" })
+    state = workflow.getRun(run.runId)!
+    expect(state.findings!["verify-1/V001"]).toMatchObject({ severity: "major", status: "open", responsible: ["cn-lead"], target: { claim_id: "C002", event_id: "E002" } })
+
+    // The chief is told once, and nothing is counted; rework goes to the responsible lead by key.
+    const told = await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    expect((told.problems as string[])[0]).toContain("disputes 1 claim(s): verify-1/V001")
+    expect(workflow.getRun(run.runId)!.draftAttempts).toBe(0)
+    await expect(workflow.delegate(run.chief, projectDir, { role: "lead", reworkOf: "cn-lead", findings: ["V001"] })).rejects.toThrow(/by key/)
+    await workflow.delegate(run.chief, projectDir, { role: "lead", reworkOf: "cn-lead", findings: ["verify-1/V001"] })
+    await until(() => codex.turnsFor(run.cnLead).length === 2, "the rework turn")
+    expect(codex.turnsFor(run.cnLead)[1]!.content).toContain("after independent verification")
+    expect(codex.turnsFor(run.cnLead)[1]!.content).toContain("The listing is suspended, not in force.")
+    expect(await workflow.submit(run.cnLead, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(run.cnLead)
+    await workflow.wait(run.chief, projectDir, { taskIds: ["cn-lead"] })
+
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true, reviewTask: "review-1" })
+    const reviewer = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "review-1")!
+    expect(reviewer.assignment).toMatchObject({
+      previous_findings: [expect.objectContaining({ key: "verify-1/V001", status: "in_rework" })],
+      independent_verification: { checked: 3, notSelected: 1, outcomes: { independent: 1, status_differs: 1, not_found: 1 } },
+    })
+    expect((await review(context, run.runId, "pass", [])).result.problems).toEqual([expect.stringContaining("verify-1/V001")])
+    await review(context, run.runId, "pass", [], [{ key: "verify-1/V001", status: "resolved" }])
+    expect(workflow.getRun(run.runId)!.status).toBe("ready_for_human_review")
+    expect(await readFile(path.join(run.runDir, "qa", "workflow_summary.md"), "utf8"))
+      .toContain("Independent verification: 3 claim(s) checked (1 independent, 1 status differs, 1 not found); 1 high-risk claim(s) not selected")
+  })
+
+  test("a verifier that ends without a hand-in leaves its claims marked unchecked; the draft goes on", async () => {
+    const { context, run } = await verifiedRun()
+    const { workflow, codex, projectDir } = context
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    await verify(context, run.runId, "verify-2", [], [{ claim_id: "C003", verdict: "not_found", note: "Nothing found." }])
+    codex.finish(workflow.getRun(run.runId)!.tasks.find((task) => task.id === "verify-1")!.chatId!, "gave up")
+    await workflow.wait(run.chief, projectDir, {})
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true, reviewTask: "review-1" })
+    const file = JSON.parse(await readFile(path.join(run.runDir, "claim_verification.json"), "utf8"))
+    expect(file.claims.C001).toMatchObject({ status: "unverified", by: "verify-1", note: expect.stringContaining("verifier failed") })
+    expect(file.claims.C003.status).toBe("not_found")
+  })
+
+  test("verification the run cannot afford is skipped with the reason, and the review still runs", async () => {
+    const { context, run } = await verifiedRun({ ...VERIFY, token_budget: {
+      run_fresh_tokens: 1_200_000, task_fresh_tokens: { lead: 200_000, reviewer: 100_000, chief: 1_000_000 },
+      reserve_fresh_tokens: { synthesis: 100_000, review: 100_000, rework: 100_000, verification: 100_000 } } })
+    context.codex.usage(run.chief, { input: 950_000, output: 0 })
+    await context.usageLanded(run.chief, 1)
+    expect(await context.workflow.submit(run.chief, context.projectDir, { kind: "draft" })).toMatchObject({ accepted: true, reviewTask: "review-1" })
+    const file = JSON.parse(await readFile(path.join(run.runDir, "claim_verification.json"), "utf8"))
+    expect(Object.values(file.claims).map((claim) => (claim as { status: string }).status)).toEqual(["unverified", "unverified", "unverified"])
+    expect(file.claims.C001.note).toContain("independent verification needs up to 85000 fresh tokens")
+    expect(context.workflow.getRun(run.runId)!.tasks.some((task) => task.role === "verifier")).toBe(false)
+  })
+
+  test("without pre-draft rework, disputes go to the reviewer as open findings", async () => {
+    const { context, run } = await verifiedRun({ verification: { ...VERIFY.verification, max_rework_rounds: 0 } })
+    const { workflow, projectDir } = context
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    await verify(context, run.runId, "verify-1", [{ id: "C001", type: "news", url: "https://news.example/a", quote: "a different date" }], [
+      { claim_id: "C001", verdict: "contradicted", evidence: ["C001"], note: "Reported for a different date." },
+      { claim_id: "C002", verdict: "confirmed", evidence: ["C001"], note: "Only a news report." },
+    ])
+    await verify(context, run.runId, "verify-2", [], [{ claim_id: "C003", verdict: "not_found", note: "Nothing found." }])
+    await workflow.wait(run.chief, projectDir, {})
+    expect(((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems as string[])[1]).toContain("they go to the reviewer as open findings")
+    await expect(workflow.delegate(run.chief, projectDir, { role: "lead", reworkOf: "us-lead", findings: ["verify-1/V001"] })).rejects.toThrow("No rework is allowed before the draft")
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true })
+    const state = workflow.getRun(run.runId)!
+    expect(state.verification!.claims.C002!.status).toBe("media_only")
+    expect(state.findings!["verify-1/V001"]).toMatchObject({ category: "unsupported_claim", status: "open", responsible: ["us-lead"] })
+    await review(context, run.runId, "rework", [], [{ key: "verify-1/V001", status: "unresolved" }])
+    expect(state.stage).toBe("rework")
+  })
+
+  test("a Skill without the verifier's role file runs no verification, whatever its config says", async () => {
+    const context = await setup({ budgets: VERIFY })
+    await rm(path.join(context.projectDir, ".agents", "skills", "us-china-ai-chip-briefing", "references", "roles", "verifier.md"))
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    expect(await context.workflow.submit(run.chief, context.projectDir, { kind: "draft" })).toMatchObject({ accepted: true })
+    expect(context.calls.some((args) => args[1] === "verify-select")).toBe(false)
+  })
+
+  test("a restart while verifiers work keeps the verification and its tasks", async () => {
+    const { context, run } = await verifiedRun()
+    await context.workflow.submit(run.chief, context.projectDir, { kind: "draft" })
+    const workflow = await context.restart()
+    const state = workflow.getRun(run.runId)!
+    expect(state.verification).toMatchObject({ state: "running", tasks: ["verify-1", "verify-2"] })
+    const verifier = state.tasks.find((task) => task.id === "verify-1")!
+    expect(await workflow.executionPolicy(verifier.chatId!, context.projectDir)).toMatchObject({ restriction: { profile: "nex-briefing-verifier" } })
   })
 })

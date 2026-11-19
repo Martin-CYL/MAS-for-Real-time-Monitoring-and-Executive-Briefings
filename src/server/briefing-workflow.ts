@@ -9,10 +9,12 @@ import {
   type BriefingPlan,
   type BriefingReview,
   type BriefingRole,
+  type BriefingVerification,
   describeIssues,
   outputSchemaFor,
   planSchema,
   reviewSchema,
+  verificationSchema,
 } from "./briefing-contracts"
 import { parseFrontmatter, scanCodexSkills } from "./harness-skills"
 import { parseBriefingExecutionMode, type BriefingExecutionMode, buildRestriction, type CodexRestriction, ROLE_TOOLS, type SandboxRunner, verifySandbox } from "./briefing-sandbox"
@@ -36,6 +38,9 @@ import type { AgentChatStatus, AgentChatSummary, ChatOutcome } from "./orchestra
  *   - accepted records are merged upward by the Skill's `merge_runs.py`, only
  *     while the receiving agent is blocked in a briefing tool, so two writers
  *     never touch one run directory;
+ *   - before the first draft, independent verifiers check the high-risk
+ *     claims without the author's sources; what they cannot support becomes a
+ *     review finding (see `startVerification`);
  *   - the draft is rendered and validated by the Skill's own renderer and
  *     validator, traced by `check_provenance.py`, then reviewed by a separate
  *     reviewer chat, with bounded rework and explicit final statuses.
@@ -70,6 +75,7 @@ export type BriefingStage =
   | "topic_research_completed"
   | "country_consolidation"
   | "cross_border_synthesis"
+  | "claim_verification"
   | "editorial_draft_completed"
   | "render_and_validate"
   | "independent_review"
@@ -110,8 +116,34 @@ export interface BriefingBudgets {
     /** The budget of a lead reopened for rework, counted from the reopening. */
     rework?: number
   }
+  /** Independent verification before the draft. Absent or disabled: no verifiers (older Skills, older runs). */
+  verification?: VerificationBudget
   discovery: boolean
   days: number
+}
+
+export interface VerificationBudget {
+  enabled: boolean
+  /** Claims checked per run, highest risk first; the rest are listed as not selected. */
+  maxClaims: number
+  claimsPerVerifier: number
+  maxConcurrent: number
+  /** Rework rounds the chief may send on verification findings before the draft; review rework is counted apart. */
+  maxReworkRounds: number
+  /** A different model for verifiers, so author and checker do not share one model's blind spots. */
+  model?: string
+}
+
+/** What an independent check established about one claim (RUN/claim_verification.json). */
+export type VerifiedStatus = "independent" | "media_only" | "not_found" | "contradicted" | "status_differs" | "scope_differs" | "unverified"
+
+export interface VerifiedClaim {
+  status: VerifiedStatus
+  by: string
+  note?: string
+  /** The finding a disagreement opened. */
+  finding?: string
+  evidence?: Array<{ url?: string; evidence_type?: string; quote?: string }>
 }
 
 export interface UsageTotals {
@@ -142,6 +174,20 @@ function tokenBudgets(raw: Record<string, unknown> | undefined): BriefingBudgets
     inFlightMargin: num(raw?.in_flight_margin, base.inFlightMargin!),
     wrapUpAt: Math.min(1, num(raw?.wrap_up_at, base.wrapUpAt!)),
     rework: num(raw?.rework_fresh_tokens, base.rework!),
+  }
+}
+
+/** On only when the Skill asks for it and ships the verifier's role file. */
+function verificationBudget(raw: Record<string, unknown> | undefined, skillDir: string): VerificationBudget | undefined {
+  if (raw?.enabled !== true || !existsSync(path.join(skillDir, "references", "roles", ROLE_FILES.verifier))) return undefined
+  const num = (key: string, fallback: number, min = 0) => (typeof raw[key] === "number" && (raw[key] as number) >= min ? raw[key] as number : fallback)
+  return {
+    enabled: true,
+    maxClaims: num("max_claims", 12),
+    claimsPerVerifier: num("claims_per_verifier", 4, 1),
+    maxConcurrent: num("max_concurrent", 3, 1),
+    maxReworkRounds: num("max_rework_rounds", 1),
+    ...(typeof raw.model === "string" && raw.model.trim() ? { model: raw.model.trim() } : {}),
   }
 }
 
@@ -176,10 +222,10 @@ export const DEFAULT_BUDGETS: BriefingBudgets = {
   maxCrossBorderRequests: 3,
   maxReworkRounds: 2,
   maxDraftAttempts: 4,
-  taskMinutes: { scout: 30, lead: 90, cross_border: 30, reviewer: 30, chief: 240 },
+  taskMinutes: { scout: 30, lead: 90, cross_border: 30, reviewer: 30, verifier: 20, chief: 240 },
   tokens: {
     run: 3_000_000,
-    task: { scout: 250_000, lead: 400_000, cross_border: 150_000, reviewer: 250_000, chief: 500_000 },
+    task: { scout: 250_000, lead: 400_000, cross_border: 150_000, reviewer: 250_000, verifier: 60_000, chief: 500_000 },
     reserve: { synthesis: 250_000, review: 250_000, rework: 250_000 },
     inFlightMargin: 25_000,
     wrapUpAt: 0.8,
@@ -290,8 +336,21 @@ export interface BriefingRun {
     rejectionsTotal: number
     versions: Array<{ version: number; at: string; readiness?: string; reviewTasks: string[]; claims: Record<string, string> }>
   }
-  /** Every reviewer finding with its resolution, keyed `review-N/R001`. */
+  /** Every reviewer and verifier finding with its resolution, keyed `review-N/R001` or `verify-N/V001`. */
   findings?: Record<string, FindingRecord>
+  /**
+   * Independent verification before the draft: running while verifiers work, checked once all have ended,
+   * done once the chief has been told the outcome.
+   */
+  verification?: {
+    state: "running" | "checked" | "done"
+    at: string
+    tasks: string[]
+    notSelected: number
+    claims: Record<string, VerifiedClaim>
+    reworks: number
+    note?: string
+  }
   reviewRounds: number
   reworkRounds: number
   crossBorderCount: number
@@ -380,6 +439,7 @@ const ROLE_FILES: Record<BriefingRole, string> = {
   scout: "topic-scout.md",
   cross_border: "country-lead.md",
   reviewer: "reviewer.md",
+  verifier: "verifier.md",
 }
 
 const ROLE_NAMES: Record<BriefingRole, string> = {
@@ -388,6 +448,7 @@ const ROLE_NAMES: Record<BriefingRole, string> = {
   scout: "Topic Scout",
   cross_border: "Cross-border reply",
   reviewer: "Independent Reviewer",
+  verifier: "Independent Verifier",
 }
 
 const COUNTRY_NAMES: Record<BriefingCountry, string> = { us: "US", cn: "China" }
@@ -858,7 +919,8 @@ export class BriefingWorkflow {
       title: `Briefing · ${task.title}`,
       // The permission profiles are Codex's; no other provider runs a briefing agent.
       provider: "codex",
-      ...(run.run?.model ? { model: run.run.model } : {}),
+      ...((task.role === "verifier" && run.budgets.verification?.model) || run.run?.model
+        ? { model: (task.role === "verifier" && run.budgets.verification?.model) || run.run!.model } : {}),
       ...(run.run?.effort ? { effort: run.run.effort } : {}),
       // Before the first turn starts: that turn's session takes its profile from this task.
       // Saved as well, so a restart before the turn still knows the chat is an agent's.
@@ -894,9 +956,10 @@ export class BriefingWorkflow {
         if (/the run cannot afford it/.test(blocked)) await this.setTaskState(run, task, "cancelled", `not started: ${blocked}`)
         continue
       }
-      if (task.role === "scout") {
-        const running = run.tasks.filter((entry) => entry.role === "scout" && entry.state === "running").length
-        if (running >= run.budgets.maxConcurrentScouts) continue
+      if (task.role === "scout" || task.role === "verifier") {
+        const limit = task.role === "scout" ? run.budgets.maxConcurrentScouts : run.budgets.verification?.maxConcurrent ?? 1
+        const running = run.tasks.filter((entry) => entry.role === task.role && entry.state === "running").length
+        if (running >= limit) continue
       }
       try {
         await this.launch(run, task)
@@ -1011,6 +1074,7 @@ export class BriefingWorkflow {
       await this.advance(run, "cross_border_synthesis")
     }
     await this.handleReviewerFailure(run)
+    await this.settleVerification(run)
     await this.pump(run)
     if (wasRunning && run.status !== "running") await this.writeSummary(run)
     const cost = run.controller ??= { reconciles: 0, reconcileMs: 0, pythonCalls: 0, pythonMs: 0 }
@@ -1107,7 +1171,7 @@ export class BriefingWorkflow {
   }
 
   private stageOf(role: BriefingRole): BudgetStage {
-    return role === "reviewer" ? "review" : "research"
+    return role === "reviewer" ? "review" : role === "verifier" ? "verification" : "research"
   }
 
   /**
@@ -1341,6 +1405,7 @@ export class BriefingWorkflow {
       maxReviewAttempts: Math.max(1, number("max_review_attempts", 2)),
       taskMinutes: { ...DEFAULT_BUDGETS.taskMinutes, ...minutes },
       tokens: tokenBudgets(raw.token_budget as Record<string, unknown> | undefined),
+      verification: verificationBudget(raw.verification as Record<string, unknown> | undefined, skillDir),
       discovery: typeof raw.discovery === "boolean" ? raw.discovery : DEFAULT_BUDGETS.discovery,
       days: number("days", DEFAULT_BUDGETS.days),
     }
@@ -1458,16 +1523,27 @@ export class BriefingWorkflow {
   /** Sends targeted rework to an accepted lead. Its chat keeps its context; its next acceptance replaces the last. */
   private async reopenForRework(run: BriefingRun, requester: BriefingTask, taskId: string, findings: string[], brief: string) {
     if (requester.role !== "chief") throw new WorkflowError("Only the Chief Editor sends rework.")
-    if (run.stage !== "rework") throw new WorkflowError("Rework goes out after a review asks for it.")
+    // Before the draft, once the chief has seen the verification outcome: one round on the claims it disputes.
+    const beforeDraft = run.stage === "claim_verification" && run.verification?.state === "done"
+    if (run.stage !== "rework" && !beforeDraft) throw new WorkflowError("Rework goes out after a review asks for it, or after independent verification disputes a claim.")
+    if (beforeDraft && (run.budgets.verification?.maxReworkRounds ?? 0) < 1) throw new WorkflowError("No rework is allowed before the draft; submit it and the disputes go to review.")
     const target = this.task(run, taskId)
     if (target.role !== "lead" || target.state !== "accepted" || !target.chatId) throw new WorkflowError(`${taskId} is not an accepted lead task.`)
     const review = [...run.tasks].reverse().find((task) => task.role === "reviewer" && task.state === "accepted")
-    const known = new Map(((review?.accepted?.output as { findings?: Array<{ id: string }> })?.findings ?? []).map((finding) => [finding.id, finding]))
-    // Earlier findings still unresolved may be named by key as well.
-    for (const finding of Object.values(run.findings ?? {})) if (finding.status === "unresolved") known.set(finding.key, finding)
+    const known = new Map<string, unknown>()
+    if (beforeDraft) {
+      for (const finding of this.verificationFindings(run)) if (finding.status === "open") known.set(finding.key, finding)
+    } else {
+      for (const finding of (review?.accepted?.output as { findings?: Array<{ id: string }> })?.findings ?? []) known.set(finding.id, finding)
+      // Earlier findings still unresolved may be named by key as well.
+      for (const finding of Object.values(run.findings ?? {})) if (finding.status === "unresolved") known.set(finding.key, finding)
+    }
     const unknown = findings.filter((id) => !known.has(id))
-    if (findings.length === 0 || unknown.length > 0) throw new WorkflowError(`Name the review findings to fix (unknown: ${unknown.join(", ") || "none given"}).`)
+    if (findings.length === 0 || unknown.length > 0) {
+      throw new WorkflowError(`Name the ${beforeDraft ? "verification findings by key (verify-1/V001)" : "review findings"} to fix (unknown: ${unknown.join(", ") || "none given"}).`)
+    }
     this.assertCanStart(run, "lead", "rework")
+    if (beforeDraft) run.verification!.reworks = 1
     target.previous = [...(target.previous ?? []), { at: target.accepted!.at, hashes: target.accepted!.hashes }]
     // The rework has its own allowance: what the lead spent on its research does not count against it.
     target.usageBaseline = { ...(target.usage ?? emptyUsage()) }
@@ -1490,7 +1566,7 @@ export class BriefingWorkflow {
     await this.chats.sendMessage(requester.chatId!, {
       chatId: target.chatId,
       message: [
-        `Rework for task ${target.id} in briefing run ${run.runId}, requested by the Chief Editor after independent review.`,
+        `Rework for task ${target.id} in briefing run ${run.runId}, requested by the Chief Editor after ${beforeDraft ? "independent verification" : "independent review"}.`,
         "Fix only what these findings concern, in your task directory, with brief.py (withdraw wrong claims; add corrected ones with add-claim).",
         "Then update narrative.md and output.json, run check_handoff.py --role lead, and call briefing_submit again.",
         "",
@@ -1581,6 +1657,7 @@ export class BriefingWorkflow {
       if (task.role === "chief" && kind === "plan") result = await this.submitPlan(run, task)
       else if (task.role === "chief" && kind === "draft") result = await this.submitDraft(run, task, input.partialReason)
       else if (task.role === "reviewer") result = await this.submitReview(run, task)
+      else if (task.role === "verifier") result = await this.submitVerification(run, task)
       else if (task.role !== "chief") result = await this.submitResult(run, task)
       else throw new WorkflowError(`The Chief Editor submits kind plan or draft, not ${kind}.`)
       if (result.accepted === false) {
@@ -1671,6 +1748,8 @@ export class BriefingWorkflow {
    */
   private async submitDraft(run: BriefingRun, chief: BriefingTask, partialReason?: string) {
     if (!run.plan) return this.refuse(["Submit the plan first."])
+    // The starts below are budgeted on what has been spent; read the latest reported usage first.
+    this.collectUsage(run)
     const reviewing = this.activeReviewer(run)
     if (reviewing) return this.refuse([`The draft is under independent review (${reviewing.id}); briefing_wait for it.`])
     const blocked = this.launchBlocked(run, "reviewer")
@@ -1684,6 +1763,9 @@ export class BriefingWorkflow {
       }
       run.partialReason = `${missing.map((country) => `${COUNTRY_NAMES[country]} lead research missing`).join("; ")}: ${partialReason.trim()}`
     }
+    // Before the first draft: the independent check of high-risk claims. Not a submission: nothing is counted.
+    const verifying = await this.verificationGate(run, chief)
+    if (verifying) return verifying
     const drafts = run.drafts ??= { rejectionsThisCycle: 0, rejectionsTotal: 0, versions: [] }
     run.draftAttempts += 1
     const maxSubmissions = (run.budgets.maxDraftAttempts + 1) * (run.budgets.maxReworkRounds + 1)
@@ -1779,6 +1861,162 @@ export class BriefingWorkflow {
     return problems
   }
 
+  // ── Independent verification ──────────────────────────────────────────
+
+  /**
+   * Whether the draft must wait for independent verification, and the answer to give the chief if so. The first
+   * call starts it; once every verifier has ended, the chief is told the outcome once and the next draft goes on.
+   * The claims are chosen by the Skill (`brief.py verify-select`), not by the chief.
+   */
+  private async verificationGate(run: BriefingRun, chief: BriefingTask): Promise<Record<string, unknown> | null> {
+    const config = run.budgets.verification
+    if (!config?.enabled || run.verification?.state === "done") return null
+    if (!run.verification) return this.startVerification(run, chief, config)
+    if (run.verification.state === "running") await this.settleVerification(run)
+    if (run.verification.state === "running") {
+      return this.refuse([`Independent verification is still running (${run.verification.tasks.join(", ")}). briefing_wait for it, then submit the draft again.`])
+    }
+    run.verification.state = "done"
+    const open = this.verificationFindings(run).filter((finding) => finding.status === "open")
+    await this.record(run, { verification: "done", findings: open.length })
+    if (open.length === 0) return null
+    const rounds = config.maxReworkRounds - run.verification.reworks
+    return { accepted: false, verification: this.verificationSummary(run), problems: [
+      `Independent verification disputes ${open.length} claim(s): ${open.map((finding) => `${finding.key} (${finding.target.claim_id}: ${finding.problem.slice(0, 160)})`).join("; ")}.`,
+      rounds > 0
+        ? `Send rework to the responsible lead (briefing_delegate with reworkOf and these keys as findings; ${rounds} round(s) before the draft), or submit the draft again to take them to review open.`
+        : "Submit the draft again: they go to the reviewer as open findings.",
+    ], next: "No draft was counted." }
+  }
+
+  private async startVerification(run: BriefingRun, chief: BriefingTask, config: VerificationBudget): Promise<Record<string, unknown> | null> {
+    await this.mergeInto(run, chief)
+    const selected = this.parseJson<{ claims: Array<Record<string, unknown>>; not_selected: number }>(
+      await this.py(run, ["brief.py", "verify-select", run.runDir, "--max", String(config.maxClaims)]))
+    if (!selected) throw new WorkflowError("brief.py verify-select gave no result")
+    const at = iso(this.now())
+    const state: NonNullable<BriefingRun["verification"]> = run.verification = { state: "done", at, tasks: [], notSelected: selected.not_selected, claims: {}, reworks: 0 }
+    if (selected.claims.length === 0) {
+      state.note = "no claim needed an independent check"
+      await this.writeVerification(run)
+      await this.record(run, { verification: "none selected" })
+      return null
+    }
+    const blocked = this.launchBlocked(run, "verifier", "verification")
+    if (blocked) {
+      // The report is still built, but every selected claim stays marked as not independently checked.
+      state.note = `not run: ${blocked}`
+      for (const claim of selected.claims) state.claims[String(claim.claim_id)] = { status: "unverified", by: "workflow", note: state.note }
+      await this.writeVerification(run)
+      await this.record(run, { verification: "skipped", reason: blocked })
+      return null
+    }
+    state.state = "running"
+    for (let index = 0; index * config.claimsPerVerifier < selected.claims.length; index += 1) {
+      const claims = selected.claims.slice(index * config.claimsPerVerifier, (index + 1) * config.claimsPerVerifier)
+      const task = this.newTask(run, {
+        id: `verify-${index + 1}`,
+        role: "verifier",
+        title: `Independent Verifier · ${claims.map((claim) => claim.claim_id).join(", ")}`,
+        parentTaskId: chief.id,
+        attempt: 1,
+        // What the report asserts, never where its author found it.
+        assignment: { claims },
+      })
+      state.tasks.push(task.id)
+      for (const claim of claims) state.claims[String(claim.claim_id)] = { status: "unverified", by: task.id, note: "check not finished" }
+      await this.record(run, { task: task.id, role: "verifier", delegated_by: "workflow", claims: claims.map((claim) => claim.claim_id) })
+    }
+    await this.advance(run, "claim_verification", `${selected.claims.length} claim(s), ${state.tasks.length} verifier(s)`)
+    await this.writeVerification(run)
+    await this.pump(run)
+    return this.refuse([`Independent verification of ${selected.claims.length} high-risk claim(s) started (${state.tasks.join(", ")}). `
+      + "briefing_wait for it, then submit the draft again. No draft was counted."])
+  }
+
+  /** Once every verifier has ended: claims of a verifier that failed stay marked as not independently checked. */
+  private async settleVerification(run: BriefingRun) {
+    const state = run.verification
+    if (state?.state !== "running") return
+    const tasks = state.tasks.map((id) => this.task(run, id))
+    if (tasks.some((task) => !isTerminal(task.state))) return
+    for (const task of tasks.filter((entry) => entry.state !== "accepted")) {
+      for (const claim of (task.assignment.claims as Array<{ claim_id: string }>)) {
+        state.claims[claim.claim_id] = { status: "unverified", by: task.id, note: `verifier ${task.state}: ${task.failure ?? ""}`.trim() }
+      }
+    }
+    state.state = "checked"
+    await this.writeVerification(run)
+  }
+
+  private verificationFindings(run: BriefingRun) {
+    return Object.values(run.findings ?? {}).filter((finding) => finding.review.startsWith("verify-"))
+  }
+
+  private verificationSummary(run: BriefingRun) {
+    const state = run.verification
+    if (!state) return null
+    const count: Partial<Record<VerifiedStatus, number>> = {}
+    for (const claim of Object.values(state.claims)) count[claim.status] = (count[claim.status] ?? 0) + 1
+    return { state: state.state, checked: Object.keys(state.claims).length, notSelected: state.notSelected, outcomes: count,
+      file: path.join(run.runDir, "claim_verification.json"), ...(state.note ? { note: state.note } : {}) }
+  }
+
+  /** The results the Skill's renderer and sign-off read. Written by the controller only; agents may read it. */
+  private async writeVerification(run: BriefingRun) {
+    await writeJsonAtomic(path.join(run.runDir, "claim_verification.json"), { run_id: run.runId, claims: run.verification?.claims ?? {} })
+  }
+
+  private async submitVerification(run: BriefingRun, task: BriefingTask) {
+    const { value, problems } = await this.readOutput(run, task, "verification.json", verificationSchema)
+    if (!value) return this.refuse(problems!)
+    const verification = value as BriefingVerification
+    const check = await this.checkHandoff(run, task)
+    const fails = check.findings.filter((finding) => finding.status === "FAIL")
+    if (fails.length > 0) return this.refuse(fails.map((finding) => `${finding.code}: ${finding.message}`))
+    const own = new Map(((await readJson<{ claims?: Array<{ id: string; sources?: Array<Record<string, unknown>> }> }>(
+      path.join(this.taskDir(run, task), "evidence_ledger.json")))?.claims ?? []).map((claim) => [claim.id, claim]))
+    const ledger = await readJson<{ claims?: Array<{ id: string; provenance?: Array<{ task: string }> }> }>(path.join(run.runDir, "evidence_ledger.json"))
+    const events = (await readJson<{ events?: Array<{ id: string; claim_ids?: string[] }> }>(path.join(run.runDir, "events.json")))?.events ?? []
+    // The registry changes first, so the acceptance saves them together (see submitReview).
+    const registry = run.findings ??= {}
+    const at = iso(this.now())
+    let number = 0
+    for (const result of verification.results) {
+      const evidence = result.evidence.flatMap((id) => (own.get(id)?.sources ?? []).map((source) => ({
+        url: source.url as string | undefined, evidence_type: source.evidence_type as string | undefined, quote: source.quote as string | undefined,
+      })))
+      const primary = evidence.some((source) => ["official_document", "company_statement", "dataset"].includes(source.evidence_type ?? ""))
+      const status: VerifiedStatus = result.verdict === "confirmed" ? (primary ? "independent" : "media_only") : result.verdict
+      const entry: VerifiedClaim = { status, by: task.id, note: result.note, evidence }
+      if (result.verdict === "contradicted" || result.verdict === "status_differs" || result.verdict === "scope_differs") {
+        number += 1
+        const id = `V${String(number).padStart(3, "0")}`
+        const key = `${task.id}/${id}`
+        const origin = ledger?.claims?.find((claim) => claim.id === result.claim_id)?.provenance ?? []
+        const responsible = [...new Set(origin.map((entry) => entry.task))].filter((owner) => run.tasks.some((other) => other.id === owner))
+        const eventId = events.find((event) => event.claim_ids?.includes(result.claim_id))?.id
+        registry[key] = {
+          key, id, review: task.id, severity: "major",
+          category: result.verdict === "contradicted" ? "unsupported_claim" : "fact_status",
+          target: { claim_id: result.claim_id, ...(eventId ? { event_id: eventId } : {}) },
+          problem: `Independent check (${result.verdict.replace("_", " ")}${result.found_status ? `, found ${result.found_status}` : ""}): ${result.note}`,
+          evidence: evidence.map((source) => `${source.url ?? "?"}: "${(source.quote ?? "").slice(0, 300)}"`).join("; ") || "see the verifier's records",
+          responsible: responsible.length > 0 ? responsible : ["chief"],
+          status: "open",
+          history: [{ at, status: "open", by: task.id }],
+        }
+        entry.finding = key
+      }
+      run.verification!.claims[result.claim_id] = entry
+    }
+    await this.accept(run, task, verification, check.findings.filter((finding) => finding.status !== "PASS"), check.summary)
+    await this.writeVerification(run)
+    await this.record(run, { task: task.id, verification: verification.results.map((result) => `${result.claim_id}:${result.verdict}`) })
+    await this.settleVerification(run)
+    return { accepted: true, next: "Accepted. End your turn with a one-line summary." }
+  }
+
   private async launchReviewer(run: BriefingRun, chief: BriefingTask, version: { version: number; reviewTasks: string[] }, id: string) {
     const open = Object.values(run.findings ?? {}).filter((finding) => finding.status !== "resolved" && finding.status !== "escalated")
     const reviewer = this.newTask(run, {
@@ -1795,6 +2033,7 @@ export class BriefingWorkflow {
         partial: run.partialReason ?? null,
         // Assess each of these in findings.json "previous"; blocker and major ones are required.
         previous_findings: open.map((finding) => ({ key: finding.key, severity: finding.severity, target: finding.target, problem: finding.problem, status: finding.status })),
+        independent_verification: this.verificationSummary(run),
       },
     })
     version.reviewTasks.push(reviewer.id)
@@ -1968,6 +2207,7 @@ export class BriefingWorkflow {
       `- Window: ${run.window.start} to ${run.window.end} (${run.timezone}); cutoff ${run.cutoff}`,
       `- Validator readiness: ${run.final?.readiness ?? "not run"}; provenance: ${run.final?.provenance ?? "not run"}`,
       `- Review rounds: ${run.reviewRounds}; rework rounds: ${run.reworkRounds}; cross-border requests: ${run.crossBorderCount}`,
+      ...(run.verification ? [`- Independent verification: ${this.verificationLine(run)}`] : []),
       ...(run.partialReason ? [`- Missing input: ${run.partialReason}`] : []),
       "- Human sign-off is still required: qa/signoff.md. Mechanical checks and the agent review do not establish factual accuracy.",
       "",
@@ -1988,6 +2228,13 @@ export class BriefingWorkflow {
       lines.push("", "## Unresolved review findings", "", "```json", JSON.stringify(run.final.unresolvedFindings, null, 2), "```")
     }
     return `${lines.join("\n")}\n`
+  }
+
+  private verificationLine(run: BriefingRun) {
+    const summary = this.verificationSummary(run)!
+    const outcomes = Object.entries(summary.outcomes).map(([status, count]) => `${count} ${status.replace("_", " ")}`).join(", ")
+    return `${summary.checked} claim(s) checked${outcomes ? ` (${outcomes})` : ""}; ${summary.notSelected} high-risk claim(s) not selected`
+      + `${summary.note ? `; ${summary.note}` : ""}. See claim_verification.json.`
   }
 
   async wait(actorChatId: string, cwd: string, input: { taskIds?: string[]; timeoutSeconds?: number; forTaskId?: string }, signal?: AbortSignal) {
@@ -2098,6 +2345,7 @@ export class BriefingWorkflow {
       })),
       ...(run.final ? { final: run.final } : {}),
       ...(run.partialReason ? { partialReason: run.partialReason } : {}),
+      ...(run.verification ? { verification: this.verificationSummary(run) } : {}),
     }
   }
 

@@ -1,6 +1,17 @@
 # 设计方案：独立核验员（Verifier）
 
-状态：方案，未实现。依赖 PR #16（`feature/briefing-reliability-hardening`）和 Skill `5daee0b`。
+状态：已实现，未做真实运行。Nex 在 `feature/briefing-claim-verification`，Skill 在 `skill/briefing-claim-verification`。
+现行行为以 [briefing-workflow.md](briefing-workflow.md) 的 "Independent verification" 一节为准。
+
+实现与本方案的不同之处：
+
+- **触发时机**：不在两位 Lead 交稿后立即启动，而是在主编**第一次提交初稿**时由控制器启动。
+  这样主编的记录已经合并完毕，跨境答复也已到齐；这次提交不计入初稿次数。核验哪些说法仍由控制器决定，不由主编决定。
+- **核验返工**：写稿前最多一轮（`max_rework_rounds` 取 0 或 1）。返工后不再重新核验，改由审稿人评估这些意见。
+- **证据要求**：除 `not_found` 外，所有结论都必须附核验员自己的证据，包括 `confirmed`。
+  只有媒体证据的 `confirmed` 记为"媒体佐证"。
+- **图例文字**：灰色标记写作 "No supporting source located"（中文"尚未找到来源支持"），避免报告里出现 "verified" 一词。
+- **核验员换模型**（`verifier_model`）：配置项是 `verification.model`，默认和其他角色用同一个模型。
 
 ## 1. 要解决什么
 

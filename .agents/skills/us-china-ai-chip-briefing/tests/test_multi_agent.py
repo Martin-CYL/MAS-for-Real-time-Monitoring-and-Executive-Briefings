@@ -447,7 +447,7 @@ class RoleFileTests(unittest.TestCase):
 
     def test_includes_resolve(self):
         roles = sorted((SKILL / 'references' / 'roles').glob('*.md'))
-        self.assertEqual({p.stem for p in roles}, {'protocol', 'topic-scout', 'country-lead', 'chief-editor', 'reviewer', 'verifier'})
+        self.assertEqual({p.stem for p in roles}, {'protocol', 'topic-scout', 'source-scout', 'country-lead', 'chief-editor', 'reviewer', 'verifier'})
         for p in roles:
             if p.stem == 'protocol':
                 continue
@@ -460,9 +460,10 @@ class RoleFileTests(unittest.TestCase):
                     self.assertTrue(self.sections(rel, heading), f'{p.name}: {ref}')
 
     def test_scouts_do_not_receive_the_report_workflow(self):
-        head = (SKILL / 'references' / 'roles' / 'topic-scout.md').read_text(encoding='utf-8').split('---')[1]
-        for heavy in ('template.html', 'Step 5', 'Step 6', 'report-content'):
-            self.assertNotIn(heavy, head)
+        for name in ('topic-scout.md', 'source-scout.md'):
+            head = (SKILL / 'references' / 'roles' / name).read_text(encoding='utf-8').split('---')[1]
+            for heavy in ('template.html', 'Step 5', 'Step 6', 'report-content'):
+                self.assertNotIn(heavy, head, name)
 
     def test_workflow_budgets_stay_inside_nex_limits(self):
         cfg = json.loads((SKILL / 'references' / 'roles' / 'workflow.json').read_text(encoding='utf-8'))

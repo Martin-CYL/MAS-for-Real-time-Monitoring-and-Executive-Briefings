@@ -11,6 +11,7 @@ user chat ──briefing_start──▶ Chief Editor (sub-chat, depth 1)
                                 ├─ US Lead (depth 2) ──▶ topic scouts (depth 3)
                                 ├─ China Lead (depth 2) ──▶ topic scouts (depth 3)
                                 ├─ cross-border requests, answered by the other lead in its own chat
+                                ├─ gap round: the same leads reopened for gaps found by rule (+ gap scouts, depth 3)
                                 ├─ Independent Verifiers (depth 2, before the first draft, when the Skill enables them)
                                 └─ Independent Reviewer (depth 2, fresh chat per review round)
 ```
@@ -27,7 +28,7 @@ levels; scouts beyond the run's concurrency budget are queued by the workflow an
 | `src/server/briefing-workflow.ts` | Run state, task rules, queue, acceptance, merges, draft/review/rework, final status |
 | `src/server/briefing-sandbox.ts` | Per-role Codex permission profiles and the pre-run enforcement check |
 | `src/server/briefing-provider.ts` | Provider error classes and backoff |
-| `src/server/briefing-contracts.ts` | Zod schemas for the agents' envelopes: `output.json`, `plan.json`, `findings.json` |
+| `src/server/briefing-contracts.ts` | Zod schemas for the agents' envelopes: `output.json` (with a lead's `gap_results`), `plan.json`, `gap_plan.json`, `findings.json`, `verification.json` |
 | `src/server/nex-briefing-tools.ts` | The six agent tools |
 | `src/server/nex-tools.ts`, `agent.ts`, `server.ts`, `codex-app-server.ts` | Registration behind the flag, role tool allowlist, confined Codex sessions, wiring |
 | `src/server/orchestrator.ts` | Read-only accessors (`getChatSummary`, `getChatOutcome`, `getUsageSince`) and `createChat`'s `onCreated` |
@@ -77,6 +78,43 @@ record keeper (`scripts/brief.py`, now able to render the English template), `me
   a tool.
 - Final statuses: `ready_for_human_review`, `incomplete`, `escalated`, `blocked`, `failed`, `cancelled`,
   `budget_exhausted`, `provider_unavailable`. None of them replaces the human sign-off in `qa/signoff.md`.
+
+## Gap round
+
+When the Skill's `workflow.json` sets `gap_round.enabled`, the chief's first draft submission runs a gap check before
+anything else. The submission is not counted, and older Skills and saved runs are unaffected. The design and how it
+is to be evaluated: [briefing-gap-round-design.md](briefing-gap-round-design.md).
+
+- **Listing.** Once both leads have handed in, the controller merges their records into the chief's and runs
+  `brief.py gaps` with the leads' directories. The Skill's rules list what is missing: an active case the plan gave a
+  side with no event that has a claim, a research origin or a reason (`case_unfollowed`); a side with no new event
+  (`side_empty`); a high-materiality shown event without a primary source (`single_source`); a top or official discovery
+  candidate whose pages are nowhere in the records (`discovery_unhandled`); a lead's own gaps and open questions
+  (`declared`); a planned category with no event, once events carry `--category` (`category_empty`). At most
+  `max_gaps_listed`, highest priority first; the rest are counted. The controller writes `RUN/gaps.json`; no gap: the
+  draft goes straight on to verification. The chief does not choose the gaps.
+- **Decision.** The chief writes `gap_plan.json` with one decision per gap and submits it (`briefing_submit`, kind
+  `gap_plan`). A skip needs a reason; at most `max_gaps_pursued` are pursued; a gap is routed to the lead of its side,
+  or of the lead its event came from, and a gap with neither needs a `side`. Nothing pursued: no lead is reopened.
+- **Round.** The controller reopens each lead with pursued gaps, the way rework does: the chat keeps its context, the
+  lead gets the gap tickets, its own allowance and time (`lead_fresh_tokens`, `lead_minutes`) counted from the
+  reopening, and may delegate up to `max_gap_scouts_per_lead` gap scouts (`briefing_delegate` with `gap`; their own cap
+  and time, `scout_fresh_tokens` and `scout_minutes`, apart from the first-round scout budget). The IDs of its events
+  and claims and the number of logged searches at the reopening are saved as its baseline. Cross-border requests wait
+  until the round ends. A lead's resubmission must report every gap it was given in `gap_results`: `filled` (with the
+  event or claim IDs), `searched_none` (at least two searches) or `not_reached` (with a reason).
+- **Check.** Once every reopened lead has ended, `brief.py gap-check` tests each report against the lead's records
+  and baseline: `filled` holds only for new records of the right kind (a case event for a case gap, a new primary
+  source on a media-only event, a page of the candidate for a discovery gap); otherwise `filled_unconfirmed`.
+  `searched_none` needs two searches logged since the reopening; otherwise `not_searched`. A lead that does not hand in
+  again leaves its gaps `not_reached`; its first-round hand-in is restored if its records are unchanged, and otherwise
+  the research it handed in before the round, already merged into the chief's records, still counts as that side's
+  input. The outcomes go to `RUN/gap_report.json`, which agents can read and cannot write. The chief is told once;
+  the next draft goes on to verification, and the reviewer's assignment carries the round's summary.
+- **Sign-off.** `qa/signoff.md` lists the round: skipped or unfilled active cases and empty sides first, then every
+  other gap with its outcome.
+- **Budget.** `reserve_fresh_tokens.gap_research` is held back from the first round of research and released when the
+  gap check runs. If a reopened lead cannot be afforded, its gaps are recorded as `not_reached` with the reason.
 
 ## Independent verification
 
@@ -212,13 +250,18 @@ the account's Codex skills directory), then ask in a chat: `/us-china-ai-chip-br
 - `src/server/briefing-workflow.test.ts`: real coordinator, store and orchestrator with a scripted provider and a
   stand-in for the Skill scripts. Covers delegation depth, result return, queueing, budgets, refusal, failure, retry,
   timeout, cancellation, cross-border, review/rework bounds and the review lifecycle, partial runs, tool wiring, and
-  restart recovery with crashes injected at each save point (`fault`), and independent verification (blind
-  assignment, disputes to findings, pre-draft rework, failed or unaffordable verifiers, older Skills).
+  restart recovery with crashes injected at each save point (`fault`), the gap round (listing, decisions, reopened
+  leads, gap scouts and their limits, required gap results, checked outcomes, a lead that does not hand in again, no
+  gap or every gap skipped, the round's allowance and reserve, older Skills, a crash after a reopening) and
+  independent verification (blind assignment, disputes to findings, pre-draft rework, failed or unaffordable
+  verifiers, older Skills).
 - `src/server/briefing-budget.test.ts`: the allocation policy over 2,000 generated runs.
 - `src/server/briefing-workflow.skill.test.ts`: the same hierarchy through the real Skill scripts (records, merges,
   handoff and provenance checks, English render and validator): claims are verified by agents with their own records,
   a proposal written as enacted is refused, a post-handoff edit is refused, review rework is routed to the
-  responsible lead and resubmitted. Skipped unless
+  responsible lead and resubmitted; and a gap round on the real `brief.py gaps` and `gap-check` (unfollowed cases, a
+  media-only event, an empty category; a filled case, a search without result, a "filled" the records do not show).
+  Skipped unless
   `BRIEFING_SKILL_DIR` points at the Skill.
 - `src/server/briefing-sandbox.test.ts`: profiles per role, the exact `thread/start` parameters, session reuse, the
   pre-run check; with `NEX_CODEX_SANDBOX_TEST=1` and `codex` on PATH it runs the real OS sandbox, including a check

@@ -147,6 +147,22 @@ function fakePython(calls: string[][]): PythonRunner {
       const chosen = path.join(args[2]!, "fixture-verify-select.json")
       return ok(existsSync(chosen) ? JSON.parse(await readFile(chosen, "utf8")) : { claims: [], not_selected: 0 })
     }
+    if (script === "brief.py" && args[1] === "gaps") {
+      const listed = path.join(args[2]!, "fixture-gaps.json")
+      return ok(existsSync(listed) ? JSON.parse(await readFile(listed, "utf8")) : { gaps: [], not_listed: 0, skipped_types: [] })
+    }
+    if (script === "brief.py" && args[1] === "gap-check") {
+      // The real check tests the records; this one believes the lead unless the test says otherwise.
+      const [round, taskDir] = [args[2]!, args[3]!]
+      const task = args[args.indexOf("--task") + 1]!
+      const override = path.join(taskDir, "fixture-gap-check.json")
+      if (existsSync(override)) return ok(JSON.parse(await readFile(override, "utf8")))
+      const assigned: string[] = JSON.parse(await readFile(round, "utf8")).leads[task].gaps
+      const output = JSON.parse(await readFile(path.join(taskDir, "output.json"), "utf8"))
+      const results = Object.fromEntries((output.gap_results ?? []).filter((entry: { gap_id: string }) => assigned.includes(entry.gap_id))
+        .map((entry: { gap_id: string; outcome: string }) => [entry.gap_id, { outcome: entry.outcome, detail: "records show it" }]))
+      return ok({ task, results })
+    }
     if (script === "discover.py") return { exitCode: 0, stdout: "swept\n", stderr: "" }
     return { exitCode: 2, stdout: "", stderr: `unexpected script ${script}` }
   }
@@ -1436,5 +1452,212 @@ describe("independent verification", () => {
     expect(state.verification).toMatchObject({ state: "running", tasks: ["verify-1", "verify-2"] })
     const verifier = state.tasks.find((task) => task.id === "verify-1")!
     expect(await workflow.executionPolicy(verifier.chatId!, context.projectDir)).toMatchObject({ restriction: { profile: "nex-briefing-verifier" } })
+  })
+})
+
+describe("gap round", () => {
+  const GAPS = { gap_round: { enabled: true, max_gaps_pursued: 2, max_gap_scouts_per_lead: 1, lead_fresh_tokens: 50_000, scout_fresh_tokens: 40_000, lead_minutes: 20, scout_minutes: 10 } }
+  const LISTED = { not_listed: 1, skipped_types: ["category_empty"], gaps: [
+    { gap_id: "G001", type: "case_unfollowed", side: "us", priority: 6, target: { case_id: "A001" }, why: "A001 has no event", suggested_source: "official_document" },
+    { gap_id: "G002", type: "discovery_unhandled", side: "both", priority: 4, target: { candidate_id: "D003", urls: ["https://www.example.gov/n"] }, why: "D003 not in the records", suggested_source: "official_document" },
+    { gap_id: "G003", type: "single_source", side: "cn", priority: 4, target: { event_id: "E002", origin: [{ task: "cn-lead", id: "E001" }] }, why: "media only", suggested_source: "official_document" },
+  ] }
+
+  async function gapRun(budgets: Record<string, unknown> = GAPS, listed: unknown = LISTED) {
+    const context = await setup({ budgets })
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await writeFile(path.join(run.runDir, "fixture-gaps.json"), JSON.stringify(listed))
+    return { context, run }
+  }
+
+  async function plan(context: Awaited<ReturnType<typeof setup>>, runDir: string, chief: string, decisions: unknown[]) {
+    await writeFile(path.join(runDir, "gap_plan.json"), JSON.stringify({ decisions }))
+    return context.workflow.submit(chief, context.projectDir, { kind: "gap_plan" })
+  }
+
+  const DECIDED = [
+    { gap_id: "G001", action: "pursue", brief: "Check the Federal Register" },
+    { gap_id: "G002", action: "pursue", side: "cn", brief: "Open the notice" },
+    { gap_id: "G003", action: "skip", reason: "The official notice is already cited in E003" },
+  ]
+
+  test("gaps are listed by rule, decided by the chief, pursued by reopened leads and checked before the draft goes on", async () => {
+    const { context, run } = await gapRun()
+    const { workflow, codex, projectDir, calls } = context
+
+    const listed = await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    expect(listed).toMatchObject({ accepted: false, next: "No draft was counted." })
+    expect((listed.problems as string[])[0]).toContain("The gap check found 3 coverage gap(s) in the merged research (1 more not listed)")
+    expect(listed.gaps).toEqual([
+      expect.objectContaining({ gap_id: "G001", lead_task: "us-lead" }),
+      expect.objectContaining({ gap_id: "G002", lead_task: null }),
+      expect.objectContaining({ gap_id: "G003", lead_task: "cn-lead" }),
+    ])
+    const gapCall = calls.find((args) => args[1] === "gaps")!
+    expect(gapCall).toEqual(expect.arrayContaining(["--lead", `us=${run.usDir}`, "--lead", `cn=${run.cnDir}`, "--max", "20"]))
+    let state = workflow.getRun(run.runId)!
+    expect(state).toMatchObject({ stage: "gap_review", draftAttempts: 0, gapRound: { state: "planning" } })
+    expect(JSON.parse(await readFile(path.join(run.runDir, "gaps.json"), "utf8")).gaps).toHaveLength(3)
+    expect(((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems as string[])[0]).toContain("Decide every gap of the gap check first")
+
+    // Every gap needs a decision; a skip needs a reason; a gap with no side or origin needs a side; the number is capped.
+    expect((await plan(context, run.runDir, run.chief, [{ gap_id: "G001", action: "skip" }])).problems).toEqual([expect.stringContaining("a skipped gap needs a reason")])
+    const refused = await plan(context, run.runDir, run.chief, [{ gap_id: "G001", action: "pursue" }, { gap_id: "G002", action: "pursue" }, { gap_id: "G009", action: "pursue" }])
+    expect(refused.problems).toEqual([
+      expect.stringContaining("G002 (side both) has no lead of origin"),
+      "G009 is not in gaps.json",
+      "Decide every gap: G003 is missing from gap_plan.json",
+    ])
+    expect((await plan(context, run.runDir, run.chief, DECIDED.map((entry) => ({ ...entry, action: "pursue", side: "cn" })))).problems)
+      .toEqual(["3 gaps pursued; at most 2 may be. Skip the rest with a reason."])
+
+    const accepted = await plan(context, run.runDir, run.chief, DECIDED)
+    expect(accepted).toMatchObject({ accepted: true, reopened: ["us-lead", "cn-lead"] })
+    expect(await plan(context, run.runDir, run.chief, DECIDED)).toMatchObject({ accepted: false, problems: ["The gap plan is already decided (gap round running)."] })
+    state = workflow.getRun(run.runId)!
+    const usLead = state.tasks.find((task) => task.id === "us-lead")!
+    expect(usLead).toMatchObject({ state: "running", reopenedFor: "gap", accepted: null })
+    expect(state.gapRound!.leads["us-lead"]).toMatchObject({ gaps: ["G001"], baseline: { searches: 0 } })
+    expect(state.gapRound!.leads["cn-lead"]!.gaps).toEqual(["G002"])
+    await until(() => codex.turnsFor(run.usLead).length === 2, "the gap-round turn")
+    const message = codex.turnsFor(run.usLead)[1]!.content
+    expect(message).toContain("Gap round for task us-lead")
+    expect(message).toContain("Check the Federal Register")
+    expect(message).toContain("about 20 minutes and 50000 fresh tokens")
+    await expect(workflow.crossBorder(run.chief, projectDir, { fromTaskId: "chief", toCountry: "us", question: "q", eventIds: ["E001"], scope: "s", evidenceRequired: "e" }))
+      .rejects.toThrow(/gap round/)
+
+    // Gap scouts: one per lead here, only for the lead's own gaps, on the round's own cap and time.
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "Wrong gap", gap: "G002" })).rejects.toThrow("G002 is not one of us-lead's gaps")
+    const scout = await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "Federal Register check", gap: "G001" })
+    expect(scout).toMatchObject({ taskId: "us-g01", state: "running" })
+    const scoutTask = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "us-g01")!
+    expect(scoutTask).toMatchObject({ gap: "G001", assignment: { gap: { gap_id: "G001", brief: "Check the Federal Register" } } })
+    expect(Date.parse(scoutTask.deadlineAt!) - Date.parse(scoutTask.startedAt!)).toBe(10 * 60_000)
+    expect(codex.turnsFor(scout.chatId!)[0]!.content).toContain("token budget about 40000 fresh tokens")
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "Another", gap: "G001" })).rejects.toThrow("used its 1 gap scout(s)")
+    await context.writeOutput(scout.dir, { task_id: "us-g01" })
+    expect(await workflow.submit(scout.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(scout.chatId!)
+    await workflow.wait(run.usLead, projectDir, {})
+
+    // A reopened lead must report each of its gaps, and only those.
+    await context.writeOutput(run.usDir, { task_id: "us-lead" })
+    expect((await workflow.submit(run.usLead, projectDir, {})).problems).toEqual(["output.json gap_results must report G001 (filled, searched_none or not_reached)"])
+    await context.writeOutput(run.usDir, { task_id: "us-lead", gap_results: [{ gap_id: "G001", outcome: "filled", event_ids: ["E004"] }, { gap_id: "G002", outcome: "not_reached", reason: "x" }] })
+    expect((await workflow.submit(run.usLead, projectDir, {})).problems).toEqual(["output.json gap_results: G002 were not given to us-lead"])
+    await context.writeOutput(run.usDir, { task_id: "us-lead", gap_results: [{ gap_id: "G001", outcome: "searched_none", searched: ["only one"] }] })
+    expect((await workflow.submit(run.usLead, projectDir, {})).problems).toEqual([expect.stringContaining("searched_none lists at least 2 searches")])
+    await context.writeOutput(run.usDir, { task_id: "us-lead", gap_results: [{ gap_id: "G001", outcome: "filled", event_ids: ["E004"] }] })
+    expect(await workflow.submit(run.usLead, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(run.usLead)
+    await writeFile(path.join(run.cnDir, "fixture-gap-check.json"), JSON.stringify({ task: "cn-lead", results: {
+      G002: { outcome: "not_searched", detail: "needs at least 2 logged searches", searched: ["a", "b"] } } }))
+    await context.writeOutput(run.cnDir, { task_id: "cn-lead", gap_results: [{ gap_id: "G002", outcome: "searched_none", searched: ["a", "b"] }] })
+    expect(await workflow.submit(run.cnLead, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(run.cnLead)
+    const waited = await workflow.wait(run.chief, projectDir, {})
+    expect(waited.tasks.map((task) => [task.taskId, task.state])).toEqual([["us-lead", "accepted"], ["cn-lead", "accepted"]])
+
+    // The chief is told the outcome once; nothing was counted; then the draft goes on.
+    const told = await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    expect((told.problems as string[])[0]).toBe("The gap round has ended: 3 gap(s) listed (1 filled, 1 not searched, 1 skipped); 1 more not listed. See gap_report.json.")
+    const report = JSON.parse(await readFile(path.join(run.runDir, "gap_report.json"), "utf8"))
+    expect(report).toMatchObject({ state: "done", not_listed: 1, leads: { "us-lead": { gaps: ["G001"] } } })
+    expect(Object.fromEntries(report.gaps.map((gap: { gap_id: string; outcome: string }) => [gap.gap_id, gap.outcome])))
+      .toEqual({ G001: "filled", G002: "not_searched", G003: "skipped" })
+    expect(report.gaps[2]).toMatchObject({ detail: "The official notice is already cited in E003", decision: { action: "skip" } })
+    expect(workflow.getRun(run.runId)!.draftAttempts).toBe(0)
+    const draft = await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    expect(draft).toMatchObject({ accepted: true, reviewTask: "review-1" })
+    const reviewer = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "review-1")!
+    expect(reviewer.assignment.gap_round).toMatchObject({ state: "done", listed: 3, outcomes: { filled: 1, not_searched: 1, skipped: 1 } })
+    await review(context, run.runId, "pass", [])
+    expect(await readFile(path.join(run.runDir, "qa", "workflow_summary.md"), "utf8")).toContain("- Gap round: 3 gap(s) listed (1 filled, 1 not searched, 1 skipped)")
+    expect(calls.filter((args) => args[1] === "gap-check").map((args) => args[args.indexOf("--task") + 1])).toEqual(["us-lead", "cn-lead"])
+  })
+
+  test("a lead reopened for the round spends from its own allowance, and the round's reserve is released when it starts", async () => {
+    const { context, run } = await gapRun({ ...GAPS, token_budget: { run_fresh_tokens: 3_000_000,
+      reserve_fresh_tokens: { synthesis: 100_000, review: 100_000, rework: 100_000, gap_research: 300_000 } } })
+    const { workflow, codex, projectDir } = context
+    expect((await workflow.status(run.chief, projectDir, {})).budgetPlan).toMatchObject({ reserve: 600_000 })
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    expect((await workflow.status(run.chief, projectDir, {})).budgetPlan).toMatchObject({ reserve: 300_000, reserveParts: { gap_research: 0 } })
+    await plan(context, run.runDir, run.chief, DECIDED)
+    await until(() => codex.turnsFor(run.usLead).length === 2, "the gap-round turn")
+    codex.usage(run.usLead, { input: 60_000, output: 0 })
+    await context.usageLanded(run.usLead, 1)
+    await workflow.status(run.chief, projectDir, {})
+    const lead = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "us-lead")!
+    expect(lead).toMatchObject({ state: "failed", failure: "task token budget exhausted (60000 of 50000 fresh tokens)" })
+  })
+
+  test("a lead that ends the round without a hand-in leaves its gaps not reached and keeps its first-round research", async () => {
+    const { context, run } = await gapRun()
+    const { workflow, codex, projectDir } = context
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    await plan(context, run.runDir, run.chief, DECIDED)
+    await until(() => codex.turnsFor(run.usLead).length === 2 && codex.turnsFor(run.cnLead).length === 2, "the gap-round turns")
+    // The US lead changed nothing: its first-round hand-in is restored. The China lead had started writing: it stays
+    // failed, but what it handed in before the round is already in the chief's records.
+    await writeFile(path.join(run.cnDir, "events.json"), JSON.stringify({ events: [{ id: "E009" }] }))
+    codex.finish(run.usLead, "gave up")
+    codex.finish(run.cnLead, "gave up")
+    await workflow.wait(run.chief, projectDir, {})
+    expect(((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems as string[])[0]).toContain("2 not reached")
+    const state = workflow.getRun(run.runId)!
+    expect(state.tasks.find((task) => task.id === "us-lead")).toMatchObject({ state: "accepted", merged: true })
+    expect(state.tasks.find((task) => task.id === "cn-lead")).toMatchObject({ state: "failed" })
+    expect(state.gapRound!.gaps.find((gap) => gap.gap_id === "G002")!.detail).toContain("its first-round research stands")
+    // Both sides' research is in: no partial reason is needed.
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true, reviewTask: "review-1" })
+    expect(state.partialReason).toBeUndefined()
+  })
+
+  test("with no gap found, or every gap skipped, no lead is reopened and the draft goes on", async () => {
+    const none = await gapRun(GAPS, { gaps: [], not_listed: 0 })
+    expect(await none.context.workflow.submit(none.run.chief, none.context.projectDir, { kind: "draft" })).toMatchObject({ accepted: true, reviewTask: "review-1" })
+    expect(JSON.parse(await readFile(path.join(none.run.runDir, "gap_report.json"), "utf8"))).toMatchObject({ state: "done", note: "the gap check found no gap" })
+
+    const skipped = await gapRun()
+    const { workflow, projectDir } = skipped.context
+    await workflow.submit(skipped.run.chief, projectDir, { kind: "draft" })
+    const result = await plan(skipped.context, skipped.run.runDir, skipped.run.chief, LISTED.gaps.map((gap) => ({ gap_id: gap.gap_id, action: "skip", reason: "Not material" })))
+    expect(result).toMatchObject({ accepted: true, reopened: [], next: expect.stringContaining("every gap skipped") })
+    expect(workflow.getRun(skipped.run.runId)!.tasks.filter((task) => task.role === "lead").map((task) => task.state)).toEqual(["accepted", "accepted"])
+    expect(await workflow.submit(skipped.run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true, reviewTask: "review-1" })
+  })
+
+  test("a Skill without the gap round runs no gap check", async () => {
+    const context = await setup()
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    expect(await context.workflow.submit(run.chief, context.projectDir, { kind: "draft" })).toMatchObject({ accepted: true })
+    expect(context.calls.some((args) => args[1] === "gaps")).toBe(false)
+    expect(context.workflow.getRun(run.runId)!.gapRound).toBeUndefined()
+  })
+
+  test("a crash after a lead was reopened: the restart keeps the round, and a retried plan reopens nobody twice", async () => {
+    let crash = true
+    const context = await setup({ budgets: GAPS, fault: (point) => {
+      if (point === "gap:saved" && crash) {
+        crash = false
+        throw new InjectedCrash(point)
+      }
+    } })
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await writeFile(path.join(run.runDir, "fixture-gaps.json"), JSON.stringify(LISTED))
+    await context.workflow.submit(run.chief, context.projectDir, { kind: "draft" })
+    await writeFile(path.join(run.runDir, "gap_plan.json"), JSON.stringify({ decisions: DECIDED }))
+    await expect(context.workflow.submit(run.chief, context.projectDir, { kind: "gap_plan" })).rejects.toThrow(InjectedCrash)
+    const workflow = await context.restart()
+    const state = workflow.getRun(run.runId)!
+    expect(state.gapRound).toMatchObject({ state: "running", leads: { "us-lead": { gaps: ["G001"] } } })
+    expect(state.tasks.find((task) => task.id === "us-lead")).toMatchObject({ state: "running", reopenedFor: "gap" })
+    expect(await workflow.submit(run.chief, context.projectDir, { kind: "gap_plan" })).toMatchObject({ accepted: false, problems: ["The gap plan is already decided (gap round running)."] })
+    expect(context.codex.turnsFor(run.usLead)).toHaveLength(1)
   })
 })

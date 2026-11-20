@@ -93,6 +93,17 @@ describe("briefing agent profiles", () => {
     expect(access(reviewer, `${BASE.runDir}/claim_verification.json`)).toBe("read")
   })
 
+  test("the gap round's listing and outcomes are readable by the chief, leads and reviewer, writable by none, hidden from verifiers", () => {
+    const profile = (role: "chief" | "lead" | "reviewer" | "verifier" | "scout", taskDir: string) => buildRestriction({ ...BASE, role, taskDir }).filesystem
+    for (const [role, dir] of [["chief", BASE.runDir], ["lead", `${BASE.runDir}/tasks/us-lead`], ["reviewer", `${BASE.runDir}/tasks/review-1`]] as const) {
+      for (const name of ["gaps.json", "gap_report.json"]) expect(access(profile(role, dir), `${BASE.runDir}/${name}`)).toBe("read")
+    }
+    for (const name of ["gaps.json", "gap_report.json"]) {
+      expect(access(profile("verifier", `${BASE.runDir}/tasks/verify-1`), `${BASE.runDir}/${name}`)).toBe("deny")
+      expect(access(profile("scout", `${BASE.runDir}/tasks/us-g01`), `${BASE.runDir}/${name}`)).toBe("deny")
+    }
+  })
+
   test("the thread config switches off tools that act outside the sandbox and scrubs the shell environment", () => {
     const config = restrictionConfig(buildRestriction({ ...BASE, role: "scout", taskDir: `${BASE.runDir}/tasks/us-s01` }))
     expect(config.default_permissions).toBe("nex-briefing-scout")

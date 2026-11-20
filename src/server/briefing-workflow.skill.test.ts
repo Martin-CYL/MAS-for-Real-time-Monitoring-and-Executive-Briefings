@@ -312,4 +312,128 @@ describe("briefing workflow with the real Skill scripts", () => {
     expect(final.reviewRounds).toBe(2)
     expect(await readFile(path.join(runDir, "qa", "workflow_summary.md"), "utf8")).toContain("Independent verification:")
   }, 60_000)
+
+  skillTest("the gap round finds gaps by the Skill's rules, reopens the leads, and checks what they report against their records", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-gaps-data-"))
+    const projectDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-gaps-project-"))
+    const home = await mkdtemp(path.join(tmpdir(), "nex-briefing-gaps-home-"))
+    const skill = path.join(projectDir, ".agents", "skills", "us-china-ai-chip-briefing")
+    await cp(SKILL_DIR!, skill, { recursive: true, filter: (source) => !source.includes("__pycache__") })
+    await writeFile(path.join(skill, "references", "roles", "workflow.json"), JSON.stringify({ discovery: false, gap_round: { enabled: true, max_gaps_pursued: 4 } }))
+    const store = new EventStore(dataDir)
+    await store.initialize()
+    const project = await store.openProject(projectDir)
+    const codex = new FakeCodex()
+    const agent = new AgentCoordinator({ store, onStateChange: () => {}, codexManager: codex as never,
+      generateTitle: async () => ({ title: null, usedFallback: true, failureMessage: null }) })
+    const orchestrator = new ChatOrchestrator({ store, agent, commands: createChatCommands({ store, agent, analytics: NoopAnalyticsReporter }), push: () => {} })
+    const workflow = new BriefingWorkflow({ chats: orchestrator, settleGraceMs: 10, home, sandboxRunner: ENFORCING_SANDBOX, log: () => {} })
+    agent.orchestration = orchestrator
+    agent.briefing = workflow
+    agent.onChatSettled = (chatId) => { orchestrator.handleChatSettled(chatId); workflow.handleChatSettled(chatId) }
+    store.onTurnStarted = (chatId) => orchestrator.handleTurnStarted(chatId)
+    cleanups.push(async () => {
+      workflow.dispose()
+      for (let quiet = 0, tick = 0; tick < 200 && quiet < 3; tick += 1) {
+        for (const turn of codex.turns) if (turn.open) { turn.open = false; turn.events.finish() }
+        await Bun.sleep(5)
+        quiet = agent.getActiveStatuses().size === 0 && store.getResourceCounts().storeQueuedWrites === 0 ? quiet + 1 : 0
+      }
+      orchestrator.dispose(); agent.dispose()
+      for (const dir of [dataDir, projectDir, home]) await rm(dir, { recursive: true, force: true })
+    })
+    const brief = async (...args: string[]) => {
+      const result = await runPython([path.join(skill, "scripts", "brief.py"), ...args], { cwd: skill, timeoutMs: 60_000 })
+      if (result.exitCode !== 0) throw new Error(`brief.py ${args.join(" ")}: ${result.stdout}${result.stderr}`)
+      return result.stdout
+    }
+    const page = async (name: string, body: string) => {
+      const file = path.join(home, name)
+      await writeFile(file, body)
+      return file
+    }
+    const json = async (file: string) => JSON.parse(await readFile(file, "utf8"))
+    const done = (output: Record<string, unknown>) => JSON.stringify({ status: "complete", summary: "Synthetic summary.", ...output })
+    const narrative = (dir: string, ids: string) => writeFile(path.join(dir, "narrative.md"),
+      `Country view covering ${ids}. The proposal is not yet in force, and the reported halt is attributed to Reuters only. Watch the final rule.`)
+
+    const root = await store.createChat(project.id)
+    await agent.send({ type: "chat.send", chatId: root.id, provider: "codex", content: "Run the multi-agent briefing" })
+    const started = await workflow.start(root.id, projectDir, { request: "Synthetic weekly briefing", discovery: false })
+    const { runDir, chiefChatId: chief } = started
+    await writeFile(path.join(runDir, "plan.json"), JSON.stringify({ focus: "Synthetic", countries: {
+      us: { brief: "US side", categories: ["export_controls_sanctions"], cases: ["A001"] },
+      cn: { brief: "China side", categories: ["semiconductor_supply_chain"], cases: ["A002"] } } }))
+    expect(await workflow.submit(chief, projectDir, { kind: "plan" })).toMatchObject({ accepted: true })
+    const us = await workflow.delegate(chief, projectDir, { role: "lead", country: "us" })
+    const cn = await workflow.delegate(chief, projectDir, { role: "lead", country: "cn" })
+
+    // First round, each lead on its own: an official US proposal, a media-only China report. Neither follows its case.
+    await brief("fetch", us.dir, "https://www.example.gov/proposed-rule", "--file", await page("rule.txt", US_RULE), "--route", "http_tool")
+    await brief("event", us.dir, "add", "--title", "Synthetic agency proposes accelerator licence rule", "--date", TODAY, "--side", "us", "--source", "S001",
+      "--materiality", "high", "--why", "Synthetic export-control link", "--category", "export_controls_sanctions")
+    await brief("event", us.dir, "decide", "E001", "include", "--reason", "Proposed rule in the window", "--proposed", "--link", "Export controls", "--size", "A licence requirement", "--new", "Issued in the window")
+    await brief("add-claim", us.dir, "E001", "S001", "--quote", "today issued a proposed rule that would require licences for synthetic accelerator exports",
+      "--text", "The Synthetic Commerce Agency issued a proposed rule that would require licences for synthetic accelerator exports.", "--pub-date", TODAY)
+    await narrative(us.dir, "E001")
+    await writeFile(path.join(us.dir, "output.json"), done({ task_id: us.taskId }))
+    expect(await workflow.submit(us.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(us.chatId!)
+    await brief("fetch", cn.dir, "https://www.reuters.com/synthetic-foundry", "--file", await page("cn.txt", CN_REPORT), "--route", "http_tool")
+    await brief("event", cn.dir, "add", "--title", "Synthetic foundry halts wafer shipments", "--date", TODAY, "--side", "cn", "--source", "S001", "--materiality", "high", "--why", "Supply-chain response")
+    await brief("event", cn.dir, "decide", "E001", "include", "--reason", "Reported supply response", "--link", "Supply chain", "--size", "Halts shipments", "--new", "Reported in the window")
+    await brief("add-claim", cn.dir, "E001", "S001", "--quote", "halted shipments of synthetic wafers to a synthetic buyer",
+      "--text", "According to Reuters, Synthetic Foundry Co. halted shipments of synthetic wafers to a synthetic buyer.", "--pub-date", TODAY)
+    await narrative(cn.dir, "E001")
+    await writeFile(path.join(cn.dir, "output.json"), done({ task_id: cn.taskId }))
+    expect(await workflow.submit(cn.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(cn.chatId!)
+    await workflow.wait(chief, projectDir, {})
+
+    // The first draft submission runs the real gap check on the merged records.
+    const listed = await workflow.submit(chief, projectDir, { kind: "draft" })
+    const gaps = listed.gaps as Array<{ gap_id: string; type: string; side: string; lead_task: string | null }>
+    expect(gaps.map((gap) => `${gap.type}:${gap.side}`).sort()).toEqual(["case_unfollowed:cn", "case_unfollowed:us", "category_empty:cn", "single_source:cn"])
+    const id = (type: string, side: string) => gaps.find((gap) => gap.type === type && gap.side === side)!.gap_id
+    const [usCase, cnCase, cnMedia, cnCategory] = [id("case_unfollowed", "us"), id("case_unfollowed", "cn"), id("single_source", "cn"), id("category_empty", "cn")]
+    await writeFile(path.join(runDir, "gap_plan.json"), JSON.stringify({ decisions: [
+      { gap_id: usCase, action: "pursue", brief: "Check the Federal Register for the rule" },
+      { gap_id: cnCase, action: "pursue", brief: "Check MOFCOM" },
+      { gap_id: cnMedia, action: "pursue", brief: "Find the company's own notice" },
+      { gap_id: cnCategory, action: "skip", reason: "The halt is a supply-chain story already; nothing else was material" },
+    ] }))
+    expect(await workflow.submit(chief, projectDir, { kind: "gap_plan" })).toMatchObject({ accepted: true, reopened: ["us-lead", "cn-lead"] })
+
+    // US: a new case event, recorded with --case. China: two searches for the case, nothing found; the media-only
+    // event is reported filled although no primary source was added, which the check must not accept.
+    await brief("fetch", us.dir, "https://www.federalregister.gov/synthetic-affiliates", "--file",
+      await page("fr.txt", "The Synthetic Commerce Agency today published a notice extending the synthetic affiliates rule suspension to 2030-05-10."), "--route", "http_tool")
+    await brief("event", us.dir, "add", "--title", "Synthetic affiliates rule suspension extended", "--date", TODAY, "--side", "us", "--source", "S002",
+      "--materiality", "medium", "--why", "Carried-over case", "--case", "A001")
+    await brief("event", us.dir, "decide", "E002", "track", "--reason", "Suspension extended in the window", "--link", "Export controls", "--size", "Two more months", "--new", "Published in the window")
+    await brief("add-claim", us.dir, "E002", "S002", "--quote", "published a notice extending the synthetic affiliates rule suspension",
+      "--text", "The Synthetic Commerce Agency published a notice extending the synthetic affiliates rule suspension.", "--pub-date", TODAY)
+    await writeFile(path.join(us.dir, "output.json"), done({ task_id: us.taskId, gap_results: [{ gap_id: usCase, outcome: "filled", event_ids: ["E002"] }] }))
+    expect(await workflow.submit(us.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(us.chatId!)
+    await brief("search", cn.dir, "mofcom.gov.cn synthetic rare earth suspension", "--found", "nothing in the window")
+    await brief("search", cn.dir, "MOFCOM announcement list March", "--found", "no new announcement")
+    await writeFile(path.join(cn.dir, "output.json"), done({ task_id: cn.taskId, gap_results: [
+      { gap_id: cnCase, outcome: "searched_none", searched: ["mofcom.gov.cn synthetic rare earth suspension", "MOFCOM announcement list March"], note: "No announcement" },
+      { gap_id: cnMedia, outcome: "filled", event_ids: ["E001"] },
+    ] }))
+    expect(await workflow.submit(cn.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(cn.chatId!)
+    await workflow.wait(chief, projectDir, {})
+
+    const ended = await workflow.submit(chief, projectDir, { kind: "draft" })
+    expect((ended.problems as string[])[0]).toContain("The gap round has ended: 4 gap(s) listed")
+    const report = await json(path.join(runDir, "gap_report.json"))
+    const outcome = Object.fromEntries(report.gaps.map((gap: { gap_id: string; outcome: string }) => [gap.gap_id, gap.outcome]))
+    expect(outcome).toEqual({ [usCase]: "filled", [cnCase]: "searched_none", [cnMedia]: "filled_unconfirmed", [cnCategory]: "skipped" })
+    expect(report.gaps.find((gap: { gap_id: string }) => gap.gap_id === cnMedia).detail).toContain("none of the listed events or claims is new")
+    // The new case event reached the chief's records with its case.
+    const merged = (await json(path.join(runDir, "events.json"))).events as Array<{ case_id?: string; claim_ids?: string[]; provenance?: Array<{ task: string }> }>
+    expect(merged.some((event) => event.case_id === "A001" && (event.claim_ids ?? []).length > 0 && event.provenance?.some((origin) => origin.task === "us-lead"))).toBe(true)
+  }, 60_000)
 })

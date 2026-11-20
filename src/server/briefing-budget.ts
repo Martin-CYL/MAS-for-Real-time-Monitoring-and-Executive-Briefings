@@ -22,8 +22,11 @@ export interface BudgetPlan {
   run: number
   /** Ceiling per task, by role. A reopened lead gets `rework` for its rework window instead. */
   task: Record<BriefingRole, number>
-  /** Held back from research for the stages every report needs. `verification` is absent for runs without verifiers. */
-  reserve: { synthesis: number; review: number; rework: number; verification?: number }
+  /**
+   * Held back from research for the stages every report needs. `verification` is absent for runs without verifiers;
+   * `gap_research` is held back from the first research round for the gap round and is 0 once that round starts.
+   */
+  reserve: { synthesis: number; review: number; rework: number; verification?: number; gap_research?: number }
   /** What one request may still add after the last reported one. */
   inFlightMargin: number
   /** Fraction of its cap at which a research agent is told to wrap up. */
@@ -60,7 +63,7 @@ function outstanding(tasks: BudgetTask[], plan: BudgetPlan, roles: (role: Briefi
 }
 
 export function reserveTotal(plan: BudgetPlan) {
-  return plan.reserve.synthesis + plan.reserve.review + plan.reserve.rework + (plan.reserve.verification ?? 0)
+  return plan.reserve.synthesis + plan.reserve.review + plan.reserve.rework + (plan.reserve.verification ?? 0) + (plan.reserve.gap_research ?? 0)
 }
 
 export function snapshot(spent: number, tasks: BudgetTask[], plan: BudgetPlan): BudgetSnapshot {
@@ -82,7 +85,8 @@ export interface Authorization {
 /** What a stage must leave untouched for the stages after it, and how a refusal names it. */
 function heldFor(stage: BudgetStage, plan: BudgetPlan, reserve: number) {
   switch (stage) {
-    case "research": return { held: reserve, label: "new research", keep: plan.reserve.verification ? "synthesis, verification, review and rework" : "synthesis, review and rework" }
+    case "research": return { held: reserve, label: "new research", keep: [plan.reserve.gap_research ? "the gap round" : "", "synthesis",
+      plan.reserve.verification ? "verification" : "", "review and rework"].filter(Boolean).join(", ") }
     case "verification": return { held: plan.reserve.review + plan.reserve.rework, label: "independent verification", keep: "review and rework" }
     case "rework": return { held: plan.reserve.review, label: "rework", keep: "a second review" }
     case "review": return { held: 0, label: "an independent review", keep: "" }

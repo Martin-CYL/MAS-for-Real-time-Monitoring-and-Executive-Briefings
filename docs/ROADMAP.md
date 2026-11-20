@@ -25,6 +25,7 @@ Verified needs evidence (a commit plus a test run or live run) that meets every 
 | RQ-01 | Per-claim status labels | Medium | Backlog | Unassigned | A detail supported only by media is never labelled as an official announcement, even when its event has an official source; regression test added | Found by the live reviewer, 2026-10-23 |
 | RQ-02 | Clarify the status-table legend | Low | Backlog | Unassigned | The status dot and the evidence text in one cell cannot read as contradictory; existing report format kept | Found by the live reviewer, 2026-10-23 |
 | RQ-03 | Compare single-agent and multi-agent briefings on the same window | Medium | Backlog | Unassigned | Both workflows run on one window; coverage, claims, validator readiness, time and tokens recorded; a person judges a sample of claims | A partial comparison from 2026-10-22 exists outside the repository; no reference event set |
+| RQ-04 | Gap round: re-dispatch by coverage gaps found by rule | Medium | In Progress | Unassigned | On the fixture weeks of [the design](briefing-gap-round-design.md) §12: reference-list recall rises against the run without the round, no active case is silently dropped, fresh tokens rise by at most 20%; one live run completes a gap round | Implemented on `feature/briefing-gap-round` + `skill/briefing-gap-round` (2026-11-20): scripted and real-Skill tests pass; no live run, no fixture evaluation |
 
 ## M3: Operations
 

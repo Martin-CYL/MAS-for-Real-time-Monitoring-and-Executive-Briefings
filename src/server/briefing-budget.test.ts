@@ -41,6 +41,16 @@ function generate(seed: number) {
 }
 
 describe("budget plan", () => {
+  test("the gap-round reserve is held back from research and counts in the reserve total", () => {
+    const plan: BudgetPlan = { run: 1_000_000, task: { scout: 100_000, lead: 100_000, cross_border: 50_000, reviewer: 100_000, verifier: 50_000, chief: 200_000 },
+      reserve: { synthesis: 100_000, review: 100_000, rework: 100_000, gap_research: 300_000 }, inFlightMargin: 10_000, wrapUpAt: 0.8 }
+    expect(reserveTotal(plan)).toBe(600_000)
+    const refused = authorize("research", 400_000, 0, [], plan)
+    expect(refused).toMatchObject({ ok: false, reason: expect.stringContaining("keeping 600000 for the gap round, synthesis, review and rework") })
+    // Released once the round starts: the same start now fits.
+    expect(authorize("research", 400_000, 0, [], { ...plan, reserve: { ...plan.reserve, gap_research: 0 } }).ok).toBe(true)
+  })
+
   test("authorised research never eats into the reserve, even with every running agent spending its whole cap", () => {
     for (let seed = 1; seed <= 2_000; seed += 1) {
       const { plan, tasks, spent } = generate(seed)

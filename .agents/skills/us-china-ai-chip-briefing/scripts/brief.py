@@ -13,7 +13,7 @@ Commands (run from the skill folder):
   brief.py init RUN [--days 7] [--end YYYY-MM-DD] [--tz Asia/Hong_Kong] [--lang zh|en] [--no-cases]
   brief.py fetch RUN URL [--file PAGE.txt] [--route browser|http_tool|api|reprint]
   brief.py event RUN add --title T --date YYYY-MM-DD --side us|cn|both|other [--source S001] [--url U]
-                         [--materiality high|medium|low] [--why TEXT]
+                         [--materiality high|medium|low] [--why TEXT] [--category ID] [--case A001]
   brief.py event RUN decide E001 include|track|exclude --reason TEXT [--followup TEXT] [--proposed] [--unsupported]
                          [--link TEXT --size TEXT --new TEXT]
   brief.py add-claim RUN E001 S001 --quote "exact words from the page" --text "中文句子" [--kind legal] [--type news]
@@ -22,6 +22,8 @@ Commands (run from the skill folder):
   brief.py status RUN
   brief.py build RUN [--network] [--issue-date YYYY-MM-DD]
   brief.py verify-select RUN [--max 12]      (multi-agent: the claims an independent verifier checks, as JSON)
+  brief.py gaps RUN [--lead us=DIR] [--lead cn=DIR] [--max 20]   (multi-agent: coverage gaps, as JSON; see gaps.py)
+  brief.py gap-check RUN/gap_report.json TASK_DIR --task ID    (multi-agent: does a lead's gap report hold?)
 
 The report language is set once at init (zh by default; en renders the English template wording).
 """
@@ -40,6 +42,7 @@ sys.path.insert(0, str(SCRIPTS))
 from check_quotes import validate_quotes, host_of  # noqa: E402
 from check_evidence import KINDS  # noqa: E402
 import evidence_tools as ev  # noqa: E402
+import gaps as gap_round  # noqa: E402
 
 STATUS = {'confirmed': ('g', '官方或公司正式公告'), 'reported': ('a', '媒体报道或未经独立验证'),
           'pending': ('s', '拟议、待审批或待生效'), 'unverified': ('u', '尚未找到来源支持')}
@@ -213,6 +216,8 @@ def cmd_event(a):
             print('event add needs --title, --date and --side'); return 1
         if a.side not in SIDE_CN:
             print('--side must be us, cn, both or other'); return 1
+        if a.category and a.category not in gap_round.categories():
+            print(f'--category must be one of {", ".join(sorted(gap_round.categories()))} (references/roles/categories.json)'); return 1
         try:
             date.fromisoformat(a.date)
         except (TypeError, ValueError):
@@ -228,7 +233,8 @@ def cmd_event(a):
         eid = f"E{len(evs) + 1:03d}"
         evs.append({'id': eid, 'title': a.title, 'case_id': a.case, 'date': a.date, 'side': a.side, 'sources': srcs,
                     'url': url, 'materiality': a.materiality or '', 'why_it_matters': a.why or '',
-                    'decision': None, 'reason': '', 'claim_ids': [], 'followup': ''})
+                    'decision': None, 'reason': '', 'claim_ids': [], 'followup': '',
+                    **({'category': a.category} if a.category else {})})
         save(run / 'events.json', data)
         print(f'{eid} added: {a.title}')
         for d in dup:
@@ -242,8 +248,11 @@ def cmd_event(a):
             print('decision must be include, track or exclude'); return 1
         if not (a.reason or '').strip():
             print('--reason is required (one line)'); return 1
+        if a.category and a.category not in gap_round.categories():
+            print(f'--category must be one of {", ".join(sorted(gap_round.categories()))} (references/roles/categories.json)'); return 1
         e.update(decision=a.decision, reason=a.reason)
-        for key, field in (('followup', 'followup'), ('materiality', 'materiality'), ('why', 'why_it_matters'), ('side', 'side'), ('title', 'title')):
+        for key, field in (('followup', 'followup'), ('materiality', 'materiality'), ('why', 'why_it_matters'), ('side', 'side'), ('title', 'title'),
+                           ('category', 'category')):
             if getattr(a, key, None):
                 e[field] = getattr(a, key)
         if a.date and not e.get('date'):
@@ -687,7 +696,7 @@ def cmd_build(a):
     from qa_common import exit_code
     result, md, signoff = run_all(run / 'report.html', run / 'report_ledger.json', expected_date=a.issue_date or cfg['report_date'],
                                   glossary=SKILL / 'references' / 'glossary.md', network=a.network, coverage_path=run / 'coverage.json',
-                                  verification=load_verification(run))
+                                  verification=load_verification(run), gaps=load(run / 'gap_report.json'))
     qa = run / 'qa'
     qa.mkdir(exist_ok=True)
     save(qa / 'review_report.json', result)
@@ -731,6 +740,7 @@ def main():
     p.add_argument('--reason'); p.add_argument('--followup')
     p.add_argument('--proposed', action='store_true'); p.add_argument('--unsupported', action='store_true')
     p.add_argument('--case'); p.add_argument('--link'); p.add_argument('--size'); p.add_argument('--new')
+    p.add_argument('--category', help='research category id from references/roles/categories.json')
     p = sub.add_parser('add-claim'); p.add_argument('run'); p.add_argument('event'); p.add_argument('source')
     p.add_argument('--quote', required=True); p.add_argument('--text', required=True); p.add_argument('--kind', action='append')
     p.add_argument('--type', choices=['official_document', 'company_statement', 'news', 'dataset', 'other'])
@@ -742,9 +752,13 @@ def main():
     p = sub.add_parser('build'); p.add_argument('run'); p.add_argument('--network', action='store_true')
     p.add_argument('--issue-date', help='YYYY-MM-DD the report is issued (default: run_config report_date, the window end)')
     p = sub.add_parser('verify-select'); p.add_argument('run'); p.add_argument('--max', type=int, default=12)
+    p = sub.add_parser('gaps'); p.add_argument('run'); p.add_argument('--lead', action='append', help='us=TASK_DIR or cn=TASK_DIR')
+    p.add_argument('--max', type=int, default=20); p.add_argument('--discovery-top', type=int, default=10)
+    p = sub.add_parser('gap-check'); p.add_argument('round'); p.add_argument('task_dir'); p.add_argument('--task', required=True)
     a = ap.parse_args()
     return {'init': cmd_init, 'fetch': cmd_fetch, 'event': cmd_event, 'add-claim': cmd_add_claim, 'search': cmd_search,
-            'withdraw': cmd_withdraw, 'status': cmd_status, 'build': cmd_build, 'verify-select': cmd_verify_select}[a.cmd](a)
+            'withdraw': cmd_withdraw, 'status': cmd_status, 'build': cmd_build, 'verify-select': cmd_verify_select,
+            'gaps': gap_round.cmd_gaps, 'gap-check': gap_round.cmd_gap_check}[a.cmd](a)
 
 
 def verification_targets(run, limit):

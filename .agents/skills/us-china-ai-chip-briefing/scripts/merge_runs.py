@@ -38,7 +38,7 @@ sys.path.insert(0, str(SCRIPTS))
 import evidence_tools as ev  # noqa: E402
 
 EVENT_FIELDS = ('title', 'date', 'side', 'materiality', 'why_it_matters', 'decision', 'reason', 'followup', 'url',
-                'proposed', 'unsupported', 'assessment', 'case_id')
+                'proposed', 'unsupported', 'assessment', 'case_id', 'category')
 RANK = {'high': 3, 'medium': 2, 'low': 1, '': 0, None: 0}
 VISIBILITY = {'include': 3, 'track': 2, 'exclude': 1, None: 0}
 
@@ -361,6 +361,8 @@ def _join(t, m, task_id, out):
         t['materiality'] = m['materiality']
     if not t.get('case_id') and m.get('case_id'):
         t['case_id'] = m['case_id']
+    if not t.get('category') and m.get('category'):
+        t['category'] = m['category']
     if m.get('title') and m['title'] != t.get('title'):
         t.setdefault('aliases', [])
         if m['title'] not in t['aliases']:

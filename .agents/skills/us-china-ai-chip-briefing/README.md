@@ -31,7 +31,9 @@ workflow above is unchanged. Each agent works in its own `brief.py` run under `r
 | `scripts/check_handoff.py` | Checks a task's records before handoff (window, decisions, Link/Size/New, quotes, claim kinds, hand edits, narrative, record IDs in shown text, and `STATUS_WORDING`: a claim saying enacted or in force while its event is marked proposed or its quote only shows a proposal) |
 | `scripts/check_provenance.py` | Checks every accepted handoff reached the final run unchanged (claims, quotes, events, `proposed`/`unsupported`) |
 
-`brief.py` additions: `init --lang en --no-cases`, `event add --case`, `event decide --link --size --new` (stored as
+| `scripts/gaps.py` | The gap round: `brief.py gaps` lists coverage gaps by rule after the leads hand in; `brief.py gap-check` tests a reopened lead's `gap_results` against its records (see the module docstring) |
+
+`brief.py` additions: `init --lang en --no-cases`, `event add --case`, `event add|decide --category`, `event decide --link --size --new` (stored as
 `assessment`; an explicit decision settles merge conflicts), and `withdraw RUN CID --reason` (a claim leaves the
 report but stays in the ledger's `withdrawn` list; its ID is never reused).
 

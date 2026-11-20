@@ -102,7 +102,7 @@ def render_review(result, ledger=None):
 
 
 def run_all(html_path,ledger_path=None,review_path=None,expected_date=None,glossary=None,network=False,timeout=10,opener=None,
-        coverage_path=None,signoff_path=None,cases_path=None,resolver=None,transport=None,now=None,verification=None):
+        coverage_path=None,signoff_path=None,cases_path=None,resolver=None,transport=None,now=None,verification=None,gaps=None):
     raw=Path(html_path).read_bytes().decode('utf-8')
     ledger=load_object(ledger_path) if ledger_path else None
     review=load_object(review_path) if review_path else None
@@ -133,7 +133,7 @@ def run_all(html_path,ledger_path=None,review_path=None,expected_date=None,gloss
     allx=[x for xs in checks.values() for x in xs]
     result['readiness']=readiness(allx)[0]
     result['categories']=dict(Counter(category(x) for x in allx if x['status']!='PASS'))
-    signoff_md=render_signoff(ledger,risk,report_sha,ledger_sha,excluded_summary(coverage),verification=verification) if ledger else None
+    signoff_md=render_signoff(ledger,risk,report_sha,ledger_sha,excluded_summary(coverage),verification=verification,gaps=gaps) if ledger else None
     return result,render_review(result,ledger),signoff_md
 
 

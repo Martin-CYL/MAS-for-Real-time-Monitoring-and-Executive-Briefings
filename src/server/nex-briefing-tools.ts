@@ -31,8 +31,11 @@ const start = z.strictObject({
 const delegate = z.strictObject({
   role: z.enum(["lead", "scout"]).describe("lead: Chief Editor only, one per country. scout: country leads only."),
   country: z.enum(["us", "cn"]).optional().describe("For a lead."),
-  topic: z.string().optional().describe("For a scout: one narrow research topic."),
+  topic: z.string().optional().describe("For a scout: one narrow research topic. With source lanes, optional (defaults to the lane's title)."),
   category: z.string().optional().describe("For a scout: a category id from references/roles/categories.json."),
+  lane: z.string().optional().describe("For a scout, when the run splits scouts by source (assignment scout_mode lane): a lane id from your assignment's lanes, e.g. official, company, media."),
+  categories: z.array(z.string()).optional().describe("For a lane scout: the category ids it must cover in its lane."),
+  primaryLeads: z.array(z.string()).optional().describe("For a follow-up lane scout (official or company): lead IDs (L001…) from briefing_wait's primaryLeads to source."),
   questions: z.array(z.string()).optional().describe("Concrete questions the scout must answer."),
   cases: z.array(z.string()).optional().describe("Active case IDs (A001…) the scout must recheck."),
   leads: z.array(z.string()).optional().describe("Discovery candidate IDs (D001…) worth opening."),
@@ -80,7 +83,7 @@ export const BRIEFING_TOOLS: readonly NexToolDefinition[] = [
   },
   {
     name: "briefing_delegate",
-    description: "In a briefing run: hand a research task to a new agent. The Chief Editor delegates country leads (after its plan is accepted); a country lead delegates topic scouts. Nex checks roles and budgets, prepares the task directory and starts the agent, or queues it when the concurrency budget is full. Also retries a failed task (retryOf) and sends review rework to a lead (reworkOf).",
+    description: "In a briefing run: hand a research task to a new agent. The Chief Editor delegates country leads (after its plan is accepted); a country lead delegates scouts, by topic or, when its assignment says scout_mode lane, by source lane (follow-ups on media leads with primaryLeads). Nex checks roles and budgets, prepares the task directory and starts the agent, or queues it when the concurrency budget is full. Also retries a failed task (retryOf) and sends review rework to a lead (reworkOf).",
     schema: delegate,
     async execute(input, context) {
       return reply(await workflow(context).delegate(context.chatId, context.cwd, delegate.parse(input)))
@@ -88,7 +91,7 @@ export const BRIEFING_TOOLS: readonly NexToolDefinition[] = [
   },
   {
     name: "briefing_wait",
-    description: "In a briefing run: wait until the tasks you delegated have ended, then return each one's accepted result (output, check findings, record summary) or its explicit failure. Accepted research records are merged into your task directory before this returns. Queued tasks are started as slots free.",
+    description: "In a briefing run: wait until the tasks you delegated have ended, then return each one's accepted result (output, check findings, record summary) or its explicit failure. Accepted research records are merged into your task directory before this returns. With source lanes, also returns primaryLeads: reported events still needing a primary source. Queued tasks are started as slots free.",
     schema: wait,
     async execute(input, context) {
       return reply(await workflow(context).wait(context.chatId, context.cwd, wait.parse(input), context.signal))

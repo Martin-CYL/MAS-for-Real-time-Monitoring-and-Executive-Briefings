@@ -436,4 +436,115 @@ describe("briefing workflow with the real Skill scripts", () => {
     const merged = (await json(path.join(runDir, "events.json"))).events as Array<{ case_id?: string; claim_ids?: string[]; provenance?: Array<{ task: string }> }>
     expect(merged.some((event) => event.case_id === "A001" && (event.claim_ids ?? []).length > 0 && event.provenance?.some((origin) => origin.task === "us-lead"))).toBe(true)
   }, 60_000)
+
+  skillTest("source lanes: a lane records only its own evidence, and a media lead followed up by the official lane joins the reported event in the lead's records", async () => {
+    const dataDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-lanes-data-"))
+    const projectDir = await mkdtemp(path.join(tmpdir(), "nex-briefing-lanes-project-"))
+    const home = await mkdtemp(path.join(tmpdir(), "nex-briefing-lanes-home-"))
+    const skill = path.join(projectDir, ".agents", "skills", "us-china-ai-chip-briefing")
+    await cp(SKILL_DIR!, skill, { recursive: true, filter: (source) => !source.includes("__pycache__") })
+    const config = JSON.parse(await readFile(path.join(skill, "references", "roles", "workflow.json"), "utf8"))
+    await writeFile(path.join(skill, "references", "roles", "workflow.json"), JSON.stringify({ ...config, discovery: false, scout_mode: "lane", verification: { enabled: false } }))
+    const store = new EventStore(dataDir)
+    await store.initialize()
+    const project = await store.openProject(projectDir)
+    const codex = new FakeCodex()
+    const agent = new AgentCoordinator({ store, onStateChange: () => {}, codexManager: codex as never,
+      generateTitle: async () => ({ title: null, usedFallback: true, failureMessage: null }) })
+    const orchestrator = new ChatOrchestrator({ store, agent, commands: createChatCommands({ store, agent, analytics: NoopAnalyticsReporter }), push: () => {} })
+    const workflow = new BriefingWorkflow({ chats: orchestrator, settleGraceMs: 10, home, sandboxRunner: ENFORCING_SANDBOX, log: () => {} })
+    agent.orchestration = orchestrator
+    agent.briefing = workflow
+    agent.onChatSettled = (chatId) => { orchestrator.handleChatSettled(chatId); workflow.handleChatSettled(chatId) }
+    store.onTurnStarted = (chatId) => orchestrator.handleTurnStarted(chatId)
+    cleanups.push(async () => {
+      workflow.dispose()
+      for (let quiet = 0, tick = 0; tick < 200 && quiet < 3; tick += 1) {
+        for (const turn of codex.turns) if (turn.open) { turn.open = false; turn.events.finish() }
+        await Bun.sleep(5)
+        quiet = agent.getActiveStatuses().size === 0 && store.getResourceCounts().storeQueuedWrites === 0 ? quiet + 1 : 0
+      }
+      orchestrator.dispose(); agent.dispose()
+      for (const dir of [dataDir, projectDir, home]) await rm(dir, { recursive: true, force: true })
+    })
+    const brief = async (...args: string[]) => {
+      const result = await runPython([path.join(skill, "scripts", "brief.py"), ...args], { cwd: skill, timeoutMs: 60_000 })
+      if (result.exitCode !== 0) throw new Error(`brief.py ${args.join(" ")}: ${result.stdout}${result.stderr}`)
+      return result.stdout
+    }
+    const page = async (name: string, body: string) => {
+      const file = path.join(home, name)
+      await writeFile(file, body)
+      return file
+    }
+    const json = async (file: string) => JSON.parse(await readFile(file, "utf8"))
+    const done = (output: Record<string, unknown>) => JSON.stringify({ status: "complete", summary: "Synthetic summary.", ...output })
+    const TITLE = "Synthetic agency adds synthetic foundry to entity list"
+    const REPORT = "Synthetic Wire reported that the Synthetic Commerce Agency added Synthetic Foundry Co. to the synthetic entity list."
+    const RULE = "The Synthetic Commerce Agency issued a final rule that adds Synthetic Foundry Co. to the synthetic entity list, effective on publication."
+    const decide = (dir: string, id: string, decision = "include") => brief("event", dir, "decide", id, decision, "--reason", "Material listing in the window",
+      "--link", "Export controls on a foundry", "--size", "Adds a licence requirement", "--new", "Issued in the window")
+
+    const root = await store.createChat(project.id)
+    await agent.send({ type: "chat.send", chatId: root.id, provider: "codex", content: "Run the multi-agent briefing" })
+    const started = await workflow.start(root.id, projectDir, { request: "Synthetic weekly briefing", discovery: false })
+    await writeFile(path.join(started.runDir, "plan.json"), JSON.stringify({ focus: "Synthetic", countries: {
+      us: { brief: "US side", categories: ["export_controls_sanctions"] }, cn: { brief: "China side", categories: ["semiconductor_supply_chain"] } } }))
+    expect(await workflow.submit(started.chiefChatId, projectDir, { kind: "plan" })).toMatchObject({ accepted: true })
+    const us = await workflow.delegate(started.chiefChatId, projectDir, { role: "lead", country: "us" })
+    expect(workflow.getRun(started.runId)!.budgets.scoutMode).toBe("lane")
+
+    // First round: the media lane finds the report; the official lane, recording that report, is refused.
+    const media = await workflow.delegate(us.chatId!, projectDir, { role: "scout", lane: "media", categories: ["export_controls_sanctions"] })
+    const official = await workflow.delegate(us.chatId!, projectDir, { role: "scout", lane: "official", categories: ["export_controls_sanctions"] })
+    for (const scout of [media, official]) {
+      await brief("fetch", scout.dir, "https://www.reuters.com/synthetic-listing", "--file", await page(`report-${scout.taskId}.txt`, REPORT), "--route", "http_tool")
+      await brief("event", scout.dir, "add", "--title", TITLE, "--date", TODAY, "--side", "us", "--source", "S001", "--materiality", "high", "--why", "Export controls on a foundry")
+      await decide(scout.dir, "E001")
+      await brief("add-claim", scout.dir, "E001", "S001", "--quote", "added Synthetic Foundry Co. to the synthetic entity list",
+        "--text", "According to Synthetic Wire, the Synthetic Commerce Agency added Synthetic Foundry Co. to the synthetic entity list.", "--kind", "list", "--pub-date", TODAY)
+      await brief("search", scout.dir, "synthetic entity list foundry", "--found", "the report")
+      await writeFile(path.join(scout.dir, "narrative.md"), "E001: according to Synthetic Wire the agency listed the foundry (C001). The rule itself has not been located yet; watch the Federal Register.")
+    }
+    await writeFile(path.join(media.dir, "output.json"), done({ task_id: media.taskId,
+      primary_leads: [{ event_id: "E001", agency: "Synthetic Commerce Agency", document_hint: "The final rule adding the foundry to the entity list" }] }))
+    expect(await workflow.submit(media.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(media.chatId!)
+    await writeFile(path.join(official.dir, "output.json"), done({ task_id: official.taskId }))
+    const refused = await workflow.submit(official.chatId!, projectDir, {})
+    expect(refused.accepted).toBe(false)
+    expect((refused.problems as string[]).join("\n")).toContain("LANE_EVIDENCE_TYPE: C001: recorded as 'news', but the official lane records only dataset, official_document")
+    await brief("withdraw", official.dir, "C001", "--reason", "A news report; the media lane covers it")
+    await decide(official.dir, "E001", "exclude")
+    expect(await workflow.submit(official.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(official.chatId!)
+
+    // The lead gets the media lead in its own event IDs and sends it to an official follow-up.
+    const first = await workflow.wait(us.chatId!, projectDir, {})
+    const lead = first.primaryLeads![0]!
+    expect(lead).toMatchObject({ lead_id: "L001", from_task: media.taskId, title: TITLE, date: TODAY, side: "us", agency: "Synthetic Commerce Agency" })
+    const follow = await workflow.delegate(us.chatId!, projectDir, { role: "scout", lane: "official", primaryLeads: ["L001"] })
+    await brief("fetch", follow.dir, "https://www.example.gov/final-rule", "--file", await page("rule.txt", RULE), "--route", "http_tool")
+    await brief("event", follow.dir, "add", "--title", TITLE, "--date", TODAY, "--side", "us", "--source", "S001", "--materiality", "high", "--why", "Export controls on a foundry")
+    await decide(follow.dir, "E001")
+    await brief("add-claim", follow.dir, "E001", "S001", "--quote", "adds Synthetic Foundry Co. to the synthetic entity list",
+      "--text", "The Synthetic Commerce Agency issued a final rule adding Synthetic Foundry Co. to the synthetic entity list.", "--kind", "list", "--pub-date", TODAY)
+    await brief("search", follow.dir, "synthetic final rule entity list", "--found", "the rule")
+    await writeFile(path.join(follow.dir, "narrative.md"), "E001: the agency's final rule adds the foundry to the entity list (C001), confirming the reported listing from the primary document.")
+    await writeFile(path.join(follow.dir, "output.json"), done({ task_id: follow.taskId, lead_results: [{ lead_id: "L001", outcome: "found", event_id: "E001", note: "Final rule" }] }))
+    expect(await workflow.submit(follow.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(follow.chatId!)
+
+    const second = await workflow.wait(us.chatId!, projectDir, {})
+    expect(second.primaryLeads![0]!.follow_up).toMatchObject({ task_id: follow.taskId, state: "accepted", outcome: "found" })
+    // One event in the lead's records, found by two lanes: the report and the primary document.
+    const events = (await json(path.join(us.dir, "events.json"))).events.filter((event: { title: string }) => event.title === TITLE)
+    const joined = events.find((event: { provenance: Array<{ task: string }> }) => event.provenance.some((origin) => origin.task === follow.taskId))
+    expect(joined.provenance.map((origin: { task: string }) => origin.task)).toEqual(expect.arrayContaining([media.taskId, follow.taskId]))
+    expect(joined.claim_ids).toHaveLength(2)
+    const ledger = await json(path.join(us.dir, "evidence_ledger.json"))
+    const types = ledger.claims.filter((claim: { id: string }) => joined.claim_ids.includes(claim.id))
+      .flatMap((claim: { sources: Array<{ evidence_type: string }> }) => claim.sources.map((source) => source.evidence_type)).sort()
+    expect(types).toEqual(["news", "official_document"])
+  }, 60_000)
 })

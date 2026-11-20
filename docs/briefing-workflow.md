@@ -8,8 +8,8 @@ asks for the multi-agent briefing.
 
 ```
 user chat ──briefing_start──▶ Chief Editor (sub-chat, depth 1)
-                                ├─ US Lead (depth 2) ──▶ topic scouts (depth 3)
-                                ├─ China Lead (depth 2) ──▶ topic scouts (depth 3)
+                                ├─ US Lead (depth 2) ──▶ topic or source-lane scouts (depth 3)
+                                ├─ China Lead (depth 2) ──▶ topic or source-lane scouts (depth 3)
                                 ├─ cross-border requests, answered by the other lead in its own chat
                                 ├─ gap round: the same leads reopened for gaps found by rule (+ gap scouts, depth 3)
                                 ├─ Independent Verifiers (depth 2, before the first draft, when the Skill enables them)
@@ -43,8 +43,8 @@ record keeper (`scripts/brief.py`, now able to render the English template), `me
 | Tool | Caller | Effect |
 |---|---|---|
 | `briefing_start` | user's chat | Locates the Skill, `brief.py init` (English), optional discovery sweep, starts the Chief Editor |
-| `briefing_delegate` | chief → lead; lead → scout | Checks role, plan, budgets; prepares `tasks/<id>/`; starts or queues the agent; `retryOf` (once), `reworkOf` (after review) |
-| `briefing_wait` | any parent | Waits on its tasks, merges accepted records into the caller's run, returns outputs or explicit failures |
+| `briefing_delegate` | chief → lead; lead → scout | Checks role, plan, budgets; prepares `tasks/<id>/`; starts or queues the agent; `retryOf` (once), `reworkOf` (after review); in lane mode `lane`, `categories` and `primaryLeads` |
+| `briefing_wait` | any parent | Waits on its tasks, merges accepted records into the caller's run, returns outputs or explicit failures; in lane mode a lead also gets `primaryLeads` |
 | `briefing_submit` | the task's own chat | Validates the envelope and runs `check_handoff.py`; plan and draft for the chief; findings for the reviewer |
 | `briefing_cross_border` | chief | Sends an evidence-scoped question (event IDs, scope, evidence required) to the other lead as a task |
 | `briefing_status` | anyone in the run | Stage, budgets, tasks, chats |
@@ -147,6 +147,40 @@ counted, and older Skills and saved runs are unaffected. The design and how it i
 - **Budget.** Verifiers have their own cap (`task_fresh_tokens.verifier`), a reserve (`reserve_fresh_tokens.verification`)
   that research may not touch, and must leave a review and its rework affordable. If they cannot, verification is
   skipped with the reason and every selected claim stays `unverified`.
+
+## Source lanes
+
+When the Skill's `workflow.json` sets `scout_mode: "lane"` and ships `references/roles/lanes.json` and
+`references/roles/source-scout.md`, leads split their scouts by source instead of by topic. Otherwise (the default,
+older Skills and saved runs) scouts are delegated by topic as before. The design and how it is to be evaluated:
+[briefing-source-lanes-design.md](briefing-source-lanes-design.md).
+
+- **Lanes.** `lanes.json` lists them (the Skill ships `official`, `company`, `media`) with the evidence types each may
+  record. A lead's assignment carries `scout_mode` and the lanes. In lane mode every new scout names a `lane`; its
+  `topic` defaults to the lane's title, and the same topic in another lane is a separate task.
+- **Instructions.** A lane scout gets `source-scout.md` with only its own `## Lane: <id>` section (and the shared
+  parts), not `topic-scout.md`.
+- **Check.** Its assignment carries `lane` and `evidence_types`, and Nex runs `check_handoff.py --lane <id>`, which
+  refuses a claim of another type (`LANE_EVIDENCE_TYPE`) or an `official_document` from a host the Skill does not list
+  as official (`LANE_SOURCE_HOST`). The labels a report shows (official / company / media) therefore come from which
+  lane found the evidence, not from a scout's own `--type`.
+- **Budget.** `token_budget.lane_fresh_tokens` caps each lane's scouts; a lane without a cap gets the scout cap. The
+  reserve rule is unchanged: a lower cap only lowers what a running scout holds against the reserve.
+- **Primary leads.** A media scout's `output.json` may list `primary_leads` (its event, the agency, the document to
+  look for). After the merge, `briefing_wait` returns them to the lead as `primaryLeads`, numbered `L001…` and
+  translated to the lead's own event IDs through `merge_log.json`, with each lead's follow-up and its outcome.
+- **Follow-up.** The lead sends chosen leads to a scout of a follow-up lane (`official` or `company`,
+  `primaryLeads: ["L001"]`). Its assignment holds the lead's event title, date and side; the scout records the primary
+  claim on an event with exactly those, so `merge_runs.py` joins it to the reported event, and reports `found` or
+  `not_found` per lead in `lead_results` (checked by `check_handoff.py`). A lead already followed up is not sent
+  twice unless that follow-up failed.
+- **Unhandled leads.** A lead's handoff is accepted with a `PRIMARY_LEAD_UNHANDLED` warning, which reaches the chief,
+  for each lead no follow-up took and the lead's `gaps` do not name.
+- **Summary.** `qa/workflow_summary.md` adds per lane: scouts, fresh tokens, events, claims and merge conflicts; the
+  events in leads' records found by two or more lanes; and leads raised, followed up, found and not found.
+- **With the gap round.** A gap scout in lane mode also names a lane (the gap's `suggested_source` says which). It
+  gets that lane's instructions and handoff check, but the gap round's cap and time, and it counts against the gap
+  scouts, not the first-round lane scouts.
 
 ## Agent permissions
 
@@ -252,16 +286,18 @@ the account's Codex skills directory), then ask in a chat: `/us-china-ai-chip-br
   timeout, cancellation, cross-border, review/rework bounds and the review lifecycle, partial runs, tool wiring, and
   restart recovery with crashes injected at each save point (`fault`), the gap round (listing, decisions, reopened
   leads, gap scouts and their limits, required gap results, checked outcomes, a lead that does not hand in again, no
-  gap or every gap skipped, the round's allowance and reserve, older Skills, a crash after a reopening) and
+  gap or every gap skipped, the round's allowance and reserve, older Skills, a crash after a reopening),
   independent verification (blind assignment, disputes to findings, pre-draft rework, failed or unaffordable
-  verifiers, older Skills).
+  verifiers, older Skills), source lanes (lane choice and instructions, per-lane caps and checks, primary leads to
+  follow-ups, unhandled-lead warnings, topic mode and older Skills), and a gap scout in lane mode.
 - `src/server/briefing-budget.test.ts`: the allocation policy over 2,000 generated runs.
 - `src/server/briefing-workflow.skill.test.ts`: the same hierarchy through the real Skill scripts (records, merges,
   handoff and provenance checks, English render and validator): claims are verified by agents with their own records,
   a proposal written as enacted is refused, a post-handoff edit is refused, review rework is routed to the
-  responsible lead and resubmitted; and a gap round on the real `brief.py gaps` and `gap-check` (unfollowed cases, a
-  media-only event, an empty category; a filled case, a search without result, a "filled" the records do not show).
-  Skipped unless
+  responsible lead and resubmitted; a gap round on the real `brief.py gaps` and `gap-check` (unfollowed cases, a
+  media-only event, an empty category; a filled case, a search without result, a "filled" the records do not show);
+  and, in lane mode, an official scout recording a news report is refused while a media lead followed up by the
+  official lane joins the reported event in the lead's records. Skipped unless
   `BRIEFING_SKILL_DIR` points at the Skill.
 - `src/server/briefing-sandbox.test.ts`: profiles per role, the exact `thread/start` parameters, session reuse, the
   pre-run check; with `NEX_CODEX_SANDBOX_TEST=1` and `codex` on PATH it runs the real OS sandbox, including a check

@@ -14,6 +14,8 @@ import {
   type GapPlan,
   type GapResult,
   gapPlanSchema,
+  type LeadResult,
+  type PrimaryLeadOutput,
   outputSchemaFor,
   planSchema,
   reviewSchema,
@@ -128,6 +130,13 @@ export interface BriefingBudgets {
   gapRound?: GapRoundBudget
   /** Independent verification before the draft. Absent or disabled: no verifiers (older Skills, older runs). */
   verification?: VerificationBudget
+  /**
+   * How leads split their scouts: by topic (the default, and older Skills and runs) or by source lane
+   * (`scout_mode: "lane"` in the Skill's workflow.json, which then ships lanes.json and source-scout.md).
+   */
+  scoutMode?: "topic" | "lane"
+  /** The source lanes, in lane mode only. */
+  lanes?: SourceLane[]
   discovery: boolean
   days: number
 }
@@ -209,6 +218,36 @@ function emptyUsage(): UsageTotals {
   return { input: 0, cachedInput: 0, output: 0, reasoning: 0, requests: 0 }
 }
 
+/** One source lane (the Skill's references/roles/lanes.json): where its scouts look and what they may record. */
+export interface SourceLane {
+  id: string
+  title: string
+  /** Evidence types its scouts may record; the Skill's handoff check refuses others. */
+  evidenceTypes: string[]
+  /** Its scouts may be sent a media scout's primary leads to source. */
+  followUp: boolean
+  /** Its scouts hand in primary leads for what they found only reported. */
+  primaryLeads: boolean
+  /** Fresh-token cap per scout of this lane (workflow.json `lane_fresh_tokens`); default the scout cap. */
+  freshTokens?: number
+}
+
+/** A media scout's lead as its lead's run knows it: the lead's own event, numbered for follow-up. */
+export interface PrimaryLead {
+  lead_id: string
+  from_task: string
+  /** The event in the lead's run; null when the lead's records no longer map the scout's event. */
+  event_id: string | null
+  title?: string
+  date?: string | null
+  side?: string
+  agency: string
+  document_hint: string
+  url_hint?: string
+  why?: string
+  follow_up?: { task_id: string; state: BriefingTaskState; outcome?: "found" | "not_found"; note?: string }
+}
+
 /** Uncached input plus output: the part of a request the budgets limit. */
 export function freshTokens(usage: UsageTotals) {
   return Math.max(0, usage.input - usage.cachedInput) + usage.output
@@ -243,6 +282,26 @@ function gapRoundBudget(raw: Record<string, unknown> | undefined): GapRoundBudge
     leadMinutes: num("lead_minutes", 30, 1),
     scoutMinutes: num("scout_minutes", 15, 1),
   }
+}
+
+/** Lane mode only when the Skill asks for it and ships both the lanes and their role file; otherwise topic scouts. */
+async function sourceLanes(raw: Record<string, unknown>, skillDir: string): Promise<SourceLane[] | undefined> {
+  if (raw.scout_mode !== "lane" || !existsSync(path.join(skillDir, "references", "roles", SOURCE_SCOUT_FILE))) return undefined
+  const doc = await readJson<{ lanes?: Array<Record<string, unknown>> }>(path.join(skillDir, "references", "roles", "lanes.json"))
+  const caps = ((raw.token_budget as Record<string, unknown> | undefined)?.lane_fresh_tokens ?? {}) as Record<string, unknown>
+  const lanes = (doc?.lanes ?? []).flatMap((lane): SourceLane[] => {
+    if (typeof lane.id !== "string" || !/^[a-z][a-z0-9_-]*$/.test(lane.id)) return []
+    const cap = caps[lane.id]
+    return [{
+      id: lane.id,
+      title: typeof lane.title === "string" && lane.title.trim() ? lane.title.trim() : lane.id,
+      evidenceTypes: Array.isArray(lane.evidence_types) ? lane.evidence_types.filter((type): type is string => typeof type === "string") : [],
+      followUp: lane.follow_up === true,
+      primaryLeads: lane.primary_leads === true,
+      ...(typeof cap === "number" && cap > 0 ? { freshTokens: cap } : {}),
+    }]
+  })
+  return lanes.length > 0 ? lanes : undefined
 }
 
 /** On only when the Skill asks for it and ships the verifier's role file. */
@@ -354,6 +413,8 @@ export interface BriefingTask {
   reopenedFor?: "rework" | "gap"
   /** A gap scout: the gap it works on (its cap and time are the gap round's). */
   gap?: string
+  /** A scout's source lane, in lane mode. */
+  lane?: string
   /** Set once the agent has been told to wrap up for budget reasons. */
   wrapUpSent?: string
   /** Saved before its chat is created and cleared once the task runs, so a restart in between is recognised. */
@@ -539,6 +600,9 @@ const ROLE_FILES: Record<BriefingRole, string> = {
   verifier: "verifier.md",
 }
 
+/** The scouts' role file in lane mode; each lane's own part is its `## Lane: <id>` section. */
+const SOURCE_SCOUT_FILE = "source-scout.md"
+
 const ROLE_NAMES: Record<BriefingRole, string> = {
   chief: "Chief Editor",
   lead: "Country Lead",
@@ -626,16 +690,29 @@ function stripFrontmatter(markdown: string) {
   return markdown.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n?/, "").trim()
 }
 
-export async function buildRoleInstructions(skillDir: string, role: BriefingRole) {
-  const file = await readFile(path.join(skillDir, "references", "roles", ROLE_FILES[role]), "utf8")
+/** The role file without the `## Lane: <id>` sections of other lanes, so a lane scout reads only its own. */
+export function keepLane(markdown: string, lane: string) {
+  let text = markdown
+  for (const match of [...markdown.matchAll(/^#{1,6}\s+Lane:\s*(\S+)\s*$/gm)]) {
+    if (match[1] === lane) continue
+    const section = extractSection(text, `Lane: ${match[1]}`)
+    if (section) text = text.replace(section, "").replace(/\n{3,}/g, "\n\n")
+  }
+  return text.trim()
+}
+
+export async function buildRoleInstructions(skillDir: string, role: BriefingRole, options: { lane?: string } = {}) {
+  const fileName = role === "scout" && options.lane ? SOURCE_SCOUT_FILE : ROLE_FILES[role]
+  const file = await readFile(path.join(skillDir, "references", "roles", fileName), "utf8")
   const meta = parseFrontmatter(file)
   const list = (value?: string) => (value ?? "").split("|").map((entry) => entry.trim()).filter(Boolean)
-  const parts = [stripFrontmatter(file)]
+  const body = stripFrontmatter(file)
+  const parts = [options.lane ? keepLane(body, options.lane) : body]
   for (const ref of list(meta.includes)) {
     const [rel, heading] = ref.split("#", 2) as [string, string | undefined]
     const source = await readFile(path.join(skillDir, rel), "utf8")
     const body = heading ? extractSection(source, heading) : stripFrontmatter(source)
-    if (body === null) throw new Error(`Role file ${ROLE_FILES[role]} names "${ref}", which is not in the Skill.`)
+    if (body === null) throw new Error(`Role file ${fileName} names "${ref}", which is not in the Skill.`)
     parts.push(`<!-- from ${ref} -->\n${body}`)
   }
   const reads = list(meta.reads)
@@ -921,7 +998,7 @@ export class BriefingWorkflow {
 
   private async checkHandoff(run: BriefingRun, task: BriefingTask) {
     const role = task.role === "chief" ? "chief" : task.role === "cross_border" ? "cross_border" : task.role
-    const result = await this.py(run, ["check_handoff.py", this.taskDir(run, task), "--role", role, "--json"])
+    const result = await this.py(run, ["check_handoff.py", this.taskDir(run, task), "--role", role, ...(task.lane ? ["--lane", task.lane] : []), "--json"])
     const parsed = this.parseJson<{ outcome: string; findings: CheckFinding[]; summary?: unknown }>(result)
     if (!parsed) throw new WorkflowError(`check_handoff.py gave no result: ${result.stderr.trim().slice(-500)}`)
     return parsed
@@ -967,10 +1044,11 @@ export class BriefingWorkflow {
   // ── Prompts ────────────────────────────────────────────────────────────
 
   private async prompt(run: BriefingRun, task: BriefingTask, extra = "") {
-    const instructions = await buildRoleInstructions(run.skillDir, task.role === "cross_border" ? "lead" : task.role)
+    const instructions = await buildRoleInstructions(run.skillDir, task.role === "cross_border" ? "lead" : task.role, { lane: task.lane })
     const candidates = path.join(run.runDir, "discovery", "candidates.md")
+    const roleName = task.lane ? `Source Scout (${task.lane} lane)` : ROLE_NAMES[task.role]
     const header = [
-      `You are the ${task.country ? `${COUNTRY_NAMES[task.country]} ` : ""}${ROLE_NAMES[task.role]} in Nex briefing run ${run.runId}.`,
+      `You are the ${task.country ? `${COUNTRY_NAMES[task.country]} ` : ""}${roleName} in Nex briefing run ${run.runId}.`,
       "",
       `- Task ID: ${task.id}`,
       `- TASK (your directory): ${this.taskDir(run, task)}`,
@@ -1191,7 +1269,7 @@ export class BriefingWorkflow {
 
   private async writeSummary(run: BriefingRun) {
     await mkdir(path.join(run.runDir, "qa"), { recursive: true })
-    await writeFile(path.join(run.runDir, "qa", "workflow_summary.md"), this.summaryMarkdown(run), "utf8")
+    await writeFile(path.join(run.runDir, "qa", "workflow_summary.md"), this.summaryMarkdown(run, await this.laneStats(run)), "utf8")
   }
 
   // ── Usage, budgets and provider health ────────────────────────────────
@@ -1261,13 +1339,17 @@ export class BriefingWorkflow {
       ...(run.provider.until ? { until: run.provider.until } : {}) })
   }
 
-  /** A task's cap: its role's, the gap round's for a gap scout, or the rework or gap-round allowance once it was reopened. */
+  /** A task's cap: its lane's or role's, the gap round's for a gap scout, or the rework or gap-round allowance once it was reopened. */
   private capOf(run: BriefingRun, task: BriefingTask) {
     const tokens = run.budgets.tokens ?? DEFAULT_BUDGETS.tokens
     const gap = run.budgets.gapRound
     if (task.gap && gap) return gap.scoutTokens
-    if (!task.usageBaseline) return tokens.task[task.role]
-    return task.reopenedFor === "gap" && gap ? gap.leadTokens : tokens.rework ?? DEFAULT_BUDGETS.tokens.rework!
+    if (task.usageBaseline) return task.reopenedFor === "gap" && gap ? gap.leadTokens : tokens.rework ?? DEFAULT_BUDGETS.tokens.rework!
+    return (task.lane ? this.laneOf(run, task.lane)?.freshTokens : undefined) ?? tokens.task[task.role]
+  }
+
+  private laneOf(run: BriefingRun, id: string) {
+    return run.budgets.scoutMode === "lane" ? run.budgets.lanes?.find((lane) => lane.id === id) : undefined
   }
 
   /** Fresh tokens counted against the task's current cap. */
@@ -1516,6 +1598,10 @@ export class BriefingWorkflow {
       tokens: tokenBudgets(raw.token_budget as Record<string, unknown> | undefined),
       gapRound: gapRoundBudget(raw.gap_round as Record<string, unknown> | undefined),
       verification: verificationBudget(raw.verification as Record<string, unknown> | undefined, skillDir),
+      ...await (async () => {
+        const lanes = await sourceLanes(raw, skillDir)
+        return lanes ? { scoutMode: "lane" as const, lanes } : { scoutMode: "topic" as const }
+      })(),
       discovery: typeof raw.discovery === "boolean" ? raw.discovery : DEFAULT_BUDGETS.discovery,
       days: number("days", DEFAULT_BUDGETS.days),
     }
@@ -1526,6 +1612,9 @@ export class BriefingWorkflow {
     country?: BriefingCountry
     topic?: string
     category?: string
+    lane?: string
+    categories?: string[]
+    primaryLeads?: string[]
     questions?: string[]
     cases?: string[]
     leads?: string[]
@@ -1575,6 +1664,13 @@ export class BriefingWorkflow {
             suggested_categories: plan.categories,
             cases: plan.cases,
             cross_border_watch: run.plan.cross_border_watch,
+            ...(run.budgets.scoutMode === "lane" && run.budgets.lanes ? {
+              scout_mode: "lane",
+              lanes: run.budgets.lanes.map((lane) => ({
+                id: lane.id, title: lane.title, evidence_types: lane.evidenceTypes,
+                ...(lane.followUp ? { follow_up: true } : {}), ...(lane.primaryLeads ? { primary_leads: true } : {}),
+              })),
+            } : { scout_mode: "topic" }),
           },
         })
       } else {
@@ -1590,29 +1686,36 @@ export class BriefingWorkflow {
             ? `${requester.id} has used its ${limit} gap scout(s) for this round. Fill the gap yourself or report it as not_reached.`
             : `${requester.id} has used its budget of ${limit} scouts. Fill the gap yourself or record it in gaps.`)
         }
-        if (!previous && !input.topic?.trim()) throw new WorkflowError("A scout needs a topic.")
+        const lanePlan = previous ? null : await this.planLaneScout(run, requester, input)
+        const lane = previous?.lane ? this.laneOf(run, previous.lane) : lanePlan?.lane
+        const topic = previous ? String(previous.assignment.topic ?? "") : lanePlan?.topic ?? input.topic?.trim()
+        if (!previous && !topic) throw new WorkflowError("A scout needs a topic.")
         // The same request again (a retried call): the task it already made, not a second scout.
-        const same = own.find((entry) => !isTerminal(entry.state) && entry.assignment.topic === input.topic)
+        const same = own.find((entry) => !isTerminal(entry.state) && entry.assignment.topic === topic && entry.lane === lane?.id)
         if (!previous && same) {
-          return { taskId: same.id, state: same.state, chatId: same.chatId ?? null, dir: this.taskDir(run, same), note: "Already delegated with this topic; use briefing_wait for it." }
+          return { taskId: same.id, state: same.state, chatId: same.chatId ?? null, dir: this.taskDir(run, same), note: `Already delegated with this topic${lane ? ` in the ${lane.id} lane` : ""}; use briefing_wait for it.` }
         }
-        this.assertCanStart(run, "scout", "research", gap ? run.budgets.gapRound!.scoutTokens : undefined)
+        this.assertCanStart(run, "scout", "research", gap ? run.budgets.gapRound!.scoutTokens : lane?.freshTokens)
         const attempt = previous ? previous.attempt + 1 : 1
         const sequence = run.tasks.filter((entry) => entry.role === "scout" && entry.country === country && !entry.retryOf && Boolean(entry.gap) === Boolean(gap)).length + 1
         task = this.newTask(run, {
           id: previous ? `${previous.id.replace(/-a\d+$/, "")}-a${attempt}` : `${country}-${gap ? "g" : "s"}${String(sequence).padStart(2, "0")}`,
           role: "scout",
           country,
-          title: `${COUNTRY_NAMES[country]} ${gap ? `Gap scout · ${gap.gap_id}` : "Scout"} · ${(input.topic ?? String(previous?.assignment.topic ?? "")).slice(0, 40)}`,
+          title: `${COUNTRY_NAMES[country]} ${gap ? `Gap scout · ${gap.gap_id}` : "Scout"} · ${lane ? `${lane.id} · ` : ""}${(topic ?? "").slice(0, 40)}`,
           parentTaskId: requester.id,
           mergeInto: requester.id,
           attempt,
           retryOf: previous?.id,
           ...(gap ? { gap: gap.gap_id } : {}),
+          ...(lane ? { lane: lane.id } : {}),
           assignment: previous ? { ...previous.assignment, retry_note: input.brief ?? `Retry of ${previous.id}: ${previous.failure ?? ""}` } : {
             country,
-            topic: input.topic,
+            topic,
+            ...(lane ? { lane: lane.id, lane_title: lane.title, evidence_types: lane.evidenceTypes } : {}),
             ...(input.category ? { category: input.category } : {}),
+            ...(input.categories?.length ? { categories: input.categories } : {}),
+            ...(lanePlan?.leads.length ? { primary_leads: lanePlan.leads } : {}),
             questions: input.questions ?? [],
             cases: input.cases ?? [],
             discovery_leads: input.leads ?? [],
@@ -1630,6 +1733,85 @@ export class BriefingWorkflow {
       return { taskId: task.id, state: task.state, chatId: task.chatId ?? null, dir: this.taskDir(run, task),
         note: task.state === "queued" ? "Queued: it starts when a scout slot frees. briefing_wait covers queued tasks." : "Started. Use briefing_wait for its result." }
     })
+  }
+
+  /**
+   * A new scout's lane, topic and follow-up leads. In lane mode a scout names its lane, and a follow-up names leads
+   * the requester's run holds; in topic mode neither applies.
+   */
+  private async planLaneScout(run: BriefingRun, requester: BriefingTask, input: { topic?: string; lane?: string; primaryLeads?: string[] }) {
+    const lanes = run.budgets.scoutMode === "lane" ? run.budgets.lanes ?? [] : []
+    if (lanes.length === 0) {
+      if (input.lane || input.primaryLeads?.length) {
+        throw new WorkflowError("This run delegates scouts by topic (the Skill's workflow.json scout_mode is topic): lane and primaryLeads do not apply.")
+      }
+      return null
+    }
+    if (!input.lane) throw new WorkflowError(`This run splits scouts by source: give lane, one of ${lanes.map((lane) => lane.id).join(", ")}.`)
+    const lane = lanes.find((entry) => entry.id === input.lane)
+    if (!lane) throw new WorkflowError(`Unknown lane "${input.lane}"; this run's lanes are ${lanes.map((entry) => entry.id).join(", ")}.`)
+    const wanted = [...new Set(input.primaryLeads ?? [])]
+    let leads: Array<Record<string, unknown>> = []
+    if (wanted.length > 0) {
+      if (!lane.followUp) {
+        const able = lanes.filter((entry) => entry.followUp).map((entry) => entry.id)
+        throw new WorkflowError(`The ${lane.id} lane does not follow up primary leads; send them to ${able.join(" or ") || "no lane in this Skill"}.`)
+      }
+      const table = await this.primaryLeadTable(run, requester)
+      const problems = wanted.flatMap((id) => {
+        const lead = table.find((entry) => entry.lead_id === id)
+        if (!lead) return [`${id} is not one of your primary leads (${table.map((entry) => entry.lead_id).join(", ") || "none yet"})`]
+        if (!lead.event_id) return [`${id}: its event is no longer in your records`]
+        if (lead.follow_up && lead.follow_up.state !== "failed" && lead.follow_up.state !== "cancelled") return [`${id} is already followed up by ${lead.follow_up.task_id}`]
+        return []
+      })
+      if (problems.length > 0) throw new WorkflowError(`Not delegated: ${problems.join("; ")}.`)
+      leads = wanted.map((id) => {
+        const lead = table.find((entry) => entry.lead_id === id)!
+        return {
+          lead_id: lead.lead_id, event_id: lead.event_id, title: lead.title, date: lead.date ?? null, side: lead.side,
+          agency: lead.agency, document_hint: lead.document_hint,
+          ...(lead.url_hint ? { url_hint: lead.url_hint } : {}), ...(lead.why ? { why: lead.why } : {}),
+        }
+      })
+    }
+    const topic = input.topic?.trim() || (leads.length > 0 ? `${lane.title}: follow-up on ${wanted.join(", ")}` : lane.title)
+    return { lane, topic, leads }
+  }
+
+  /**
+   * The primary leads media-lane scouts handed to `requester`, in the requester's own event IDs (from the merge log),
+   * numbered in the order the scouts were delegated, with each lead's follow-up and its result.
+   */
+  private async primaryLeadTable(run: BriefingRun, requester: BriefingTask): Promise<PrimaryLead[]> {
+    if (run.budgets.scoutMode !== "lane") return []
+    const sources = this.children(run, requester).filter((task) => task.role === "scout" && task.lane && this.laneOf(run, task.lane)?.primaryLeads
+      && task.state === "accepted" && task.merged)
+    if (sources.length === 0) return []
+    const dir = this.taskDir(run, requester)
+    const log = await readJson<{ tasks?: Record<string, { events?: Record<string, string> }> }>(path.join(dir, "merge_log.json"))
+    const events = (await readJson<{ events?: Array<{ id: string; title?: string; date?: string | null; side?: string }> }>(path.join(dir, "events.json")))?.events ?? []
+    const followUps = this.children(run, requester).filter((task) => task.role === "scout" && Array.isArray(task.assignment.primary_leads))
+    const table: PrimaryLead[] = []
+    for (const scout of sources) {
+      for (const lead of (scout.accepted?.output as { primary_leads?: PrimaryLeadOutput[] } | undefined)?.primary_leads ?? []) {
+        const leadId = `L${String(table.length + 1).padStart(3, "0")}`
+        const mapped = log?.tasks?.[scout.id]?.events?.[lead.event_id]
+        const event = mapped ? events.find((entry) => entry.id === mapped) : undefined
+        // The latest follow-up for this lead: a retry or a second attempt replaces an earlier failed one.
+        const follow = [...followUps].reverse().find((task) => (task.assignment.primary_leads as Array<{ lead_id?: string }>).some((entry) => entry.lead_id === leadId))
+        const result = follow?.state === "accepted"
+          ? (follow.accepted?.output as { lead_results?: LeadResult[] } | undefined)?.lead_results?.find((entry) => entry.lead_id === leadId) : undefined
+        table.push({
+          lead_id: leadId, from_task: scout.id, event_id: event?.id ?? null,
+          ...(event ? { title: event.title, date: event.date ?? null, side: event.side } : {}),
+          agency: lead.agency, document_hint: lead.document_hint,
+          ...(lead.url_hint ? { url_hint: lead.url_hint } : {}), ...(lead.why ? { why: lead.why } : {}),
+          ...(follow ? { follow_up: { task_id: follow.id, state: follow.state, ...(result ? { outcome: result.outcome, note: result.note } : {}) } } : {}),
+        })
+      }
+    }
+    return table
   }
 
   private newTask(run: BriefingRun, fields: Omit<BriefingTask, "dir" | "state" | "createdAt" | "submissions">): BriefingTask {
@@ -1847,9 +2029,25 @@ export class BriefingWorkflow {
     const fails = check.findings.filter((finding) => finding.status === "FAIL")
     issues.push(...fails.map((finding) => `${finding.code}: ${finding.message}`))
     if (issues.length > 0) return this.refuse(issues)
-    await this.accept(run, task, output, check.findings.filter((finding) => finding.status !== "PASS"), check.summary)
-    return { accepted: true, taskId: task.id, warnings: check.findings.filter((finding) => finding.status === "UNVERIFIED").map((finding) => `${finding.code}: ${finding.message}`).slice(0, 20),
+    const findings = [...check.findings, ...task.role === "lead" ? await this.unhandledLeads(run, task, output) : []]
+    await this.accept(run, task, output, findings.filter((finding) => finding.status !== "PASS"), check.summary)
+    return { accepted: true, taskId: task.id, warnings: findings.filter((finding) => finding.status === "UNVERIFIED").map((finding) => `${finding.code}: ${finding.message}`).slice(0, 20),
       next: "Accepted. End your turn with a two-line summary; your records travel with the handoff." }
+  }
+
+  /**
+   * A lead's primary leads that no follow-up took and its gaps do not name: they travel to the chief as warnings, so a
+   * media-only report is not mistaken for one nobody could source.
+   */
+  private async unhandledLeads(run: BriefingRun, task: BriefingTask, output: Record<string, unknown>): Promise<CheckFinding[]> {
+    const gaps = JSON.stringify(output.gaps ?? [])
+    return (await this.primaryLeadTable(run, task))
+      .filter((lead) => lead.event_id && (!lead.follow_up || lead.follow_up.state === "failed" || lead.follow_up.state === "cancelled")
+        && !new RegExp(`\\b${lead.lead_id}\\b`).test(gaps))
+      .map((lead) => ({
+        status: "UNVERIFIED" as const, code: "PRIMARY_LEAD_UNHANDLED", event: lead.event_id, lead: lead.lead_id,
+        message: `${lead.lead_id} (${lead.event_id} ${(lead.title ?? "").slice(0, 50)}): reported only; ${lead.agency} — ${lead.document_hint} was not followed up, and gaps do not say why`,
+      }))
   }
 
   private async submitPlan(run: BriefingRun, task: BriefingTask) {
@@ -2634,7 +2832,36 @@ export class BriefingWorkflow {
     await this.fault("finalize:done")
   }
 
-  private summaryMarkdown(run: BriefingRun) {
+  /** Per lane: scouts, fresh tokens and records; the leads media raised and what follow-ups found; joins across lanes. */
+  private async laneStats(run: BriefingRun) {
+    if (run.budgets.scoutMode !== "lane" || !run.budgets.lanes) return null
+    const rows = run.budgets.lanes.map((lane) => {
+      const scouts = run.tasks.filter((task) => task.role === "scout" && task.lane === lane.id)
+      const count = (key: "events" | "claims") => scouts.reduce((sum, task) => sum + Number((task.accepted?.summary as Record<string, unknown> | undefined)?.[key] ?? 0), 0)
+      const conflicts = scouts.reduce((sum, task) => sum + (((task.mergeResult as { conflicts?: unknown[] } | undefined)?.conflicts)?.length ?? 0), 0)
+      return { lane: lane.id, scouts: scouts.length, accepted: scouts.filter((task) => task.state === "accepted").length,
+        fresh: scouts.reduce((sum, task) => sum + freshTokens(task.usage ?? emptyUsage()), 0), events: count("events"), claims: count("claims"), conflicts }
+    })
+    const laneOfTask = new Map(run.tasks.filter((task) => task.lane).map((task) => [task.id, task.lane!]))
+    let joined = 0
+    let raised = 0
+    let followed = 0
+    let found = 0
+    let notFound = 0
+    for (const lead of run.tasks.filter((task) => task.role === "lead" || task.role === "cross_border")) {
+      const events = (await readJson<{ events?: Array<{ provenance?: Array<{ task: string }> }> }>(path.join(this.taskDir(run, lead), "events.json")))?.events ?? []
+      joined += events.filter((event) => new Set((event.provenance ?? []).flatMap((origin) => laneOfTask.get(origin.task) ?? [])).size >= 2).length
+      for (const entry of await this.primaryLeadTable(run, lead)) {
+        raised += 1
+        if (entry.follow_up) followed += 1
+        if (entry.follow_up?.outcome === "found") found += 1
+        if (entry.follow_up?.outcome === "not_found") notFound += 1
+      }
+    }
+    return { rows, joined, leads: { raised, followed, found, notFound } }
+  }
+
+  private summaryMarkdown(run: BriefingRun, lanes: Awaited<ReturnType<BriefingWorkflow["laneStats"]>> = null) {
     const lines = [
       `# Multi-agent run ${run.runId}`,
       "",
@@ -2654,7 +2881,18 @@ export class BriefingWorkflow {
       "",
       "| Task | Role | Chat | State | Started | Ended | Fresh tokens | Note |",
       "|---|---|---|---|---|---|---:|---|",
-      ...run.tasks.map((task) => `| ${task.id} | ${task.role}${task.country ? ` (${task.country})` : ""} | ${task.chatId ?? "—"} | ${task.state} | ${task.startedAt ?? "—"} | ${task.endedAt ?? "—"} | ${freshTokens(task.usage ?? emptyUsage())} | ${(task.failure ?? "").replace(/\|/g, "/")} |`),
+      ...run.tasks.map((task) => `| ${task.id} | ${task.role}${task.country || task.lane ? ` (${[task.country, task.lane].filter(Boolean).join(", ")})` : ""} | ${task.chatId ?? "—"} | ${task.state} | ${task.startedAt ?? "—"} | ${task.endedAt ?? "—"} | ${freshTokens(task.usage ?? emptyUsage())} | ${(task.failure ?? "").replace(/\|/g, "/")} |`),
+      ...(lanes ? [
+        "",
+        "## Source lanes",
+        "",
+        "| Lane | Scouts (accepted) | Fresh tokens | Events | Claims | Merge conflicts |",
+        "|---|---|---:|---:|---:|---:|",
+        ...lanes.rows.map((row) => `| ${row.lane} | ${row.scouts} (${row.accepted}) | ${row.fresh} | ${row.events} | ${row.claims} | ${row.conflicts} |`),
+        "",
+        `- Events in a lead's records found by two or more lanes: ${lanes.joined}`,
+        `- Primary leads from media: ${lanes.leads.raised} raised, ${lanes.leads.followed} followed up, ${lanes.leads.found} found, ${lanes.leads.notFound} not found`,
+      ] : []),
       "",
       "## Stages",
       "",
@@ -2717,8 +2955,13 @@ export class BriefingWorkflow {
         if (isTerminal(task.state)) task.delivered = true
         return this.describeTask(run, task)
       })
+      const leads = run.budgets.scoutMode === "lane" && (actor.role === "lead" || actor.role === "cross_border") ? await this.primaryLeadTable(run, actor) : []
       await this.save(run)
       return { timedOut, runStatus: run.status, stage: run.stage, tasks: result, merged: merges,
+        ...(leads.length > 0 ? {
+          primaryLeads: leads,
+          primaryLeadsNote: "Reported events no lane has a primary source for yet. Send material ones to a follow-up scout (lane official or company, primaryLeads), or name them in gaps with the reason.",
+        } : {}),
         ...(timedOut ? { note: "Timed out; nothing was stopped. Call briefing_wait again or check briefing_status." } : {}) }
     })
   }
@@ -2728,6 +2971,7 @@ export class BriefingWorkflow {
       taskId: task.id,
       role: task.role,
       ...(task.country ? { country: task.country } : {}),
+      ...(task.lane ? { lane: task.lane } : {}),
       state: task.state,
       chatId: task.chatId ?? null,
       attempt: task.attempt,
@@ -2775,7 +3019,7 @@ export class BriefingWorkflow {
       executionMode: run.executionMode ?? "sandbox",
       sandbox: run.sandbox ?? null,
       tasks: run.tasks.map((task) => ({
-        taskId: task.id, role: task.role, country: task.country, state: task.state, chatId: task.chatId ?? null, failure: task.failure,
+        taskId: task.id, role: task.role, country: task.country, ...(task.lane ? { lane: task.lane } : {}), state: task.state, chatId: task.chatId ?? null, failure: task.failure,
         startedAt: task.startedAt, endedAt: task.endedAt,
         freshTokens: freshTokens(task.usage ?? emptyUsage()), cachedInputTokens: task.usage?.cachedInput ?? 0,
       })),

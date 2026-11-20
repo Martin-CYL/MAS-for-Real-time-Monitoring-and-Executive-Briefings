@@ -6,7 +6,7 @@ import path from "node:path"
 import { AgentCoordinator } from "./agent"
 import { NoopAnalyticsReporter } from "./analytics"
 import { AsyncQueue } from "./async-queue"
-import { BriefingWorkflow, buildRoleInstructions, extractSection, InjectedCrash, type FaultPoint, type PythonRunner } from "./briefing-workflow"
+import { BriefingWorkflow, buildRoleInstructions, extractSection, InjectedCrash, keepLane, type FaultPoint, type PythonRunner } from "./briefing-workflow"
 import type { CodexRestriction, SandboxRunner } from "./briefing-sandbox"
 import { createChatCommands } from "./chat-commands"
 import { EventStore } from "./event-store"
@@ -93,6 +93,12 @@ async function writeFixtureSkill(projectDir: string, budgets: Record<string, unk
     const includes = file === "reviewer.md" ? "SKILL.md#Step 3. Select" : "references/roles/protocol.md | SKILL.md#Ground rules | SKILL.md#Step 3. Select"
     await writeFile(path.join(skill, "references", "roles", file!), `${ROLE_HEAD(includes)}# ${title}\n`)
   }
+  await writeFile(path.join(skill, "references", "roles", "source-scout.md"), `${ROLE_HEAD("references/roles/protocol.md | SKILL.md#Ground rules")}# SOURCE-SCOUT-ROLE\n\nSHARED-LANE-TEXT\n\n## Lane: official\n\nOFFICIAL-LANE-TEXT\n\n## Lane: company\n\nCOMPANY-LANE-TEXT\n\n## Lane: media\n\nMEDIA-LANE-TEXT\n\n## Follow-up on primary leads\n\nFOLLOW-UP-TEXT\n`)
+  await writeFile(path.join(skill, "references", "roles", "lanes.json"), JSON.stringify({ lanes: [
+    { id: "official", title: "Official documents", evidence_types: ["official_document", "dataset"], follow_up: true },
+    { id: "company", title: "Company disclosures", evidence_types: ["company_statement", "dataset"], follow_up: true },
+    { id: "media", title: "Media reports", evidence_types: ["news", "other"], primary_leads: true },
+  ] }))
   await writeFile(path.join(skill, "references", "roles", "categories.json"), JSON.stringify({ categories: [{ id: "export_controls_sanctions" }, { id: "ai_models_capabilities" }] }))
   await writeFile(path.join(skill, "references", "roles", "workflow.json"), JSON.stringify({ discovery: false, ...budgets }))
   for (const script of ["brief.py", "merge_runs.py", "check_handoff.py", "check_provenance.py", "discover.py"]) {
@@ -279,8 +285,8 @@ async function setup(options: {
   }
 
   /** A lead delegates one scout, the scout submits and ends, the lead waits and submits. */
-  async function researchCountry(leadChat: string, leadDir: string, taskId: string) {
-    const scout = await workflow.delegate(leadChat, projectDir, { role: "scout", topic: "Synthetic topic" })
+  async function researchCountry(leadChat: string, leadDir: string, taskId: string, scoutInput: Omit<Parameters<typeof workflow.delegate>[2], "role"> = { topic: "Synthetic topic" }) {
+    const scout = await workflow.delegate(leadChat, projectDir, { role: "scout", ...scoutInput })
     await writeOutput(scout.dir, { task_id: scout.taskId })
     expect(await workflow.submit(scout.chatId!, projectDir, {})).toMatchObject({ accepted: true })
     codex.finish(scout.chatId!, "Scout done.")
@@ -304,9 +310,10 @@ async function setup(options: {
 
 
 /** Plays both country branches to accepted leads and returns once the chief has their results. */
-async function researchBoth(context: Awaited<ReturnType<typeof setup>>, run: Awaited<ReturnType<Awaited<ReturnType<typeof setup>>["startRun"]>>) {
-  await context.researchCountry(run.usLead, run.usDir, "us-lead")
-  await context.researchCountry(run.cnLead, run.cnDir, "cn-lead")
+async function researchBoth(context: Awaited<ReturnType<typeof setup>>, run: Awaited<ReturnType<Awaited<ReturnType<typeof setup>>["startRun"]>>,
+  scoutInput?: Parameters<Awaited<ReturnType<typeof setup>>["researchCountry"]>[3]) {
+  await context.researchCountry(run.usLead, run.usDir, "us-lead", scoutInput)
+  await context.researchCountry(run.cnLead, run.cnDir, "cn-lead", scoutInput)
   context.codex.finish(run.usLead)
   context.codex.finish(run.cnLead)
   await context.workflow.wait(run.chief, context.projectDir, {})
@@ -1659,5 +1666,175 @@ describe("gap round", () => {
     expect(state.tasks.find((task) => task.id === "us-lead")).toMatchObject({ state: "running", reopenedFor: "gap" })
     expect(await workflow.submit(run.chief, context.projectDir, { kind: "gap_plan" })).toMatchObject({ accepted: false, problems: ["The gap plan is already decided (gap round running)."] })
     expect(context.codex.turnsFor(run.usLead)).toHaveLength(1)
+  })
+})
+
+describe("source lanes", () => {
+  const LANES = { scout_mode: "lane", token_budget: { lane_fresh_tokens: { official: 120_000, media: 90_000 } } }
+
+  /** A lead's records as merge_runs.py leaves them: its events, and the map from each scout's event IDs to its own. */
+  async function leadRecords(dir: string, events: Array<{ id: string; title: string; date: string; side: string }>, map: Record<string, Record<string, string>>) {
+    await writeFile(path.join(dir, "events.json"), JSON.stringify({ events }))
+    await writeFile(path.join(dir, "merge_log.json"), JSON.stringify({ tasks: Object.fromEntries(Object.entries(map).map(([task, ids]) => [task, { events: ids }])) }))
+  }
+
+  test("a lane-mode Skill gives leads their lanes; each scout names one, reads only its part, and is checked against it", async () => {
+    const { startRun, workflow, codex, projectDir, calls, restart } = await setup({ budgets: LANES })
+    const run = await startRun()
+    expect(codex.turnsFor(run.usLead)[0]!.content).toContain('"scout_mode": "lane"')
+    const lead = JSON.parse(await readFile(path.join(run.usDir, "assignment.json"), "utf8"))
+    expect(lead.lanes.map((lane: { id: string }) => lane.id)).toEqual(["official", "company", "media"])
+    expect(lead.lanes[2]).toMatchObject({ evidence_types: ["news", "other"], primary_leads: true })
+
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "Export controls" })).rejects.toThrow("give lane, one of official, company, media")
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "rumours" })).rejects.toThrow('Unknown lane "rumours"')
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "media", primaryLeads: ["L001"] })).rejects.toThrow("does not follow up primary leads; send them to official or company")
+
+    const official = await workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "official", categories: ["export_controls_sanctions"] })
+    const media = await workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "media" })
+    expect(official).toMatchObject({ taskId: "us-s01", state: "running" })
+    // The same call again is the same task; the same topic in another lane is a new one.
+    expect(await workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "official", categories: ["export_controls_sanctions"] })).toMatchObject({ taskId: "us-s01", note: expect.stringContaining("official lane") })
+    expect(await workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "company", topic: "Official documents" })).toMatchObject({ taskId: "us-s03" })
+
+    const prompt = codex.turnsFor(official.chatId!)[0]!.content
+    expect(prompt).toContain("US Source Scout (official lane)")
+    for (const text of ["SOURCE-SCOUT-ROLE", "SHARED-LANE-TEXT", "OFFICIAL-LANE-TEXT", "FOLLOW-UP-TEXT", "PROTOCOL-TEXT"]) expect(prompt).toContain(text)
+    for (const text of ["MEDIA-LANE-TEXT", "COMPANY-LANE-TEXT", "# SCOUT-ROLE"]) expect(prompt).not.toContain(text)
+    expect(prompt).toContain("token budget about 120000 fresh tokens")
+    expect(codex.turnsFor(media.chatId!)[0]!.content).toContain("token budget about 90000 fresh tokens")
+    // A lane without its own cap gets the scout cap.
+    expect(codex.turnsFor(workflow.getRun(run.runId)!.tasks.find((task) => task.id === "us-s03")!.chatId!)[0]!.content).toContain("token budget about 250000 fresh tokens")
+    expect(JSON.parse(await readFile(path.join(official.dir, "assignment.json"), "utf8"))).toMatchObject({
+      lane: "official", lane_title: "Official documents", topic: "Official documents", evidence_types: ["official_document", "dataset"], categories: ["export_controls_sanctions"],
+    })
+
+    await writeFile(path.join(official.dir, "output.json"), JSON.stringify({ task_id: "us-s01", status: "complete", summary: "Quiet week." }))
+    expect(await workflow.submit(official.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    expect(calls.find((args) => path.basename(args[0]!) === "check_handoff.py" && args[1] === official.dir)!.slice(1)).toEqual(
+      [official.dir, "--role", "scout", "--lane", "official", "--json"])
+
+    const after = await restart()
+    expect(after.getRun(run.runId)!.tasks.filter((task) => task.role === "scout").map((task) => [task.id, task.lane])).toEqual([["us-s01", "official"], ["us-s02", "media"], ["us-s03", "company"]])
+  })
+
+  test("media leads return to the lead in its own event IDs, go to one follow-up, and unhandled ones reach the chief as warnings", async () => {
+    const { startRun, workflow, codex, projectDir, writeOutput } = await setup({ budgets: LANES })
+    const run = await startRun()
+    const media = await workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "media" })
+    await writeOutput(media.dir, { task_id: media.taskId, primary_leads: [
+      { event_id: "E001", agency: "BIS", document_hint: "Federal Register rule adding the entities", url_hint: "https://www.federalregister.gov/x", why: "Reported as in force" },
+      { event_id: "E002", agency: "OFAC", document_hint: "Designation notice" },
+    ] })
+    expect(await workflow.submit(media.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(media.chatId!)
+    await leadRecords(run.usDir, [
+      { id: "E004", title: "Synthetic entity listing", date: "2030-03-06", side: "us" },
+      { id: "E005", title: "Synthetic designation", date: "2030-03-07", side: "us" },
+    ], { "us-s01": { E001: "E004", E002: "E005" } })
+
+    const first = await workflow.wait(run.usLead, projectDir, {})
+    expect(first.primaryLeads).toEqual([
+      { lead_id: "L001", from_task: "us-s01", event_id: "E004", title: "Synthetic entity listing", date: "2030-03-06", side: "us", agency: "BIS",
+        document_hint: "Federal Register rule adding the entities", url_hint: "https://www.federalregister.gov/x", why: "Reported as in force" },
+      { lead_id: "L002", from_task: "us-s01", event_id: "E005", title: "Synthetic designation", date: "2030-03-07", side: "us", agency: "OFAC", document_hint: "Designation notice" },
+    ])
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "official", primaryLeads: ["L009"] })).rejects.toThrow("L009 is not one of your primary leads (L001, L002)")
+    const follow = await workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "official", primaryLeads: ["L001"] })
+    expect(JSON.parse(await readFile(path.join(follow.dir, "assignment.json"), "utf8"))).toMatchObject({
+      lane: "official", topic: "Official documents: follow-up on L001",
+      primary_leads: [{ lead_id: "L001", event_id: "E004", title: "Synthetic entity listing", date: "2030-03-06", side: "us", agency: "BIS" }],
+    })
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "company", primaryLeads: ["L001"] })).rejects.toThrow("L001 is already followed up by us-s02")
+
+    await writeOutput(follow.dir, { task_id: follow.taskId, lead_results: [{ lead_id: "L001", outcome: "found" }] })
+    expect((await workflow.submit(follow.chatId!, projectDir, {})).problems).toEqual(["output.json lead_results.0.event_id: a found lead names the event that records it"])
+    await writeOutput(follow.dir, { task_id: follow.taskId, lead_results: [{ lead_id: "L001", outcome: "found", event_id: "E001", note: "Final rule, effective on publication" }] })
+    expect(await workflow.submit(follow.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(follow.chatId!)
+    const second = await workflow.wait(run.usLead, projectDir, {})
+    expect(second.primaryLeads![0]!.follow_up).toEqual({ task_id: "us-s02", state: "accepted", outcome: "found", note: "Final rule, effective on publication" })
+    expect(second.primaryLeads![1]!.follow_up).toBeUndefined()
+
+    // L002 went nowhere and the gaps do not say why: accepted, with a warning that travels to the chief.
+    await writeOutput(run.usDir, { task_id: "us-lead" })
+    const handed = await workflow.submit(run.usLead, projectDir, {})
+    expect(handed).toMatchObject({ accepted: true })
+    expect(handed.warnings).toEqual([expect.stringMatching(/^PRIMARY_LEAD_UNHANDLED: L002 \(E005 Synthetic designation\): reported only; OFAC/)])
+    codex.finish(run.usLead)
+
+    // The China lead names its lead in gaps: no warning.
+    const cnMedia = await workflow.delegate(run.cnLead, projectDir, { role: "scout", lane: "media" })
+    await writeOutput(cnMedia.dir, { task_id: cnMedia.taskId, primary_leads: [{ event_id: "E001", agency: "MOFCOM", document_hint: "Export-control announcement" }] })
+    expect(await workflow.submit(cnMedia.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(cnMedia.chatId!)
+    await leadRecords(run.cnDir, [{ id: "E001", title: "Synthetic export notice", date: "2030-03-05", side: "cn" }], { "cn-s01": { E001: "E001" } })
+    expect((await workflow.wait(run.cnLead, projectDir, {})).primaryLeads).toHaveLength(1)
+    await writeOutput(run.cnDir, { task_id: "cn-lead", gaps: [{ topic: "L001", reason: "Low materiality; left as reported" }] })
+    expect(await workflow.submit(run.cnLead, projectDir, {})).toMatchObject({ accepted: true, warnings: [] })
+    codex.finish(run.cnLead)
+
+    const leads = await workflow.wait(run.chief, projectDir, {})
+    expect(leads.tasks.find((task) => task.taskId === "us-lead")!.checkFindings).toEqual([expect.objectContaining({ code: "PRIMARY_LEAD_UNHANDLED", lead: "L002", event: "E005" })])
+    const state = workflow.getRun(run.runId)!
+    const stats = await (workflow as unknown as { laneStats(run: unknown): Promise<{ rows: Array<{ lane: string; scouts: number }>; leads: Record<string, number> }> }).laneStats(state)
+    expect(stats.rows.map((row) => [row.lane, row.scouts])).toEqual([["official", 1], ["company", 0], ["media", 2]])
+    expect(stats.leads).toEqual({ raised: 3, followed: 1, found: 1, notFound: 0 })
+  })
+
+  test("topic mode refuses lanes, and a Skill asking for lanes without their role file runs topic scouts", async () => {
+    const topic = await setup()
+    const run = await topic.startRun()
+    expect(JSON.parse(await readFile(path.join(run.usDir, "assignment.json"), "utf8")).scout_mode).toBe("topic")
+    await expect(topic.workflow.delegate(run.usLead, topic.projectDir, { role: "scout", topic: "Export controls", lane: "official" })).rejects.toThrow("delegates scouts by topic")
+    expect(await topic.workflow.delegate(run.usLead, topic.projectDir, { role: "scout", topic: "Export controls" })).toMatchObject({ taskId: "us-s01" })
+    expect((await topic.workflow.wait(run.usLead, topic.projectDir, { timeoutSeconds: 1 })).primaryLeads).toBeUndefined()
+
+    const partial = await setup({ budgets: LANES })
+    await rm(path.join(partial.projectDir, ".agents", "skills", "us-china-ai-chip-briefing", "references", "roles", "source-scout.md"))
+    const older = await partial.startRun()
+    expect(partial.workflow.getRun(older.runId)!.budgets.scoutMode).toBe("topic")
+    const scout = await partial.workflow.delegate(older.usLead, partial.projectDir, { role: "scout", topic: "Export controls" })
+    expect(partial.codex.turnsFor(scout.chatId!)[0]!.content).toContain("SCOUT-ROLE")
+  })
+
+  test("in lane mode a gap scout names a lane: it reads and is checked as that lane, on the gap round's cap and time", async () => {
+    const GAPS = { gap_round: { enabled: true, max_gaps_pursued: 1, max_gap_scouts_per_lead: 1, scout_fresh_tokens: 40_000, scout_minutes: 10 } }
+    const context = await setup({ budgets: { ...LANES, ...GAPS } })
+    const { workflow, codex, projectDir, calls } = context
+    const run = await context.startRun()
+    await researchBoth(context, run, { lane: "media" })
+    await writeFile(path.join(run.runDir, "fixture-gaps.json"), JSON.stringify({ gaps: [
+      { gap_id: "G001", type: "case_unfollowed", side: "us", priority: 6, target: { case_id: "A001" }, why: "A001 has no event", suggested_source: "official_document" },
+    ] }))
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: false })
+    await writeFile(path.join(run.runDir, "gap_plan.json"), JSON.stringify({ decisions: [{ gap_id: "G001", action: "pursue", brief: "Check the Federal Register" }] }))
+    expect(await workflow.submit(run.chief, projectDir, { kind: "gap_plan" })).toMatchObject({ accepted: true, reopened: ["us-lead"] })
+    await until(() => codex.turnsFor(run.usLead).length === 2, "the gap-round turn")
+
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "Federal Register", gap: "G001" })).rejects.toThrow("give lane, one of official, company, media")
+    const scout = await workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "official", gap: "G001" })
+    expect(scout).toMatchObject({ taskId: "us-g01", state: "running" })
+    const task = workflow.getRun(run.runId)!.tasks.find((entry) => entry.id === "us-g01")!
+    expect(task).toMatchObject({ gap: "G001", lane: "official", title: "US Gap scout · G001 · official · Official documents",
+      assignment: { lane: "official", evidence_types: ["official_document", "dataset"], gap: { gap_id: "G001" } } })
+    // The gap round's cap (40000) and time, not the official lane's 120000.
+    expect(Date.parse(task.deadlineAt!) - Date.parse(task.startedAt!)).toBe(10 * 60_000)
+    const prompt = codex.turnsFor(scout.chatId!)[0]!.content
+    expect(prompt).toContain("token budget about 40000 fresh tokens")
+    expect(prompt).toContain("OFFICIAL-LANE-TEXT")
+    expect(prompt).not.toContain("MEDIA-LANE-TEXT")
+    await expect(workflow.delegate(run.usLead, projectDir, { role: "scout", lane: "media", gap: "G001" })).rejects.toThrow("used its 1 gap scout(s)")
+
+    await context.writeOutput(scout.dir, { task_id: "us-g01" })
+    expect(await workflow.submit(scout.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    expect(calls.find((args) => path.basename(args[0]!) === "check_handoff.py" && args[1] === scout.dir)!.slice(1)).toEqual(
+      [scout.dir, "--role", "scout", "--lane", "official", "--json"])
+  })
+
+  test("a lane keeps only its own section of the role file", () => {
+    const text = "# Scout\n\nshared\n\n## Lane: a\n\nA\n\n### detail\n\nA2\n\n## Lane: b\n\nB\n\n## After\n\nafter"
+    expect(keepLane(text, "a")).toBe("# Scout\n\nshared\n\n## Lane: a\n\nA\n\n### detail\n\nA2\n\n## After\n\nafter")
+    expect(keepLane(text, "b")).toBe("# Scout\n\nshared\n\n## Lane: b\n\nB\n\n## After\n\nafter")
   })
 })

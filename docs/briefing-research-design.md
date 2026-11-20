@@ -78,6 +78,7 @@ Each ablation removes one mechanism from arm D, on the same weeks.
 | Provenance and lost-claim checks | Silent claim drops between draft versions |
 | Wrap-up notices | Agents stopped at their cap before handing in; lost partial work |
 | Scouts (leads research alone) | Lower recall, lower cost |
+| Source lanes (scouts split by topic instead, see [briefing-source-lanes-design.md](briefing-source-lanes-design.md)) | More media-only claims shown with official labels; fewer media reports traced to the primary document |
 
 ## Order
 

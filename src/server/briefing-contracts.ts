@@ -33,7 +33,31 @@ function partialNeedsReason(value: { status: string; partial_reason?: string }, 
   }
 }
 
-export const scoutOutputSchema = z.object(research).superRefine(partialNeedsReason)
+/** A media-lane scout's pointer to the document or statement a reported event rests on (source lanes). */
+export const primaryLeadSchema = z.object({
+  event_id: eventId,
+  agency: text,
+  document_hint: text,
+  url_hint: z.string().optional(),
+  why: z.string().optional(),
+})
+
+/** A follow-up scout's answer for one primary lead it was given. */
+export const leadResultSchema = z.object({
+  lead_id: z.string().regex(/^L\d{3,}$/, "lead IDs look like L001"),
+  outcome: z.enum(["found", "not_found"]),
+  event_id: eventId.optional(),
+  note: z.string().default(""),
+}).superRefine((value, ctx) => {
+  if (value.outcome === "found" && !value.event_id) ctx.addIssue({ code: "custom", path: ["event_id"], message: "a found lead names the event that records it" })
+  if (value.outcome === "not_found" && !value.note.trim()) ctx.addIssue({ code: "custom", path: ["note"], message: "a lead not found needs a note saying what was searched" })
+})
+
+export const scoutOutputSchema = z.object({
+  ...research,
+  primary_leads: z.array(primaryLeadSchema).optional(),
+  lead_results: z.array(leadResultSchema).optional(),
+}).superRefine(partialNeedsReason)
 
 export const crossBorderRequestSchema = z.object({
   question: text,
@@ -123,6 +147,8 @@ export const verificationSchema = z.object({
 })
 
 export type ScoutOutput = z.infer<typeof scoutOutputSchema>
+export type PrimaryLeadOutput = z.infer<typeof primaryLeadSchema>
+export type LeadResult = z.infer<typeof leadResultSchema>
 export type LeadOutput = z.infer<typeof leadOutputSchema>
 export type CrossBorderOutput = z.infer<typeof crossBorderOutputSchema>
 export type BriefingPlan = z.infer<typeof planSchema>

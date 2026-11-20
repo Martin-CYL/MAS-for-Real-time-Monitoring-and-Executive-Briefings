@@ -1,7 +1,25 @@
 # 设计方案：按信息来源分工的搜索员（Source Lanes）
 
-状态：方案，未实现。依赖独立核验员（[briefing-verifier-design.md](briefing-verifier-design.md)，
-Nex 在 `feature/briefing-claim-verification`，Skill 在 `skill/briefing-claim-verification`），但两者可以分开开关。
+状态：已实现，未做真实运行，也还没做第 9 节的评估。Nex 在 `feature/briefing-source-lanes`（基于
+`feature/briefing-claim-verification`），Skill 在 `skill/briefing-source-lanes`（基于 `skill/briefing-claim-verification`）。
+默认仍是按题目分（`scout_mode: "topic"`），在 Skill 的 `workflow.json` 里改成 `"lane"` 才启用。
+现行行为以 [briefing-workflow.md](briefing-workflow.md) 的 "Source lanes" 一节为准。和独立核验员可以分开开关。
+
+实现与本方案的不同之处：
+
+- **线名从哪来**：`check_handoff.py` 默认从 `assignment.json` 的 `lane` 读线名，控制器同时传 `--lane`；
+  两者不一致时不通过（`LANE_MISMATCH`）。Scout 自己运行检查时结果和提交时一致。
+- **企业线的检查**：只检查类型（只能记 `company_statement` / `dataset`）。"把官方网站上的政府文件记成公司声明"
+  没法机械判断（EDGAR 和交易所网站本身就在官方名单里），所以没做这一条。
+- **线索怎么并到同一事件**：控制器根据 Lead 目录里的 `merge_log.json`，把媒体线 Scout 的事件编号换成 Lead 自己的
+  事件编号，并给每条线索编号 `L001…`。跟进的 Scout 拿到该事件的标题、日期和哪一方，必须用完全相同的值记录事件，
+  这样现有的合并规则（标题几乎相同、同一方、三天内）就会把两边并成一件事。交接检查用 `lead_results` 核对：
+  每条线索都要有 `found` 或 `not_found`；`found` 的事件必须标题、日期、哪一方一致，并且有一手来源的说法。
+- **未处理线索的提醒**：由控制器在 Lead 交接时给出（`PRIMARY_LEAD_UNHANDLED`，跟着交接结果到主编），
+  不在 `check_handoff.py` 里，因为只有控制器知道哪些线索已经派出跟进。在 `gaps` 里写明线索编号就不再提醒。
+- **每条线的上限**：放在 `workflow.json` 的 `token_budget.lane_fresh_tokens`。没有重跑预算模拟：
+  调低单个上限只会减少正在运行的 Scout 占用的额度，审稿、二审和核验的预留保证不受影响。
+- **按线统计**："被别的线印证的事件"按 Lead 记录里来源（provenance）跨两条线以上的事件计数。
 
 ## 1. 要解决什么
 

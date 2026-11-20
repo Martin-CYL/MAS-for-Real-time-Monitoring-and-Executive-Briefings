@@ -1,8 +1,8 @@
 # 设计方案：按缺口补搜一轮（Gap round）
 
-状态：已实现，未做实测和样本评估（2026-11-20）。Nex 在 `feature/briefing-gap-round`，Skill 在 `skill/briefing-gap-round`，
-分别基于独立核验的两个分支（`feature/briefing-claim-verification`、`skill/briefing-claim-verification`，
-设计见 [briefing-verifier-design.md](briefing-verifier-design.md)）。实现和本文不同的地方见第 15 节；
+状态：已实现，未做实测和样本评估（2026-11-20）。Nex 在 `feature/briefing-gap-round`，Skill 在 `skill/briefing-gap-round`。
+两者都已合入按来源分工（[briefing-source-lanes-design.md](briefing-source-lanes-design.md)），所以要在它之后合并；
+独立核验（[briefing-verifier-design.md](briefing-verifier-design.md)）也在其中。实现和本文不同的地方见第 15 节；
 运行方式见 [briefing-workflow.md](briefing-workflow.md) 的 Gap round 一节。是 [briefing-research-design.md](briefing-research-design.md)
 第 1 项"自适应分配"的第一步。
 

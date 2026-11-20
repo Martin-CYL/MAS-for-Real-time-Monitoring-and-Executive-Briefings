@@ -1,7 +1,7 @@
 # 设计方案：按信息来源分工的搜索员（Source Lanes）
 
-状态：已实现，未做真实运行，也还没做第 9 节的评估。Nex 在 `feature/briefing-source-lanes`（基于
-`feature/briefing-claim-verification`），Skill 在 `skill/briefing-source-lanes`（基于 `skill/briefing-claim-verification`）。
+状态：已实现，未做真实运行，也还没做第 9 节的评估。Nex 在 `feature/briefing-source-lanes`（基于 `main`，
+独立核验已在其中），Skill 在 `skill/briefing-source-lanes`（基于 `skill/briefing-claim-verification`）。
 默认仍是按题目分（`scout_mode: "topic"`），在 Skill 的 `workflow.json` 里改成 `"lane"` 才启用。
 现行行为以 [briefing-workflow.md](briefing-workflow.md) 的 "Source lanes" 一节为准。和独立核验员可以分开开关。
 

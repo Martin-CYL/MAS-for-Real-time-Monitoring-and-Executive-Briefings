@@ -35,6 +35,21 @@ workflow above is unchanged. Each agent works in its own `brief.py` run under `r
 `assessment`; an explicit decision settles merge conflicts), and `withdraw RUN CID --reason` (a claim leaves the
 report but stays in the ledger's `withdrawn` list; its ID is never reused).
 
+## Incremental monitor (phase 0)
+
+`scripts/discover.py --monitor --dir PROJECT/monitor` runs one tick of the monitor over the same sources, with no
+model tokens. Nex runs it every `tick_minutes` when started with `NEX_BRIEFING_MONITOR=1`; it can also be run by hand.
+Each tick scans the tiers that are due (`references/monitor.json`: official every 30 min, feeds every 2 h, news three
+times a day), reports only items not seen before (the first check of a source is a baseline), and keeps per-source
+health: a source unavailable for 6 h, or a listing that parses to nothing three times, raises an alert. Cases with a
+deadline in `references/active_cases.json` have their watched sources checked every 15 min from 72 h before the
+deadline; after it, one alert says what those sources listed. A "no notice seen" alert is a search result, never a
+statement that a status is unchanged. A daily digest of new official items, alerts and source health is written at
+08:30 Hong Kong time.
+
+Files in `DIR`: `state.json`, `log.jsonl`, `batches/<stamp>/items.json`, `digests/<date>.md`. All of it is discovery
+metadata, not evidence. Keep `active_cases.json` in step with `active_cases.md`. Tests: `tests/test_monitor.py`.
+
 ## Round 6: scripted news discovery (read first)
 
 `scripts/discover.py --start YYYY-MM-DD --end YYYY-MM-DD --out RUN/discovery` sweeps, in about a minute and with no

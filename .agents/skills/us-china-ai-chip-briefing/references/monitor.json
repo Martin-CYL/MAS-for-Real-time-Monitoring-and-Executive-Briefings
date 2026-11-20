@@ -1,0 +1,23 @@
+{
+  "note": "Incremental monitor (scripts/discover.py --monitor). Nex runs one tick every tick_minutes; each tick scans the tiers that are due. Frequencies, look-back, politeness and alert thresholds live here, not in code. Phase 0 of docs/briefing-monitor-design.md in the Nex repository: no model is called.",
+  "tick_minutes": 15,
+  "timezone": "Asia/Hong_Kong",
+  "tiers": {
+    "official": {"interval_minutes": 30, "lookback_days": 3, "groups": ["official_api", "official_listing"]},
+    "feeds": {"interval_minutes": 120, "lookback_days": 3, "groups": ["rss"]},
+    "news": {"interval_minutes": 480, "lookback_days": 2, "groups": ["news_search"], "max_queries": 40}
+  },
+  "deadline": {
+    "note": "From boost_hours_before a case deadline until watch_after_hours after it, the case's watch_sources are checked every interval_minutes. After the deadline, once each watched source has been checked, one alert says what was or was not listed.",
+    "boost_hours_before": 72,
+    "watch_after_hours": 24,
+    "interval_minutes": 15,
+    "lookback_days": 3
+  },
+  "min_interval_per_host_seconds": 2,
+  "min_score": 3,
+  "health": {"fail_hours": 6, "empty_runs": 3},
+  "seen_retention_days": 45,
+  "digest": {"time": "08:30", "timezone": "Asia/Hong_Kong"},
+  "scan_timeout_minutes": 10
+}

@@ -24,11 +24,12 @@ workflow above is unchanged. Each agent works in its own `brief.py` run under `r
 
 | File | Use |
 |---|---|
-| `references/roles/*.md` | Chief Editor, Country Lead, Topic Scout, Reviewer and the shared protocol. Each names the `SKILL.md` and reference sections it needs (`includes:`), which Nex inlines, so rules are not copied |
+| `references/roles/*.md` | Chief Editor, Country Lead, Topic Scout, Source Scout, Verifier, Reviewer and the shared protocol. Each names the `SKILL.md` and reference sections it needs (`includes:`), which Nex inlines, so rules are not copied |
 | `references/roles/categories.json` | Research categories a lead may assign; none is mandatory |
-| `references/roles/workflow.json` | Budgets: scouts per lead, concurrency, attempts, rework rounds, cross-border requests, minutes and fresh tokens per role and per run |
+| `references/roles/lanes.json` | Source lanes for `scout_mode: "lane"`: official documents, company disclosures, media. Each lane's evidence types; instructions in `source-scout.md` (`## Lane: <id>`) |
+| `references/roles/workflow.json` | `scout_mode` (`topic`, the default, or `lane`) and budgets: scouts per lead, fresh tokens per lane, concurrency, attempts, rework rounds, cross-border requests, minutes and fresh tokens per role and per run |
 | `scripts/merge_runs.py` | Merges accepted task runs into the parent run: new IDs, byte-identical snapshots, provenance, cautious joins, recorded conflicts |
-| `scripts/check_handoff.py` | Checks a task's records before handoff (window, decisions, Link/Size/New, quotes, claim kinds, hand edits, narrative, record IDs in shown text, and `STATUS_WORDING`: a claim saying enacted or in force while its event is marked proposed or its quote only shows a proposal) |
+| `scripts/check_handoff.py` | Checks a task's records before handoff (window, decisions, Link/Size/New, quotes, claim kinds, hand edits, narrative, record IDs in shown text, and `STATUS_WORDING`: a claim saying enacted or in force while its event is marked proposed or its quote only shows a proposal). For a scout with a lane: `LANE_EVIDENCE_TYPE` (a type the lane may not record), `LANE_SOURCE_HOST` (an official document from a host not listed as official), media `primary_leads` and follow-up `lead_results` |
 | `scripts/check_provenance.py` | Checks every accepted handoff reached the final run unchanged (claims, quotes, events, `proposed`/`unsupported`) |
 
 | `scripts/gaps.py` | The gap round: `brief.py gaps` lists coverage gaps by rule after the leads hand in; `brief.py gap-check` tests a reopened lead's `gap_results` against its records (see the module docstring) |

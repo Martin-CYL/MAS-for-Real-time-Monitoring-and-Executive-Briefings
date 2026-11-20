@@ -38,6 +38,29 @@ country-level analysis to the Chief Editor.
      here plausibly has an evidence-backed counterpart there (an affected company, a countermeasure, a supply chain).
 7. Run `python3 scripts/check_handoff.py TASK --role lead`, fix FAILs, call `briefing_submit`.
 
+## Source lanes
+
+When your assignment says `"scout_mode": "lane"`, scouts are split by **source**, not by topic, and steps 2–4 above
+work as follows. `assignment.json` `lanes` lists the lanes (`SKILL/references/roles/lanes.json`): usually `official`
+(government documents), `company` (company disclosures) and `media` (news reports).
+
+1. **First round.** Delegate one scout per lane with `briefing_delegate` (role `scout`, `lane`), the categories this
+   window needs for that lane (`categories`), questions, case IDs and discovery leads. `topic` is optional; it
+   defaults to the lane's title. Each lane may record only its own evidence types, so the official / company /
+   media labels come from who found what, not from a scout's own choice.
+2. **Merge.** `briefing_wait` merges what the lanes found. The same event found by two lanes is joined: one event
+   with an official claim and a media claim. Lanes that disagree (the document says proposed, a report says in
+   force) leave a `merge_conflicts` entry: settle it from the primary document, not the report.
+3. **Primary leads.** `briefing_wait` also returns `primaryLeads`: events media scouts found that rest on a document
+   or statement no lane has recorded yet, each with a lead ID (`L001`), your event ID and what to look for.
+4. **Second round.** Send the material leads to one follow-up scout of the lane that can source them
+   (`briefing_delegate`, `lane` `official` or `company`, `primaryLeads: ["L001", …]`). It records the primary claim
+   on an event with the same title, date and side, so the merge joins it to yours, and reports `found` or
+   `not_found` for each lead. The follow-up uses one of your scout slots.
+5. **Gaps.** A lead you do not follow up stays a media-only report. Name it in `gaps` with its lead ID and why
+   (`{"topic": "L002", "reason": "low materiality; reported only"}`); otherwise your handoff carries a
+   `PRIMARY_LEAD_UNHANDLED` warning to the Chief Editor.
+
 ## Gap round
 
 After your hand-in, the Chief Editor may send you gaps to fill, by ID (`G001`), each with its type, why it is a gap,
@@ -45,7 +68,8 @@ the kind of source to try (`suggested_source`) and a brief. Your chat keeps its 
 
 - Work in TASK as before. Fill a gap yourself, or delegate a gap scout: `briefing_delegate` (role `scout`,
   `gap: "G003"`, a narrow topic and questions). Gap scouts have their own small budget and do not count against your
-  first-round scouts.
+  first-round scouts. In lane mode, also give `lane`: the lane that may record the gap's `suggested_source` (for
+  `official_document`, `official`; for `company_statement`, `company`). The scout is checked as that lane.
 - Log every search with `brief.py search TASK "query" --found "…"`: "nothing found" is checked against that log.
 - For an active case, record the event with `--case A00x`; for an empty category, `--category`.
 - Add to `output.json` one entry per gap you were given, in `"gap_results"`:

@@ -1,11 +1,15 @@
 #!/usr/bin/env python3
 """Check one research task's records before its results are handed to the parent agent.
 
-  python3 scripts/check_handoff.py TASK_RUN --role scout|lead|cross_border|chief|verifier [--json]
+  python3 scripts/check_handoff.py TASK_RUN --role scout|lead|cross_border|chief|verifier [--lane LANE] [--json]
 
 TASK_RUN is a brief.py run directory with assignment.json (written by the workflow controller) and, except for the
 chief, narrative.md. Findings use the validator's PASS / FAIL / UNVERIFIED semantics: any FAIL means the handoff is
 refused and the agent must fix its records; UNVERIFIED items travel with the handoff for the parent to judge.
+
+A scout with a source lane (assignment.json `lane`, or --lane; lanes in references/roles/lanes.json) may record only
+its lane's evidence types; a media scout's primary leads must name its own events, and a follow-up scout must report
+every lead it was given, recording a found lead on an event the merge can join to the reported one.
 
 The check is mechanical. A quote found in a saved page shows the page says it, not that the claim is right or
 material, and a clean handoff is not a reviewed one.
@@ -23,9 +27,12 @@ import brief  # noqa: E402
 import evidence_tools as ev  # noqa: E402
 import gaps as gap_round  # noqa: E402
 from check_evidence import KINDS  # noqa: E402
+from check_quotes import host_of, is_official, load_domains  # noqa: E402
 from qa_common import finding, outcome  # noqa: E402
 
 ROLES = ('scout', 'lead', 'cross_border', 'chief', 'verifier')
+LANES_FILE = SCRIPTS.parent / 'references' / 'roles' / 'lanes.json'
+LEAD_OUTCOMES = ('found', 'not_found')
 VERDICTS = ('confirmed', 'contradicted', 'scope_differs', 'status_differs', 'not_found')
 MIN_NARRATIVE = 80
 # Record IDs mean nothing to a reader; the renderer prints tracked events' titles and reasons as they are.
@@ -52,7 +59,12 @@ def load(path, default=None):
         return {'_invalid': str(e)}
 
 
-def check(run, role):
+def lanes(path=LANES_FILE):
+    doc = load(path, {}) or {}
+    return {lane['id']: lane for lane in doc.get('lanes') or [] if isinstance(lane, dict) and lane.get('id')}
+
+
+def check(run, role, lane=None):
     run = Path(run)
     items = []
     add = lambda status, code, message, **kw: items.append(finding(status, code, message, **kw))
@@ -112,6 +124,19 @@ def check(run, role):
         if bad or not c.get('kinds'):
             add('FAIL', 'CLAIM_KINDS', f'{c["id"]}: kinds {bad or "missing"} are not accepted by the validator ({", ".join(sorted(KINDS))}); '
                 'withdraw it and add it again with valid --kind values', claim=c['id'])
+
+    assigned_lane = (assignment or {}).get('lane') if assignment and '_invalid' not in assignment else None
+    if lane and assigned_lane and lane != assigned_lane:
+        add('FAIL', 'LANE_MISMATCH', f'checked as lane {lane!r}, but assignment.json assigns lane {assigned_lane!r}')
+    lane = lane or (assigned_lane if role == 'scout' else None)
+    if lane:
+        known = lanes()
+        if role != 'scout':
+            add('FAIL', 'LANE_ROLE', f'only scouts have a source lane; {role} was given {lane!r}')
+        elif lane not in known:
+            add('FAIL', 'LANE_UNKNOWN', f'lane {lane!r} is not in references/roles/lanes.json ({", ".join(sorted(known)) or "none"})')
+        else:
+            check_lane(run, known[lane], assignment or {}, evs, claims, risk, add)
 
     if role == 'verifier':
         # A verifier's records are its own evidence for its verdicts; it decides no events and writes no narrative.
@@ -194,6 +219,90 @@ def check(run, role):
     return items
 
 
+def check_lane(run, lane, assignment, evs, claims, risk, add):
+    """A lane's scout records only its lane's evidence types; media leads and follow-up results are well formed."""
+    allowed = set(lane.get('evidence_types') or [])
+    host_bound = set(lane.get('official_host_required') or [])
+    domains = load_domains()
+    for c in claims.values():
+        for src in c.get('sources') or []:
+            etype = src.get('evidence_type')
+            if etype not in allowed:
+                add('FAIL', 'LANE_EVIDENCE_TYPE', f'{c["id"]}: recorded as {etype!r}, but the {lane["id"]} lane records only '
+                    f'{", ".join(sorted(allowed))}; withdraw it (another lane covers this source{", or hand it over as a primary lead" if lane.get("primary_leads") else ""})',
+                    claim=c['id'])
+            elif etype in host_bound and not is_official(host_of(src.get('url') or ''), domains):
+                add('FAIL', 'LANE_SOURCE_HOST', f'{c["id"]}: {etype} from {host_of(src.get("url") or "") or "an unknown host"}, which '
+                    'references/source_domains.json does not list as official; record the official original, or add the host there '
+                    'if it really is a government site', claim=c['id'])
+    output = load(run / 'output.json', {}) or {}
+    if '_invalid' in output:
+        return  # the workflow refuses an invalid output.json with its own message
+    by_id = {e['id']: e for e in evs}
+    if lane.get('primary_leads'):
+        led = set()
+        leads = output.get('primary_leads') or []
+        if not isinstance(leads, list):
+            add('FAIL', 'PRIMARY_LEAD_INVALID', 'output.json primary_leads must be a list of leads')
+            leads = []
+        for i, lead in enumerate(leads):
+            if not isinstance(lead, dict):
+                add('FAIL', 'PRIMARY_LEAD_INVALID', f'primary_leads[{i}] is not an object')
+                continue
+            eid = lead.get('event_id')
+            if eid not in by_id:
+                add('FAIL', 'PRIMARY_LEAD_EVENT', f'primary_leads[{i}]: event {eid!r} is not one of your events', event=eid)
+                continue
+            missing = [k for k in ('agency', 'document_hint') if not str(lead.get(k) or '').strip()]
+            if missing:
+                add('FAIL', 'PRIMARY_LEAD_INVALID', f'primary_leads[{i}] ({eid}): give {" and ".join(missing)}', event=eid)
+                continue
+            led.add(eid)
+        questions = ' '.join(str(q) for q in output.get('open_questions') or [])
+        for e in evs:
+            if e.get('decision') in ('include', 'track') and e.get('materiality') == 'high' and e['id'] not in led \
+                    and e['id'] not in questions and not any(brief.is_primary(claims[c]) for c in e.get('claim_ids') or [] if c in claims):
+                add('UNVERIFIED', 'MEDIA_EVENT_NO_LEAD', f'{e["id"]} ({(e.get("title") or "")[:50]}): high materiality and only reported; add a '
+                    'primary lead for the document or statement it rests on, or say in open_questions why there is none', event=e['id'])
+    assigned = {lead.get('lead_id'): lead for lead in assignment.get('primary_leads') or [] if isinstance(lead, dict)}
+    if not assigned:
+        return
+    results = output.get('lead_results') or []
+    seen = set()
+    for i, r in enumerate(results if isinstance(results, list) else []):
+        lid = r.get('lead_id') if isinstance(r, dict) else None
+        if lid not in assigned:
+            add('FAIL', 'LEAD_RESULT_UNASSIGNED', f'lead_results[{i}]: {lid!r} is not one of your leads ({", ".join(sorted(map(str, assigned)))})')
+            continue
+        if lid in seen:
+            add('FAIL', 'LEAD_RESULT_DUPLICATE', f'{lid}: more than one result')
+        seen.add(lid)
+        outcome_ = r.get('outcome')
+        if outcome_ not in LEAD_OUTCOMES:
+            add('FAIL', 'LEAD_RESULT_OUTCOME', f'{lid}: outcome {outcome_!r} is not found or not_found')
+            continue
+        if outcome_ == 'not_found':
+            if not str(r.get('note') or '').strip():
+                add('FAIL', 'LEAD_RESULT_NOTE', f'{lid}: not_found needs a note saying what you searched')
+            continue
+        lead, e = assigned[lid], by_id.get(r.get('event_id'))
+        if e is None:
+            add('FAIL', 'LEAD_RESULT_EVENT', f'{lid}: found, but event {r.get("event_id")!r} is not one of your events')
+            continue
+        differs = [k for k in ('title', 'date', 'side') if (e.get(k) or None) != (lead.get(k) or None)]
+        if differs:
+            add('FAIL', 'LEAD_RESULT_MISMATCH', f'{lid}: {e["id"]} differs from the lead\'s event in {", ".join(differs)} '
+                f'({"; ".join(f"{k} {lead.get(k)!r}" for k in differs)}); the merge joins them only when title, date and side match',
+                event=e['id'])
+        primary = [c for c in e.get('claim_ids') or [] if c in claims and brief.is_primary(claims[c])
+                   and risk.get(c, {}).get('quote_state') == 'FOUND']
+        if not primary:
+            add('FAIL', 'LEAD_RESULT_NO_PRIMARY', f'{lid}: {e["id"]} has no claim from a primary source; record it with add-claim, '
+                'or report the lead as not_found', event=e['id'])
+    for lid in sorted(set(map(str, assigned)) - seen):
+        add('FAIL', 'LEAD_RESULT_MISSING', f'{lid}: no result in output.json lead_results; report found or not_found')
+
+
 def check_verification(run, assignment, claims, risk, add):
     """verification.json: a verdict for every assigned claim, each but not_found backed by the verifier's own
     recorded claims whose quotes were found in pages it saved."""
@@ -242,8 +351,9 @@ def summary(run):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('run'); ap.add_argument('--role', choices=ROLES, required=True); ap.add_argument('--json', action='store_true')
+    ap.add_argument('--lane', help='source lane (references/roles/lanes.json); default: assignment.json lane')
     a = ap.parse_args()
-    items = check(a.run, a.role)
+    items = check(a.run, a.role, a.lane)
     result = {'outcome': outcome(items), 'findings': items}
     if not any(x['code'] in ('RECORD_MISSING', 'RECORD_INVALID') for x in items):
         result['summary'] = summary(a.run)

@@ -1,0 +1,142 @@
+{
+  "schema": 1,
+  "about": "Controls for scripts/replay_eval.py. Each case makes one change to a clean synthetic report built by brief.py (fictional events; the only URL, www.example.gov, is never fetched) and says whether the mechanical QA should notice it. Origins name the live-run review findings a case reproduces; no live-run text or source is copied here.",
+  "cases": [
+    {
+      "id": "clean",
+      "control": "positive",
+      "problem": "A clean report built by brief.py from one opened official source and the tracked cases.",
+      "mutations": [],
+      "expect": {
+        "no_fail": true
+      }
+    },
+    {
+      "id": "verified-wording",
+      "control": "negative",
+      "origin": [
+        "existing rule; this case found that 'note' before 'verified' was read as 'not'"
+      ],
+      "problem": "The report says a fact was verified; the workflow never verifies facts on its own.",
+      "mutations": [
+        {
+          "op": "replace",
+          "find": "Synthetic judgment note 2.",
+          "replace": "Synthetic judgment note 2, fully verified."
+        }
+      ],
+      "expect": {
+        "codes": [
+          "VERIFIED_WORDING"
+        ]
+      }
+    },
+    {
+      "id": "unsupported-row-amber",
+      "control": "negative",
+      "origin": [
+        "mas-20261022-173211-7579 review-1 R004",
+        "mas-20261106-075318-300b review-3 R002"
+      ],
+      "problem": "A status-table row whose evidence reads 'not obtained or not yet checked' carries the amber dot, which the legend defines as a media report.",
+      "mutations": [
+        {
+          "op": "status_dot",
+          "row": 1,
+          "to": "a"
+        }
+      ],
+      "expect": {
+        "codes": [
+          "STATUS_DOT_MISMATCH"
+        ]
+      }
+    },
+    {
+      "id": "unresolved-row-green",
+      "control": "negative",
+      "origin": [
+        "mas-20261106-075318-300b review-1 R002",
+        "mas-20261022-173211-7579 review-1 R002"
+      ],
+      "problem": "A row whose current status is unresolved carries the green dot, which the legend defines as an official or company announcement.",
+      "mutations": [
+        {
+          "op": "status_dot",
+          "row": 1,
+          "to": "g"
+        }
+      ],
+      "expect": {
+        "codes": [
+          "STATUS_DOT_MISMATCH"
+        ]
+      }
+    },
+    {
+      "id": "confirmed-row-slate",
+      "control": "negative",
+      "origin": [
+        "mas-20261022-173211-7579 review-1 R004"
+      ],
+      "problem": "A row with an opened official source carries the slate dot, which the legend defines as proposed or pending.",
+      "mutations": [
+        {
+          "op": "status_dot",
+          "row": 0,
+          "to": "s"
+        }
+      ],
+      "expect": {
+        "codes": [
+          "STATUS_DOT_MISMATCH"
+        ]
+      }
+    },
+    {
+      "id": "legal-deadline-unmarked",
+      "control": "negative",
+      "origin": [
+        "mas-20261022-173211-7579 review-1 R005",
+        "mas-20261106-075318-300b review-1 R002"
+      ],
+      "problem": "A headline judgment states a legal deadline with no claim marker and no visible source link.",
+      "mutations": [
+        {
+          "op": "replace",
+          "find": "Synthetic judgment note 1.",
+          "replace": "Synthetic judgment note 1. Six synthetic control measures stay suspended until March 30, 2026."
+        }
+      ],
+      "expect": {},
+      "known_gap": "Dates and legal premises are checked inside claim spans only; prose outside any data-claim-id is left to the reviewer."
+    },
+    {
+      "id": "scope-overbroad",
+      "control": "negative",
+      "detector": "reviewer",
+      "origin": [
+        "mas-20261106-075318-300b review-3 R001"
+      ],
+      "problem": "A group of notices is described by the subject of only some of them (six notices called rare-earth measures when four are)."
+    },
+    {
+      "id": "closed-item-as-milestone",
+      "control": "negative",
+      "detector": "reviewer",
+      "origin": [
+        "mas-20261022-173211-7579 review-1 R007"
+      ],
+      "problem": "A transaction the story says has completed is still listed under next milestones."
+    },
+    {
+      "id": "lead-without-other-side",
+      "control": "negative",
+      "detector": "reviewer",
+      "origin": [
+        "mas-20261022-173211-7579 review-1 R001"
+      ],
+      "problem": "The headline ranks one side's signal first although the other side's research is missing."
+    }
+  ]
+}

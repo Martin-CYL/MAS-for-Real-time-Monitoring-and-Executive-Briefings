@@ -239,6 +239,7 @@ def validate_report(raw, expected_date=None, glossary=None):
             add('FAIL','STATUS_MISMATCH',f'Class {state} differs from data-evidence-status {declared}',line=n.line)
         if state=='confirmed' and re.fullmatch(r'\s*(?:媒体报道|未经独立验证|尚未核验|(?i:media reports?|not independently (?:verified|confirmed)|unverified))\s*',n.text()):
             add('FAIL','STATUS_MISMATCH','Confirmed label explicitly says unverified/reporting',line=n.line)
+    items.extend(status_dots(doc))
     if re.search(r'\.st\.pending\s*:{1,2}before\s*\{[^}]*var\(\s*--red\s*\)',raw):
         add('FAIL','STATUS_COLOUR','Pending uses red rather than slate')
 
@@ -271,6 +272,58 @@ REQUIRED_SECTIONS = (
 VERIFIED_WORDS = r'已验证|已核实|已核验|经核实|(?i:\bfully verified\b|\bverified\b)'
 
 
+# Evidence wording brief.py writes in the status table (brief.LABELS[lang]['evidence'], 'proposed', 'verify_gap';
+# tests keep them in step), and the dot class each one gets there.
+ROW_EVIDENCE = (
+    {'supported': 'Official or company source opened', 'partial': 'Media reports only',
+     'unresolved': 'Original not obtained or not yet checked', 'unsupported': 'Core claim not supported by a source',
+     'proposed': 'Proposed:', 'verify_gap': 'an independent check found no source for a key claim'},
+    {'supported': '官方或公司原文已打开', 'partial': '仅有媒体报道', 'unresolved': '原文未能取得或尚未核实',
+     'unsupported': '核心说法无法得到来源支持', 'proposed': '拟议：', 'verify_gap': '独立核验未能找到关键说法的来源'},
+)
+DOT_STATE = (({'g', 'key-dot'}, 'confirmed'), ({'a', 'report'}, 'reported'), ({'s', 'pending'}, 'pending'),
+             ({'u', 'unverified'}, 'unverified'))
+
+
+def dot_state(classes):
+    return next((state for names, state in DOT_STATE if classes & names), None)
+
+
+def row_state(text):
+    """The status brief.py shows for a row with this evidence text, or None when the text is not its wording
+    (a hand-written table is then left to the reviewer)."""
+    for words in ROW_EVIDENCE:
+        proposed = text.startswith(words['proposed'])
+        body = text[len(words['proposed']):].strip() if proposed else text
+        status = next((k for k in ('supported', 'partial', 'unresolved', 'unsupported') if body.startswith(words[k])), None)
+        if status is None:
+            continue
+        if proposed:
+            return 'pending'
+        if status in ('unresolved', 'unsupported'):
+            return 'unverified'
+        if status == 'supported':
+            return 'unverified' if words['verify_gap'] in body else 'confirmed'
+        return 'reported'
+    return None
+
+
+def status_dots(doc):
+    """A status-table dot must match its row's evidence text: the legend gives each colour a meaning, and an amber
+    "media report" or green "official" dot on a row with no source misstates the evidence. Live reviews found this
+    twice after agents edited report.html by hand."""
+    items = []
+    for dot in doc.nodes:
+        if dot.tag != 'i' or 'dot' not in dot.classes or not dot.parent or dot.parent.tag != 'td':
+            continue
+        shown, text = dot_state(dot.classes), normalized(dot.parent.text())
+        want = row_state(text)
+        if shown and want and shown != want:
+            items.append(finding('FAIL', 'STATUS_DOT_MISMATCH', f'Status-table dot shows {shown}; the row\'s evidence reads {want}',
+                                 line=dot.line, excerpt=text[:80]))
+    return items
+
+
 def required_structure(doc, text, legend_map):
     """Structural rules that a model writing its own HTML could otherwise bypass."""
     items = []
@@ -283,8 +336,9 @@ def required_structure(doc, text, legend_map):
                              'No template status labels (class "st confirmed|reported|pending"); custom badges are not checked against the legend'))
     if has_stories and not legend_map:
         items.append(finding('FAIL', 'SECTION_MISSING', 'No machine-readable status legend (.status-key with dot classes g/a/s)', field='状态图例'))
+    # Whole negation words only: 'note', 'notice', 'United' or 'under' before 'verified' do not excuse it.
     hits = [m for m in re.finditer(VERIFIED_WORDS, text)
-            if not re.search(r'(?i)(\bnot|\bnever|\bun|\byet to be|\bcannot be|\bcould not be)\W*(?:\w+\W+){0,2}$', text[max(0, m.start() - 30):m.start()])]
+            if not re.search(r'(?i)(\bnot\b|\bnever\b|\bun\b|\byet to be|\bcannot be|\bcould not be)\W*(?:\w+\W+){0,2}$', text[max(0, m.start() - 30):m.start()])]
     if hits:
         words = sorted({m[0] for m in hits})
         items.append(finding('FAIL', 'VERIFIED_WORDING',

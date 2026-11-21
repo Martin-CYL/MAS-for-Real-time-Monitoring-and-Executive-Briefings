@@ -176,6 +176,30 @@ python3 scripts/validate.py tests/fixtures/flawed_report.html --ledger tests/fix
 
 Expected: dates/figures FAIL, legal C002 FAIL, late definition/unchecked links/human hold UNVERIFIED, valid traceability/recorded C001 review PASS. `tests/evaluate_fixtures.py` additionally simulates reachable/404/403 sources, clearly labeled **mock** in the QA report. `evaluation/flawed_mock/review_report.md` in the delivery package is a generated example of all three statuses and human sign-off prompts.
 
+### Replay evaluation (no model call)
+
+```sh
+python3 scripts/replay_eval.py controls
+python3 scripts/replay_eval.py runs PATH/TO/RUN [PATH/TO/RUN ...] --output-dir PATH/OUTSIDE/GIT [--baseline OLD/replay-runs.json]
+```
+
+`controls` builds a clean synthetic report with `brief.py`, then applies the one-change cases in
+`evaluation/replay-cases.json`, each reproducing a finding from a live run's review. It reports which ones the
+mechanical QA notices. Cases it misses today are marked `known_gap`, so the tool still exits 0. When one of them starts
+being caught, the tool exits 1 until the case is updated. Findings only a reviewer can judge are listed but not run.
+Current result: 4 of 5 noticed. The remaining known gap is a legal deadline stated outside any claim.
+
+`check_report.py` fails `STATUS_DOT_MISMATCH` when a status-table dot disagrees with its row's `brief.py` evidence
+wording. Examples: amber "media report" on a row with no source, or green "official" on an unresolved one. Both live
+reviews found this after report.html was edited by hand. Rows in other wording are left to the reviewer.
+
+`runs` replays finished runs without writing them. It runs QA on the recorded report, then rebuilds the report with the
+current `brief.py` and runs QA again. It also counts status-table rows whose dot disagrees with the row's evidence text.
+With `--baseline` it lists the changes and exits 1 on a regression. A rebuilt report regresses when it gains a FAIL
+code, drops in readiness, or has more mismatched rows. An unchanged recorded report regresses when it loses a FAIL
+code, because that means the checks got looser. A new FAIL on an unchanged report is shown as a stricter check. Scorecards quote short row excerpts from the runs given, so keep them with the run data, out of Git.
+Tests: `tests/test_replay_eval.py`.
+
 ## Optional browser layout checks
 
 Only this check needs Python Playwright and Chromium. Install trusted distributions if not present (`python3 -m pip install playwright`, then use an installed Chromium via `--chromium`, or the browser installer supported by Playwright). No browser dependency is imposed on the core Skill.

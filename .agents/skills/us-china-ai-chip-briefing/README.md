@@ -158,6 +158,26 @@ python3 scripts/validate.py tests/fixtures/flawed_report.html --ledger tests/fix
 
 Expected: dates/figures FAIL, legal C002 FAIL, late definition/unchecked links/human hold UNVERIFIED, valid traceability/recorded C001 review PASS. `tests/evaluate_fixtures.py` additionally simulates reachable/404/403 sources, clearly labeled **mock** in the QA report. `evaluation/flawed_mock/review_report.md` in the delivery package is a generated example of all three statuses and human sign-off prompts.
 
+### Replay evaluation (no model call)
+
+```sh
+python3 scripts/replay_eval.py controls
+python3 scripts/replay_eval.py runs PATH/TO/RUN [PATH/TO/RUN ...] --output-dir PATH/OUTSIDE/GIT [--baseline OLD/replay-runs.json]
+```
+
+`controls` builds a clean synthetic report with `brief.py`, then applies the one-change cases in
+`evaluation/replay-cases.json`, each reproducing a finding from a live run's review. It reports which ones the
+mechanical QA notices. Cases it misses today are marked `known_gap`, so the tool still exits 0. When one of them starts
+being caught, the tool exits 1 until the case is updated. Findings only a reviewer can judge are listed but not run.
+Current result: 1 of 5 noticed. The 4 known gaps are status-table dots that disagree with their row's evidence
+text, and a legal deadline stated outside any claim.
+
+`runs` replays finished runs without writing them. It runs QA on the recorded report, then rebuilds the report with the
+current `brief.py` and runs QA again. It also audits each status-table row's dot against that row's evidence text.
+With `--baseline` it lists the changes and exits 1 when a run got worse: a new FAIL code, lower readiness, or more
+mismatched rows. Scorecards quote short row excerpts from the runs given, so keep them with the run data, out of Git.
+Tests: `tests/test_replay_eval.py`.
+
 ## Optional browser layout checks
 
 Only this check needs Python Playwright and Chromium. Install trusted distributions if not present (`python3 -m pip install playwright`, then use an installed Chromium via `--chromium`, or the browser installer supported by Playwright). No browser dependency is imposed on the core Skill.

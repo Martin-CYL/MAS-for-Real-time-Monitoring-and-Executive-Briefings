@@ -283,8 +283,9 @@ def required_structure(doc, text, legend_map):
                              'No template status labels (class "st confirmed|reported|pending"); custom badges are not checked against the legend'))
     if has_stories and not legend_map:
         items.append(finding('FAIL', 'SECTION_MISSING', 'No machine-readable status legend (.status-key with dot classes g/a/s)', field='状态图例'))
+    # Whole negation words only: 'note', 'notice', 'United' or 'under' before 'verified' do not excuse it.
     hits = [m for m in re.finditer(VERIFIED_WORDS, text)
-            if not re.search(r'(?i)(\bnot|\bnever|\bun|\byet to be|\bcannot be|\bcould not be)\W*(?:\w+\W+){0,2}$', text[max(0, m.start() - 30):m.start()])]
+            if not re.search(r'(?i)(\bnot\b|\bnever\b|\bun\b|\byet to be|\bcannot be|\bcould not be)\W*(?:\w+\W+){0,2}$', text[max(0, m.start() - 30):m.start()])]
     if hits:
         words = sorted({m[0] for m in hits})
         items.append(finding('FAIL', 'VERIFIED_WORDING',

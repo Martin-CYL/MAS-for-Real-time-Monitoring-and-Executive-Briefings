@@ -42,6 +42,7 @@ FIXES = {
     'LEDGER_MISSING': 'Create evidence_ledger.json and record every [[Cxxx]] claim with its source and verbatim quote.',
     'COVERAGE_SWEEP_MISSING': 'Create coverage.json and record every candidate event and every active case with a decision.',
     'SECTION_MISSING': 'Add the missing section, copied from assets/template.html.',
+    'STATUS_DOT_MISMATCH': 'Give the status-table row the dot its evidence text implies (see the key), or rebuild with brief.py build instead of editing report.html.',
     'STATUS_LABELS_MISSING': 'Mark each story with one template status label (class "st confirmed|reported|pending").',
     'VERIFIED_WORDING': 'Remove claims of verification ("verified", 已验证). Use the legend labels: "Official or company announcement" / "Media report, not independently confirmed" / "Proposed, pending approval or not yet in force".',
     'FIRST_USE': 'Explain this term at its first visible use, e.g. "the US Bureau of Industry and Security (BIS)".',

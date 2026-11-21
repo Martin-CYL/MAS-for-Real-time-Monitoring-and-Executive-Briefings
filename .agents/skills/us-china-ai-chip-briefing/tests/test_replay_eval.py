@@ -13,7 +13,8 @@ import unittest.mock
 SKILL = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL / 'scripts'))
 import replay_eval as rv  # noqa: E402
-from check_report import validate_report  # noqa: E402
+import brief  # noqa: E402
+from check_report import ROW_EVIDENCE, row_state, validate_report  # noqa: E402
 
 
 def quiet(fn, *args, **kwargs):
@@ -39,10 +40,10 @@ class ControlTests(unittest.TestCase):
         self.assertGreater(rows['rows'], 1)
         self.assertEqual((rows['unparsed'], rows['mismatched']), (0, []))
 
-    def test_wrong_dot_is_seen_by_the_row_audit(self):
-        # The QA misses it today (known gap); the replay's own audit does not.
-        self.assertEqual(self.results['unsupported-row-amber']['verdict'], 'KNOWN_GAP')
-        self.assertEqual([(m['dot'], m['expected']) for m in self.results['unsupported-row-amber']['rows']['mismatched']], [('a', 'u')])
+    def test_wrong_dot_fails_the_qa_and_the_row_audit(self):
+        r = self.results['unsupported-row-amber']
+        self.assertEqual((r['verdict'], r['new_codes']), ('DETECTED', ['STATUS_DOT_MISMATCH']))
+        self.assertEqual([(m['shown'], m['expected']) for m in r['rows']['mismatched']], [('reported', 'unverified')])
 
     def test_known_gap_that_is_now_caught_fails_until_the_case_is_updated(self):
         cases = copy.deepcopy(self.cases)
@@ -54,10 +55,10 @@ class ControlTests(unittest.TestCase):
 
     def test_negative_control_without_known_gap_must_be_caught(self):
         cases = copy.deepcopy(self.cases)
-        case = next(c for c in cases if c['id'] == 'confirmed-row-slate')
+        case = next(c for c in cases if c['id'] == 'legal-deadline-unmarked')
         del case['known_gap']
         results = rv.run_controls(cases)
-        self.assertEqual(results['confirmed-row-slate']['verdict'], 'MISSED')
+        self.assertEqual(results['legal-deadline-unmarked']['verdict'], 'MISSED')
         self.assertFalse(rv.controls_summary(cases, results)['ok'])
 
     def test_cli_exit_code_and_output_files(self):
@@ -84,16 +85,6 @@ class MutationTests(unittest.TestCase):
         for bad in ({'op': 'status_dot', 'row': 5, 'to': 'a'}, {'op': 'status_dot', 'row': 0, 'to': 'g'}, {'op': 'drop'}):
             with self.assertRaises(rv.CaseError):
                 rv.mutate(self.PAGE, bad)
-
-    def test_expected_dot_follows_brief_labels_in_both_languages(self):
-        self.assertEqual(rv.expected_dot('Official or company source opened'), 'g')
-        self.assertEqual(rv.expected_dot('Media reports only; Reuters said'), 'a')
-        self.assertEqual(rv.expected_dot('Core claim not supported by a source'), 'u')
-        self.assertEqual(rv.expected_dot('Proposed: Media reports only'), 's')
-        self.assertEqual(rv.expected_dot('Official or company source opened; an independent check found no source for a key claim'), 'u')
-        self.assertEqual(rv.expected_dot('仅有媒体报道'), 'a')
-        self.assertEqual(rv.expected_dot('拟议：官方或公司原文已打开'), 's')
-        self.assertIsNone(rv.expected_dot('Something a model wrote'))
 
     def test_case_file_needs_one_positive_control(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -134,10 +125,61 @@ class RunReplayTests(unittest.TestCase):
             change = json.loads((Path(tmp2) / 'replay-runs.json').read_text())['changes'][0]
         self.assertEqual((change['stage'], change['new_fail'], change['regression']), ('recorded', ['VERIFIED_WORDING'], True))
 
+    def test_same_report_judged_by_changed_checks(self):
+        out = Path(self.tmp.name) / 'card'
+        quiet(rv.main, ['runs', str(self.run), '--no-rebuild', '--output-dir', str(out)])
+        card = json.loads((out / 'replay-runs.json').read_text())
+        self.assertEqual(card['runs'][0]['recorded']['findings']['FAIL'], ['STATUS_DOT_MISMATCH'])
+        stricter, looser = copy.deepcopy(card), copy.deepcopy(card)
+        stricter['runs'][0]['recorded']['findings']['FAIL'] = []                 # the old checks missed it
+        looser['runs'][0]['recorded']['findings']['FAIL'].append('VERIFIED_WORDING')  # the old checks caught more
+        (a,), (b,) = rv.compare(stricter, card), rv.compare(looser, card)
+        self.assertEqual((a['cause'], a['new_fail'], a['regression']), ('checks', ['STATUS_DOT_MISMATCH'], False))
+        self.assertEqual((b['cause'], b['cleared_fail'], b['regression']), ('checks', ['VERIFIED_WORDING'], True))
+
     def test_missing_report_is_bad_input(self):
         (self.run / 'report.html').unlink()
         with redirect_stdout(io.StringIO()), unittest.mock.patch('sys.stderr', io.StringIO()):
             self.assertEqual(rv.main(['runs', str(self.run)]), 2)
+
+
+class StatusDotTests(unittest.TestCase):
+    """check_report's STATUS_DOT_MISMATCH: a status-table dot must match its row's evidence text."""
+
+    def row(self, dot, text):
+        return f'<table><tbody><tr><td>Item</td><td><i class="dot {dot}"></i>{text}</td></tr></tbody></table>'
+
+    def mismatches(self, page):
+        return [x for x in validate_report(page, '2030-01-02') if x['code'] == 'STATUS_DOT_MISMATCH']
+
+    def test_row_wording_is_brief_wording(self):
+        for words, lang in zip(ROW_EVIDENCE, ('en', 'zh')):
+            L = brief.LABELS[lang]
+            self.assertEqual({k: words[k] for k in L['evidence']}, L['evidence'], lang)
+            self.assertEqual((words['proposed'], words['verify_gap']), (L['proposed'].strip(), L['verify_gap']), lang)
+
+    def test_states_follow_brief_label_rules(self):
+        self.assertEqual(row_state('Official or company source opened; some claims rest on media reports only'), 'confirmed')
+        self.assertEqual(row_state('Official or company source opened; an independent check found no source for a key claim'), 'unverified')
+        self.assertEqual(row_state('Media reports only; an independent check found no source for a key claim'), 'reported')
+        self.assertEqual(row_state('Core claim not supported by a source; reason'), 'unverified')
+        self.assertEqual(row_state('Proposed: Official or company source opened'), 'pending')
+        self.assertEqual(row_state('拟议：仅有媒体报道'), 'pending')
+        self.assertEqual(row_state('原文未能取得或尚未核实；合成'), 'unverified')
+        self.assertIsNone(row_state('Something a model wrote'))
+
+    def test_wrong_dot_fails_and_right_dot_passes(self):
+        bad = self.mismatches(self.row('a', 'Core claim not supported by a source; no dated source'))
+        self.assertEqual([x['status'] for x in bad], ['FAIL'])
+        self.assertIn('Core claim not supported', bad[0]['excerpt'])
+        for dot, text in (('u', 'Core claim not supported by a source'), ('g', 'Official or company source opened'),
+                          ('s', 'Proposed: Media reports only'), ('a', '仅有媒体报道')):
+            self.assertEqual(self.mismatches(self.row(dot, text)), [], text)
+
+    def test_hand_written_rows_and_the_legend_are_left_alone(self):
+        self.assertEqual(self.mismatches(self.row('g', 'Our own wording')), [])
+        legend = '<div class="status-key"><span><i class="dot a"></i>Media report, not independently confirmed</span></div>'
+        self.assertEqual(self.mismatches(legend), [])
 
 
 class VerifiedWordingTests(unittest.TestCase):

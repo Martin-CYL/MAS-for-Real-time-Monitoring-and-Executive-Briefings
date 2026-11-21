@@ -46,8 +46,11 @@
           "to": "a"
         }
       ],
-      "expect": {},
-      "known_gap": "check_report.py compares .st story labels with the legend, but not status-table dots with their row's evidence text. brief.py renders the right dot since f9303bb; an agent editing report.html afterwards is not caught."
+      "expect": {
+        "codes": [
+          "STATUS_DOT_MISMATCH"
+        ]
+      }
     },
     {
       "id": "unresolved-row-green",
@@ -64,8 +67,11 @@
           "to": "g"
         }
       ],
-      "expect": {},
-      "known_gap": "Same gap as unsupported-row-amber: status-table dots are not checked against their row."
+      "expect": {
+        "codes": [
+          "STATUS_DOT_MISMATCH"
+        ]
+      }
     },
     {
       "id": "confirmed-row-slate",
@@ -81,8 +87,11 @@
           "to": "s"
         }
       ],
-      "expect": {},
-      "known_gap": "Same gap as unsupported-row-amber: status-table dots are not checked against their row."
+      "expect": {
+        "codes": [
+          "STATUS_DOT_MISMATCH"
+        ]
+      }
     },
     {
       "id": "legal-deadline-unmarked",

@@ -9,9 +9,11 @@
 
   replay_eval.py runs RUN [RUN ...] [--baseline OLD.json] [--no-rebuild] [--output-dir DIR]
       Replays finished runs: QA of the recorded report, then a rebuild with the current brief.py and QA again, on
-      a temporary copy (the run directory is never written). Also audits the status table: does each row's dot
-      match its evidence text? With --baseline (an earlier scorecard) it lists what changed and exits 1 when a
-      run got worse: a new FAIL code, a lower readiness or more mismatched rows.
+      a temporary copy (the run directory is never written). Also counts status-table rows whose dot disagrees
+      with their evidence text (the STATUS_DOT_MISMATCH rule), so old runs show how many there were.
+      With --baseline (an earlier scorecard) it lists what changed and exits 1 on a regression: a rebuilt report
+      that gains a FAIL code, loses readiness or has more mismatched rows, or an unchanged recorded report that
+      loses a FAIL code (the checks got looser).
 
 Scorecards hold codes, counts and short row excerpts from the runs given. Keep them with the run data, out of Git.
 Exit codes: 0 every expectation held / no regression, 1 otherwise, 2 bad input.
@@ -33,6 +35,7 @@ SCRIPTS = Path(__file__).resolve().parent
 SKILL = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 import brief  # noqa: E402
+from check_report import dot_state, row_state  # noqa: E402
 from validate import run_all  # noqa: E402
 
 CASES = SKILL / 'evaluation' / 'replay-cases.json'
@@ -113,31 +116,15 @@ def status_rows(page):
     return rows
 
 
-def expected_dot(text):
-    """The dot brief.py gives a row with this evidence text, or None if the text is not brief.py wording."""
-    for L in (brief.LABELS[lang] for lang in ('en', 'zh')):
-        proposed = text.startswith(L['proposed'].strip())
-        body = text[len(L['proposed'].strip()):].strip() if proposed else text
-        status = next((k for k, v in L['evidence'].items() if body.startswith(v)), None)
-        if status is None:
-            continue
-        if proposed:
-            return brief.STATUS['pending'][0]
-        if status in ('unresolved', 'unsupported') or L['verify_gap'] in body:
-            return brief.STATUS['unverified'][0]
-        return brief.STATUS['confirmed' if status == 'supported' else 'reported'][0]
-    return None
-
-
 def audit_rows(page):
     rows = status_rows(page)
     mismatched, unparsed = [], 0
     for i, (dot, text) in enumerate(rows):
-        want = expected_dot(text)
+        shown, want = dot_state({dot}), row_state(text)
         if want is None:
             unparsed += 1
-        elif want != dot:
-            mismatched.append({'row': i, 'dot': dot, 'expected': want, 'text': text[:60]})
+        elif want != shown:
+            mismatched.append({'row': i, 'shown': shown, 'expected': want, 'text': text[:60]})
     return {'rows': len(rows), 'unparsed': unparsed, 'mismatched': mismatched}
 
 
@@ -280,13 +267,19 @@ def score_report(run, page):
 
 
 def compare(old, new):
-    """Per-run changes between two scorecards; 'regression' when a run got worse on the same stage."""
+    """Per-run changes between two scorecards.
+
+    A recorded report that is byte-identical in both was judged by different checks: a FAIL that disappears means
+    the checks got looser (regression); a new one means they got stricter (reported, not a regression). Anything
+    else (a rebuilt report, or a recorded one that changed) regresses when it gains a FAIL code, loses readiness or
+    has more mismatched rows."""
     before = {e['run']: e for e in old.get('runs', [])}
     changes = []
     for e in new['runs']:
         o = before.get(e['run'])
         if not o:
             continue
+        same_report = o.get('report_sha256') == e.get('report_sha256')
         for stage in ('recorded', 'rebuilt'):
             a, b = o.get(stage) or {}, e.get(stage) or {}
             if 'findings' not in a or 'findings' not in b:
@@ -294,13 +287,14 @@ def compare(old, new):
             added = sorted(set(b['findings']['FAIL']) - set(a['findings']['FAIL']))
             removed = sorted(set(a['findings']['FAIL']) - set(b['findings']['FAIL']))
             lower = READINESS.index(b['readiness']) < READINESS.index(a['readiness'])
-            more = len(b['rows']['mismatched']) > len(a['rows']['mismatched'])
-            if added or removed or lower or more or a['readiness'] != b['readiness'] \
-                    or len(a['rows']['mismatched']) != len(b['rows']['mismatched']):
-                changes.append({'run': e['run'], 'stage': stage, 'new_fail': added, 'cleared_fail': removed,
-                                'readiness': [a['readiness'], b['readiness']],
-                                'mismatched_rows': [len(a['rows']['mismatched']), len(b['rows']['mismatched'])],
-                                'regression': bool(added or lower or more)})
+            rows = [len(a['rows']['mismatched']), len(b['rows']['mismatched'])]
+            if not (added or removed or a['readiness'] != b['readiness'] or rows[0] != rows[1]):
+                continue
+            checks_only = stage == 'recorded' and same_report
+            changes.append({'run': e['run'], 'stage': stage, 'new_fail': added, 'cleared_fail': removed,
+                            'readiness': [a['readiness'], b['readiness']], 'mismatched_rows': rows,
+                            'cause': 'checks' if checks_only else 'report',
+                            'regression': bool(removed) if checks_only else bool(added or lower or rows[1] > rows[0])})
     return changes
 
 
@@ -322,7 +316,8 @@ def runs_markdown(card):
         lines += ['', '## Changes since the baseline', '']
         lines += [f"- {c['run']} {c['stage']}: readiness {c['readiness'][0]} → {c['readiness'][1]}; dot mismatches "
                   f"{c['mismatched_rows'][0]} → {c['mismatched_rows'][1]}; new FAIL {', '.join(c['new_fail']) or 'none'}; "
-                  f"cleared {', '.join(c['cleared_fail']) or 'none'}{' — REGRESSION' if c['regression'] else ''}"
+                  f"cleared {', '.join(c['cleared_fail']) or 'none'}"
+                  f"{' (same report: the checks changed)' if c['cause'] == 'checks' else ''}{' — REGRESSION' if c['regression'] else ''}"
                   for c in card['changes']] or ['- none']
     return '\n'.join(lines) + '\n'
 

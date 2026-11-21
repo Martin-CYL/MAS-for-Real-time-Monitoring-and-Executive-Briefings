@@ -1,6 +1,8 @@
 {
   "note": "Budgets the Nex briefing workflow enforces. Nex also enforces its own chat limits (depth 3, 8 live sub-chats per conversation); these stay below them.",
   "max_scouts_per_lead": 4,
+  "scout_mode_note": "topic: each scout covers one topic from categories.json (topic-scout.md). lane: each scout covers one source lane from lanes.json (source-scout.md) across categories, and media leads go to a follow-up scout. Lane mode needs lanes.json and source-scout.md; without them Nex runs topic scouts.",
+  "scout_mode": "topic",
   "max_concurrent_scouts": 4,
   "max_task_attempts": 2,
   "max_cross_border_requests": 3,
@@ -16,7 +18,8 @@
     "reserve_fresh_tokens": {"synthesis": 250000, "review": 250000, "rework": 250000, "verification": 150000},
     "in_flight_margin": 25000,
     "wrap_up_at": 0.8,
-    "rework_fresh_tokens": 150000
+    "rework_fresh_tokens": 150000,
+    "lane_fresh_tokens": {"official": 150000, "company": 100000, "media": 150000}
   },
   "verification": {
     "note": "Independent verifiers check high-risk claims before the draft, without the author's sources (references/roles/verifier.md). Claims are chosen by brief.py verify-select.",

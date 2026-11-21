@@ -104,7 +104,8 @@ export interface RestrictionInput {
  * review it) and write only their own directory. A verifier sees nothing of
  * the run but its own directory: it checks claims without the author's
  * sources, so it may not read them. Workflow state, logs, verification
- * results and discovery output belong to the controller and are never writable.
+ * results, gap-round results and discovery output belong to the controller
+ * and are never writable.
  */
 export function buildRestriction(input: RestrictionInput): CodexRestriction {
   const fs: Record<string, FileAccess> = {}
@@ -127,6 +128,10 @@ export function buildRestriction(input: RestrictionInput): CodexRestriction {
   if (input.role !== "verifier") {
     fs[path.join(input.runDir, "discovery")] = "read"
     fs[path.join(input.runDir, "claim_verification.json")] = "read"
+  }
+  // The gap round's listing and outcomes: the chief decides on them and the reviewer reads them; neither may edit them.
+  if (input.role !== "verifier" && input.role !== "scout") {
+    for (const name of ["gaps.json", "gap_report.json"]) fs[path.join(input.runDir, name)] = "read"
   }
   fs[path.join(input.taskDir, "assignment.json")] = "read"
   fs[path.join(input.taskDir, "submission.json")] = "read"

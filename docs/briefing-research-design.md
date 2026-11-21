@@ -17,6 +17,8 @@ always leaves room for the review and a second review. The cost is about two few
 - **Constraint:** the reserve guarantee stays a hard rule. Adaptation only moves budget between research tasks.
 - **Judged by:** report coverage (events found that a reference run found), not tokens alone.
 - **Depends on:** recorded per-task outcomes (claims accepted per 100k tokens, by category) from several live runs.
+- **First step:** one bounded supplementary round driven by computed coverage gaps, before verification:
+  [briefing-gap-round-design.md](briefing-gap-round-design.md).
 
 ## 2. Persistent temporal evidence
 

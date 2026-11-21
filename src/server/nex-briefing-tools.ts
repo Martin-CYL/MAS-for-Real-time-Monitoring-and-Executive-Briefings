@@ -43,11 +43,12 @@ const delegate = z.strictObject({
   retryOf: z.string().optional().describe("Task ID of a failed task to retry once, with the same assignment."),
   reworkOf: z.string().optional().describe("Chief Editor, after a review asks for rework: the accepted lead task to reopen."),
   findings: z.array(z.string()).optional().describe("With reworkOf: the review finding IDs (R001…) to fix."),
+  gap: z.string().optional().describe("A lead in the gap round: the gap ID (G001…) this scout works on. Gap scouts have their own budget."),
   forTaskId: z.string().optional().describe("Only when this chat holds several open tasks."),
 })
 
 const submit = z.strictObject({
-  kind: z.enum(["result", "plan", "draft", "review"]).optional().describe("Chief Editor: plan, then draft. Others: leave unset."),
+  kind: z.enum(["result", "plan", "gap_plan", "draft", "review"]).optional().describe("Chief Editor: plan, then draft; gap_plan when the gap check asks for it. Others: leave unset."),
   taskId: z.string().optional().describe("Only when this chat holds several open tasks (a lead answering a cross-border request)."),
   partialReason: z.string().optional().describe("Chief Editor's draft only, when a country lead failed: why the run continues without it."),
 })
@@ -98,7 +99,7 @@ export const BRIEFING_TOOLS: readonly NexToolDefinition[] = [
   },
   {
     name: "briefing_submit",
-    description: "In a briefing run: hand in your task's result. Nex validates output.json (findings.json for the reviewer, plan.json or the draft for the Chief Editor) and runs the Skill's checks on your records. A refusal lists what to fix; submit again after fixing. Your task counts as done only when a submission is accepted.",
+    description: "In a briefing run: hand in your task's result. Nex validates output.json (findings.json for the reviewer, plan.json, gap_plan.json or the draft for the Chief Editor) and runs the Skill's checks on your records. A refusal lists what to fix; submit again after fixing. Your task counts as done only when a submission is accepted.",
     schema: submit,
     async execute(input, context) {
       return reply(await workflow(context).submit(context.chatId, context.cwd, submit.parse(input)))

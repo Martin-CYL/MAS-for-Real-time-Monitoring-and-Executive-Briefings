@@ -66,11 +66,56 @@ export const crossBorderRequestSchema = z.object({
   evidence_required: text,
 })
 
+const gapId = z.string().regex(/^G\d{3,}$/, "gap IDs look like G001")
+export const GAP_OUTCOMES = ["filled", "searched_none", "not_reached"] as const
+
+/**
+ * What a lead reopened for the gap round says it did about one gap. The envelope only: whether the records show
+ * it is the Skill's `brief.py gap-check`, run by the workflow once the round ends.
+ */
+export const gapResultSchema = z.object({
+  gap_id: gapId,
+  outcome: z.enum(GAP_OUTCOMES),
+  event_ids: z.array(eventId).default([]),
+  claim_ids: z.array(claimId).default([]),
+  searched: z.array(z.string()).default([]),
+  note: z.string().optional(),
+  reason: z.string().optional(),
+}).superRefine((value, ctx) => {
+  if (value.outcome === "filled" && value.event_ids.length + value.claim_ids.length === 0) {
+    ctx.addIssue({ code: "custom", path: ["event_ids"], message: `${value.gap_id}: a filled gap names the event_ids or claim_ids that fill it` })
+  }
+  if (value.outcome === "searched_none" && value.searched.filter((entry) => entry.trim()).length < 2) {
+    ctx.addIssue({ code: "custom", path: ["searched"], message: `${value.gap_id}: searched_none lists at least 2 searches (also logged with brief.py search)` })
+  }
+  if (value.outcome === "not_reached" && !value.reason?.trim()) {
+    ctx.addIssue({ code: "custom", path: ["reason"], message: `${value.gap_id}: not_reached needs a reason` })
+  }
+})
+
 export const leadOutputSchema = z.object({
   ...research,
   gaps: z.array(z.object({ task_id: z.string().optional(), topic: z.string().optional(), reason: text })).default([]),
   cross_border_requests: z.array(crossBorderRequestSchema).default([]),
+  /** Only after the lead was reopened for the gap round: one entry per gap it was given. */
+  gap_results: z.array(gapResultSchema).optional(),
 }).superRefine(partialNeedsReason)
+
+/** The Chief Editor's decision on every gap the gap check listed (`gap_plan.json`). */
+export const gapPlanSchema = z.object({
+  decisions: z.array(z.object({
+    gap_id: gapId,
+    action: z.enum(["pursue", "skip"]),
+    /** For a gap whose side is both or other and that has no lead of origin: the lead that pursues it. */
+    side: z.enum(BRIEFING_COUNTRIES).optional(),
+    brief: z.string().optional(),
+    reason: z.string().optional(),
+  }).superRefine((value, ctx) => {
+    if (value.action === "skip" && !value.reason?.trim()) {
+      ctx.addIssue({ code: "custom", path: ["reason"], message: `${value.gap_id}: a skipped gap needs a reason` })
+    }
+  })),
+})
 
 export const crossBorderOutputSchema = z.object({
   ...research,
@@ -155,6 +200,8 @@ export type BriefingPlan = z.infer<typeof planSchema>
 export type BriefingReview = z.infer<typeof reviewSchema>
 export type ReviewFinding = z.infer<typeof reviewFindingSchema>
 export type BriefingVerification = z.infer<typeof verificationSchema>
+export type GapResult = z.infer<typeof gapResultSchema>
+export type GapPlan = z.infer<typeof gapPlanSchema>
 
 export function outputSchemaFor(role: BriefingRole) {
   switch (role) {

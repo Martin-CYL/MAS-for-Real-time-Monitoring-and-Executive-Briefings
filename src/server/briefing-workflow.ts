@@ -11,6 +11,9 @@ import {
   type BriefingRole,
   type BriefingVerification,
   describeIssues,
+  type GapPlan,
+  type GapResult,
+  gapPlanSchema,
   type LeadResult,
   type PrimaryLeadOutput,
   outputSchemaFor,
@@ -40,7 +43,11 @@ import type { AgentChatStatus, AgentChatSummary, ChatOutcome } from "./orchestra
  *   - accepted records are merged upward by the Skill's `merge_runs.py`, only
  *     while the receiving agent is blocked in a briefing tool, so two writers
  *     never touch one run directory;
- *   - before the first draft, independent verifiers check the high-risk
+ *   - before the first draft, one bounded gap round: the Skill lists coverage
+ *     gaps by rule (`brief.py gaps`), the chief decides each one, the leads
+ *     are reopened for the pursued ones, and what they report is checked
+ *     against their records (`brief.py gap-check`; see `coverageGate`);
+ *   - then independent verifiers check the high-risk
  *     claims without the author's sources; what they cannot support becomes a
  *     review finding (see `startVerification`);
  *   - the draft is rendered and validated by the Skill's own renderer and
@@ -77,6 +84,7 @@ export type BriefingStage =
   | "topic_research_completed"
   | "country_consolidation"
   | "cross_border_synthesis"
+  | "gap_review"
   | "claim_verification"
   | "editorial_draft_completed"
   | "render_and_validate"
@@ -118,6 +126,8 @@ export interface BriefingBudgets {
     /** The budget of a lead reopened for rework, counted from the reopening. */
     rework?: number
   }
+  /** The gap round before verification. Absent or disabled: no gap round (older Skills, older runs). */
+  gapRound?: GapRoundBudget
   /** Independent verification before the draft. Absent or disabled: no verifiers (older Skills, older runs). */
   verification?: VerificationBudget
   /**
@@ -129,6 +139,47 @@ export interface BriefingBudgets {
   lanes?: SourceLane[]
   discovery: boolean
   days: number
+}
+
+export interface GapRoundBudget {
+  enabled: boolean
+  /** Gaps listed for the chief, highest priority first; the rest are counted as not listed. */
+  maxListed: number
+  maxPursued: number
+  /** Gap scouts a reopened lead may delegate, apart from its first-round scouts. */
+  maxScoutsPerLead: number
+  /** Discovery candidates up to this rank (and every official one) are checked against the records. */
+  discoveryTop: number
+  /** A reopened lead's allowance, counted from the reopening, and a gap scout's cap, in fresh tokens. */
+  leadTokens: number
+  scoutTokens: number
+  leadMinutes: number
+  scoutMinutes: number
+}
+
+/**
+ * What became of a gap: `filled` only when the records show it (`brief.py gap-check`), `filled_unconfirmed` when
+ * the lead said filled and they do not, `not_searched` when it said nothing was found without the searches to show it.
+ */
+export type GapOutcome = "filled" | "filled_unconfirmed" | "searched_none" | "not_searched" | "not_reached" | "skipped"
+
+/** One gap the Skill's rules found, with the chief's decision and the checked outcome (RUN/gap_report.json). */
+export interface GapRecord {
+  gap_id: string
+  type: string
+  side: string
+  priority: number
+  target: Record<string, unknown>
+  why: string
+  suggested_source: string
+  /** The accepted lead that would pursue it, when its side or origin names one. */
+  lead_task?: string
+  decision?: GapPlan["decisions"][number]
+  outcome?: GapOutcome
+  detail?: string
+  event_ids?: string[]
+  claim_ids?: string[]
+  searched?: string[]
 }
 
 export interface VerificationBudget {
@@ -216,6 +267,23 @@ function tokenBudgets(raw: Record<string, unknown> | undefined): BriefingBudgets
   }
 }
 
+/** On only when the Skill asks for it. */
+function gapRoundBudget(raw: Record<string, unknown> | undefined): GapRoundBudget | undefined {
+  if (raw?.enabled !== true) return undefined
+  const num = (key: string, fallback: number, min = 0) => (typeof raw[key] === "number" && (raw[key] as number) >= min ? raw[key] as number : fallback)
+  return {
+    enabled: true,
+    maxListed: num("max_gaps_listed", 20, 1),
+    maxPursued: num("max_gaps_pursued", 8),
+    maxScoutsPerLead: num("max_gap_scouts_per_lead", 2),
+    discoveryTop: num("discovery_top", 10),
+    leadTokens: num("lead_fresh_tokens", 80_000, 1),
+    scoutTokens: num("scout_fresh_tokens", 60_000, 1),
+    leadMinutes: num("lead_minutes", 30, 1),
+    scoutMinutes: num("scout_minutes", 15, 1),
+  }
+}
+
 /** Lane mode only when the Skill asks for it and ships both the lanes and their role file; otherwise topic scouts. */
 async function sourceLanes(raw: Record<string, unknown>, skillDir: string): Promise<SourceLane[] | undefined> {
   if (raw.scout_mode !== "lane" || !existsSync(path.join(skillDir, "references", "roles", SOURCE_SCOUT_FILE))) return undefined
@@ -250,14 +318,18 @@ function verificationBudget(raw: Record<string, unknown> | undefined, skillDir: 
   }
 }
 
-/** The run's plan, with defaults for runs saved before reserves existed. */
-function budgetPlan(run: { budgets: BriefingBudgets }): BudgetPlan {
+/**
+ * The run's plan, with defaults for runs saved before reserves existed. The gap-round reserve is held back from the
+ * first research round only: once the gap check has run (whether or not it found anything), it is released.
+ */
+function budgetPlan(run: { budgets: BriefingBudgets; gapRound?: unknown }): BudgetPlan {
   const tokens = run.budgets.tokens ?? DEFAULT_BUDGETS.tokens
   const base = DEFAULT_BUDGETS.tokens
+  const reserve = tokens.reserve ?? { synthesis: 0, review: 0, rework: 0 }
   return {
     run: tokens.run,
     task: tokens.task,
-    reserve: tokens.reserve ?? { synthesis: 0, review: 0, rework: 0 },
+    reserve: run.gapRound || !run.budgets.gapRound?.enabled ? { ...reserve, gap_research: 0 } : reserve,
     inFlightMargin: tokens.inFlightMargin ?? base.inFlightMargin!,
     wrapUpAt: tokens.wrapUpAt ?? base.wrapUpAt!,
   }
@@ -335,8 +407,12 @@ export interface BriefingTask {
   merged?: boolean
   mergeResult?: unknown
   usage?: UsageTotals
-  /** Usage when the task was reopened for rework; its rework budget counts from here. */
+  /** Usage when the task was reopened for rework or the gap round; that budget counts from here. */
   usageBaseline?: UsageTotals
+  /** Why the task was last reopened: its allowance is the rework one or the gap round's. */
+  reopenedFor?: "rework" | "gap"
+  /** A gap scout: the gap it works on (its cap and time are the gap round's). */
+  gap?: string
   /** A scout's source lane, in lane mode. */
   lane?: string
   /** Set once the agent has been told to wrap up for budget reasons. */
@@ -403,6 +479,27 @@ export interface BriefingRun {
    * Independent verification before the draft: running while verifiers work, checked once all have ended,
    * done once the chief has been told the outcome.
    */
+  /**
+   * The gap round before verification: planning while the chief decides, running while reopened leads work,
+   * checked once their reports were tested against their records, done once the chief has been told the outcome.
+   */
+  gapRound?: {
+    state: "planning" | "running" | "checked" | "done"
+    at: string
+    gaps: GapRecord[]
+    notListed: number
+    skippedTypes: string[]
+    /**
+     * Each reopened lead's gaps and the IDs and search count it had at the reopening, for `brief.py gap-check`,
+     * and its first-round hand-in, which stands if the lead does not hand in again.
+     */
+    leads: Record<string, {
+      gaps: string[]
+      baseline: { events: string[]; claims: string[]; searches: number }
+      firstRound?: { accepted: NonNullable<BriefingTask["accepted"]>; merged: boolean }
+    }>
+    note?: string
+  }
   verification?: {
     state: "running" | "checked" | "done"
     at: string
@@ -660,7 +757,7 @@ interface Deps {
 
 /** Where a crash leaves state that a restart must handle. Each is just after a side effect and before the save that records it. */
 export type FaultPoint =
-  | "launch:saved" | "launch:chat-created" | "accept:records-written" | "merge:merged" | "rework:saved" | "finalize:done"
+  | "launch:saved" | "launch:chat-created" | "accept:records-written" | "merge:merged" | "rework:saved" | "gap:saved" | "finalize:done"
 
 export class BriefingWorkflow {
   private readonly chats: BriefingChats
@@ -959,7 +1056,7 @@ export class BriefingWorkflow {
       `- SKILL: ${run.skillDir}`,
       `- Window: ${run.window.start} to ${run.window.end} (${run.timezone}); cutoff ${run.cutoff}`,
       existsSync(candidates) ? `- Discovery candidates (unverified leads): ${candidates}` : "- Discovery candidates: none (sweep not run or unavailable)",
-      `- Time budget: about ${run.budgets.taskMinutes[task.role]} minutes; token budget about ${this.capOf(run, task)} fresh tokens`,
+      `- Time budget: about ${this.minutesOf(run, task)} minutes; token budget about ${this.capOf(run, task)} fresh tokens`,
       ...((run.executionMode ?? "sandbox") === "container" ? [
         "- Execution mode: container. There is NO inner OS sandbox or enforced per-task filesystem isolation.",
         "  Work only in TASK; do not read credentials or modify other tasks or controller state. These are instructions, not OS-enforced boundaries.",
@@ -1017,7 +1114,15 @@ export class BriefingWorkflow {
   private markStarted(run: BriefingRun, task: BriefingTask) {
     task.launchingAt = undefined
     task.startedAt ??= iso(this.now())
-    task.deadlineAt ??= iso(Date.parse(task.startedAt) + run.budgets.taskMinutes[task.role] * 60_000)
+    task.deadlineAt ??= iso(Date.parse(task.startedAt) + this.minutesOf(run, task) * 60_000)
+  }
+
+  /** A task's time budget: its role's, or the gap round's for a gap scout or a lead reopened for the round. */
+  private minutesOf(run: BriefingRun, task: BriefingTask) {
+    const gap = run.budgets.gapRound
+    if (gap && task.gap) return gap.scoutMinutes
+    if (gap && task.reopenedFor === "gap" && task.state === "running") return gap.leadMinutes
+    return run.budgets.taskMinutes[task.role]
   }
 
   /** Starts queued tasks while the budgets allow. A full Nex chat budget leaves them queued. */
@@ -1028,7 +1133,7 @@ export class BriefingWorkflow {
         await this.setTaskState(run, task, "cancelled", "its requester is no longer running")
         continue
       }
-      const blocked = this.launchBlocked(run, task.role, undefined, task.lane ? this.capOf(run, task) : undefined)
+      const blocked = this.launchBlocked(run, task.role, this.stageOf(task.role), this.capOf(run, task))
       if (blocked) {
         // Waiting cannot help a start the run can no longer afford: say so instead of queueing forever.
         if (/the run cannot afford it/.test(blocked)) await this.setTaskState(run, task, "cancelled", `not started: ${blocked}`)
@@ -1152,6 +1257,7 @@ export class BriefingWorkflow {
       await this.advance(run, "cross_border_synthesis")
     }
     await this.handleReviewerFailure(run)
+    await this.settleGapRound(run)
     await this.settleVerification(run)
     await this.pump(run)
     if (wasRunning && run.status !== "running") await this.writeSummary(run)
@@ -1233,10 +1339,12 @@ export class BriefingWorkflow {
       ...(run.provider.until ? { until: run.provider.until } : {}) })
   }
 
-  /** A task's cap: its role's, or the rework allowance once it was reopened. */
+  /** A task's cap: its lane's or role's, the gap round's for a gap scout, or the rework or gap-round allowance once it was reopened. */
   private capOf(run: BriefingRun, task: BriefingTask) {
     const tokens = run.budgets.tokens ?? DEFAULT_BUDGETS.tokens
-    if (task.usageBaseline) return tokens.rework ?? DEFAULT_BUDGETS.tokens.rework!
+    const gap = run.budgets.gapRound
+    if (task.gap && gap) return gap.scoutTokens
+    if (task.usageBaseline) return task.reopenedFor === "gap" && gap ? gap.leadTokens : tokens.rework ?? DEFAULT_BUDGETS.tokens.rework!
     return (task.lane ? this.laneOf(run, task.lane)?.freshTokens : undefined) ?? tokens.task[task.role]
   }
 
@@ -1262,7 +1370,7 @@ export class BriefingWorkflow {
    * starts and a backoff delays them. Otherwise the budget plan decides:
    * research may not touch what synthesis, review and rework need.
    */
-  private launchBlocked(run: BriefingRun, role: BriefingRole, stage: BudgetStage = this.stageOf(role), taskCap?: number): string | null {
+  private launchBlocked(run: BriefingRun, role: BriefingRole, stage: BudgetStage = this.stageOf(role), capOverride?: number): string | null {
     if (run.provider?.state === "halted") {
       return `the provider refused this run (${run.provider.lastError?.class}); no new agent starts until it is restarted`
     }
@@ -1271,14 +1379,14 @@ export class BriefingWorkflow {
     }
     if (role === "chief") return null
     const tokens = run.budgets.tokens ?? DEFAULT_BUDGETS.tokens
-    const cap = stage === "rework" ? tokens.rework ?? DEFAULT_BUDGETS.tokens.rework! : taskCap ?? tokens.task[role]
+    const cap = capOverride ?? (stage === "rework" ? tokens.rework ?? DEFAULT_BUDGETS.tokens.rework! : tokens.task[role])
     const decision = authorize(stage, cap, freshTokens(run.usage?.totals ?? emptyUsage()), this.budgetTasks(run), budgetPlan(run))
     return decision.ok ? null : decision.reason!
   }
 
   /** Refuses a start the provider state or the budget plan does not allow, saying which and why. */
-  private assertCanStart(run: BriefingRun, role: BriefingRole, stage: BudgetStage, taskCap?: number) {
-    const blocked = this.launchBlocked(run, role, stage, taskCap)
+  private assertCanStart(run: BriefingRun, role: BriefingRole, stage: BudgetStage, cap?: number) {
+    const blocked = this.launchBlocked(run, role, stage, cap)
     if (!blocked) return
     const advice = /may release enough/.test(blocked)
       ? "Wait for running tasks (briefing_wait) and try again, or record the gap and hand off what you have."
@@ -1335,7 +1443,7 @@ export class BriefingWorkflow {
       }
       if (task.deadlineAt && Date.parse(task.deadlineAt) < this.now() && !chatIsDone(summary.status)) {
         await this.chats.cancelChat(this.requesterChat(run, task) ?? run.rootChatId, task.chatId).catch(() => {})
-        await this.setTaskState(run, task, "failed", `timed out after ${run.budgets.taskMinutes[task.role]} minutes`)
+        await this.setTaskState(run, task, "failed", `timed out after ${this.minutesOf(run, task)} minutes`)
         changed = true
         continue
       }
@@ -1488,6 +1596,7 @@ export class BriefingWorkflow {
       maxReviewAttempts: Math.max(1, number("max_review_attempts", 2)),
       taskMinutes: { ...DEFAULT_BUDGETS.taskMinutes, ...minutes },
       tokens: tokenBudgets(raw.token_budget as Record<string, unknown> | undefined),
+      gapRound: gapRoundBudget(raw.gap_round as Record<string, unknown> | undefined),
       verification: verificationBudget(raw.verification as Record<string, unknown> | undefined, skillDir),
       ...await (async () => {
         const lanes = await sourceLanes(raw, skillDir)
@@ -1513,6 +1622,7 @@ export class BriefingWorkflow {
     retryOf?: string
     reworkOf?: string
     findings?: string[]
+    gap?: string
     forTaskId?: string
   }) {
     const { run, task: requester } = await this.requireActor(actorChatId, cwd, input.forTaskId)
@@ -1566,9 +1676,15 @@ export class BriefingWorkflow {
       } else {
         if (requester.role !== "lead" && requester.role !== "cross_border") throw new WorkflowError("Only a country lead delegates scouts.")
         const country = requester.country!
-        const own = run.tasks.filter((entry) => entry.role === "scout" && entry.parentTaskId === requester.id && !entry.retryOf)
-        if (!previous && own.length >= run.budgets.maxScoutsPerLead) {
-          throw new WorkflowError(`${requester.id} has used its budget of ${run.budgets.maxScoutsPerLead} scouts. Fill the gap yourself or record it in gaps.`)
+        // A gap scout works on one of the lead's gaps in the gap round, on the round's own scout budget.
+        const gapId = input.gap ?? previous?.gap
+        const gap = gapId ? this.gapForScout(run, requester, gapId) : null
+        const own = run.tasks.filter((entry) => entry.role === "scout" && entry.parentTaskId === requester.id && !entry.retryOf && Boolean(entry.gap) === Boolean(gap))
+        const limit = gap ? run.budgets.gapRound!.maxScoutsPerLead : run.budgets.maxScoutsPerLead
+        if (!previous && own.length >= limit) {
+          throw new WorkflowError(gap
+            ? `${requester.id} has used its ${limit} gap scout(s) for this round. Fill the gap yourself or report it as not_reached.`
+            : `${requester.id} has used its budget of ${limit} scouts. Fill the gap yourself or record it in gaps.`)
         }
         const lanePlan = previous ? null : await this.planLaneScout(run, requester, input)
         const lane = previous?.lane ? this.laneOf(run, previous.lane) : lanePlan?.lane
@@ -1579,18 +1695,19 @@ export class BriefingWorkflow {
         if (!previous && same) {
           return { taskId: same.id, state: same.state, chatId: same.chatId ?? null, dir: this.taskDir(run, same), note: `Already delegated with this topic${lane ? ` in the ${lane.id} lane` : ""}; use briefing_wait for it.` }
         }
-        this.assertCanStart(run, "scout", "research", lane?.freshTokens)
+        this.assertCanStart(run, "scout", "research", gap ? run.budgets.gapRound!.scoutTokens : lane?.freshTokens)
         const attempt = previous ? previous.attempt + 1 : 1
-        const sequence = run.tasks.filter((entry) => entry.role === "scout" && entry.country === country && !entry.retryOf).length + 1
+        const sequence = run.tasks.filter((entry) => entry.role === "scout" && entry.country === country && !entry.retryOf && Boolean(entry.gap) === Boolean(gap)).length + 1
         task = this.newTask(run, {
-          id: previous ? `${previous.id.replace(/-a\d+$/, "")}-a${attempt}` : `${country}-s${String(sequence).padStart(2, "0")}`,
+          id: previous ? `${previous.id.replace(/-a\d+$/, "")}-a${attempt}` : `${country}-${gap ? "g" : "s"}${String(sequence).padStart(2, "0")}`,
           role: "scout",
           country,
-          title: `${COUNTRY_NAMES[country]} Scout · ${lane ? `${lane.id} · ` : ""}${(topic ?? "").slice(0, 40)}`,
+          title: `${COUNTRY_NAMES[country]} ${gap ? `Gap scout · ${gap.gap_id}` : "Scout"} · ${lane ? `${lane.id} · ` : ""}${(topic ?? "").slice(0, 40)}`,
           parentTaskId: requester.id,
           mergeInto: requester.id,
           attempt,
           retryOf: previous?.id,
+          ...(gap ? { gap: gap.gap_id } : {}),
           ...(lane ? { lane: lane.id } : {}),
           assignment: previous ? { ...previous.assignment, retry_note: input.brief ?? `Retry of ${previous.id}: ${previous.failure ?? ""}` } : {
             country,
@@ -1603,6 +1720,7 @@ export class BriefingWorkflow {
             cases: input.cases ?? [],
             discovery_leads: input.leads ?? [],
             ...(input.brief ? { brief: input.brief } : {}),
+            ...(gap ? { gap: this.gapTicket(gap) } : {}),
           },
         })
       }
@@ -1730,6 +1848,7 @@ export class BriefingWorkflow {
     target.previous = [...(target.previous ?? []), { at: target.accepted!.at, hashes: target.accepted!.hashes }]
     // The rework has its own allowance: what the lead spent on its research does not count against it.
     target.usageBaseline = { ...(target.usage ?? emptyUsage()) }
+    target.reopenedFor = "rework"
     for (const id of findings) {
       const finding = run.findings?.[id.includes("/") ? id : `${review!.id}/${id}`]
       if (finding) {
@@ -1775,6 +1894,7 @@ export class BriefingWorkflow {
     return this.withLock(run, async () => {
       if (chief.role !== "chief") throw new WorkflowError("Cross-border requests go through the Chief Editor.")
       if (run.crossBorderCount >= run.budgets.maxCrossBorderRequests) throw new WorkflowError(`The run's budget of ${run.budgets.maxCrossBorderRequests} cross-border requests is used.`)
+      if (run.gapRound?.state === "running") throw new WorkflowError("The leads are working on the gap round; send cross-border questions after it ends (briefing_wait).")
       const blocked = this.launchBlocked(run, "cross_border")
       if (blocked) throw new WorkflowError(`Not sent: ${blocked}.`)
       const from = this.task(run, input.fromTaskId)
@@ -1830,7 +1950,7 @@ export class BriefingWorkflow {
     })
   }
 
-  async submit(actorChatId: string, cwd: string, input: { kind?: "result" | "plan" | "draft" | "review"; taskId?: string; partialReason?: string }) {
+  async submit(actorChatId: string, cwd: string, input: { kind?: "result" | "plan" | "gap_plan" | "draft" | "review"; taskId?: string; partialReason?: string }) {
     const { run, task } = await this.requireActor(actorChatId, cwd, input.taskId)
     return this.withLock(run, async () => {
       if (isTerminal(task.state)) throw new WorkflowError(`Task ${task.id} is already ${task.state}.`)
@@ -1838,11 +1958,12 @@ export class BriefingWorkflow {
       const kind = input.kind ?? (task.role === "chief" ? "draft" : task.role === "reviewer" ? "review" : "result")
       let result: Record<string, unknown>
       if (task.role === "chief" && kind === "plan") result = await this.submitPlan(run, task)
+      else if (task.role === "chief" && kind === "gap_plan") result = await this.submitGapPlan(run, task)
       else if (task.role === "chief" && kind === "draft") result = await this.submitDraft(run, task, input.partialReason)
       else if (task.role === "reviewer") result = await this.submitReview(run, task)
       else if (task.role === "verifier") result = await this.submitVerification(run, task)
       else if (task.role !== "chief") result = await this.submitResult(run, task)
-      else throw new WorkflowError(`The Chief Editor submits kind plan or draft, not ${kind}.`)
+      else throw new WorkflowError(`The Chief Editor submits kind plan, gap_plan or draft, not ${kind}.`)
       if (result.accepted === false) {
         task.lastRejection = (result.problems as string[] | undefined) ?? []
         // Handoff lines read "CODE: …", validator lines "FIX n: CODE [field] → …"; other lines are context.
@@ -1891,6 +2012,17 @@ export class BriefingWorkflow {
       for (const child of this.children(run, task).filter((entry) => entry.state !== "accepted")) {
         const replaced = run.tasks.some((entry) => entry.retryOf === child.id && entry.state === "accepted")
         if (!replaced && !gaps.includes(child.id)) issues.push(`output.json gaps must list ${child.id} (${child.state}: ${child.failure ?? ""})`)
+      }
+      // Reopened for the gap round: one result per gap it was given, and no others.
+      const assigned = run.gapRound?.state === "running" ? run.gapRound.leads[task.id]?.gaps : undefined
+      if (assigned) {
+        const reported = ((output.gap_results ?? []) as GapResult[]).map((entry) => entry.gap_id)
+        const missing = assigned.filter((id) => !reported.includes(id))
+        const extra = reported.filter((id) => !assigned.includes(id))
+        const twice = reported.filter((id, index) => reported.indexOf(id) !== index)
+        if (missing.length > 0) issues.push(`output.json gap_results must report ${missing.join(", ")} (filled, searched_none or not_reached)`)
+        if (extra.length > 0) issues.push(`output.json gap_results: ${extra.join(", ")} were not given to ${task.id}`)
+        if (twice.length > 0) issues.push(`output.json gap_results: ${[...new Set(twice)].join(", ")} reported more than once`)
       }
     }
     const check = await this.checkHandoff(run, task)
@@ -1955,14 +2087,17 @@ export class BriefingWorkflow {
     if (blocked) return this.refuse([`The independent review cannot start now: ${blocked}.`])
     const pending = run.tasks.filter((task) => task.id !== chief.id && !isTerminal(task.state))
     if (pending.length > 0) return this.refuse([`Still running: ${pending.map((task) => task.id).join(", ")}. briefing_wait for them first.`])
-    const missing = (["us", "cn"] as const).filter((country) => this.latestLead(run, country)?.state !== "accepted")
+    const missing = (["us", "cn"] as const).filter((country) => !this.leadResearchIn(run, this.latestLead(run, country)))
     if (missing.length > 0) {
       if (!partialReason?.trim()) {
         return this.refuse([`No accepted ${missing.map((country) => COUNTRY_NAMES[country]).join(" and ")} lead research. Retry the lead (briefing_delegate with retryOf), or submit with partialReason to continue as a partial run.`])
       }
       run.partialReason = `${missing.map((country) => `${COUNTRY_NAMES[country]} lead research missing`).join("; ")}: ${partialReason.trim()}`
     }
-    // Before the first draft: the independent check of high-risk claims. Not a submission: nothing is counted.
+    // Before the first draft: one bounded gap round, then the independent check of high-risk claims.
+    // Neither is a submission: nothing is counted.
+    const covering = await this.coverageGate(run, chief)
+    if (covering) return covering
     const verifying = await this.verificationGate(run, chief)
     if (verifying) return verifying
     const drafts = run.drafts ??= { rejectionsThisCycle: 0, rejectionsTotal: 0, versions: [] }
@@ -2058,6 +2193,304 @@ export class BriefingWorkflow {
       problems.push(`DRAFT_CLAIM_DROPPED: ${id} was printed in version ${previous.version} and is missing now; withdraw it with a reason (brief.py withdraw) or restore it`)
     }
     return problems
+  }
+
+  // ── Gap round ──────────────────────────────────────────────────────────
+
+  /**
+   * Whether a lead's research is in the chief's records: an accepted lead, or one that failed in the gap round after
+   * its first-round hand-in was merged (that research stands; only its gaps go unreported).
+   */
+  private leadResearchIn(run: BriefingRun, lead: BriefingTask | undefined) {
+    return lead?.state === "accepted" || Boolean(lead && run.gapRound?.leads[lead.id]?.firstRound?.merged)
+  }
+
+  /**
+   * Whether the draft must wait for the gap round, and the answer to give the chief if so. The first call lists the
+   * gaps (`brief.py gaps`: the Skill's rules, not the chief, say what is missing); the chief then decides each one
+   * (`submitGapPlan`), the leads are reopened for the pursued ones, and once they have ended their reports are checked
+   * against their records. The chief is told the outcome once; the next draft goes on to verification.
+   */
+  private async coverageGate(run: BriefingRun, chief: BriefingTask): Promise<Record<string, unknown> | null> {
+    const config = run.budgets.gapRound
+    if (!config?.enabled || run.gapRound?.state === "done") return null
+    if (!run.gapRound) return this.startGapReview(run, chief, config)
+    const round = run.gapRound
+    if (round.state === "planning") {
+      return this.refuse([`Decide every gap of the gap check first (${path.join(run.runDir, "gaps.json")}): write gap_plan.json, `
+        + "then briefing_submit with kind gap_plan."])
+    }
+    if (round.state === "running") await this.settleGapRound(run)
+    if (round.state === "running") {
+      return this.refuse([`The gap round is still running (${Object.keys(round.leads).join(", ")}). briefing_wait for it, then submit the draft again.`])
+    }
+    round.state = "done"
+    await this.writeGapFiles(run)
+    await this.record(run, { gap_round: "done", outcomes: this.gapSummary(run)!.outcomes })
+    return { accepted: false, gapRound: this.gapSummary(run), problems: [
+      `The gap round has ended: ${this.gapLine(run)}`,
+      "Read gap_report.json (Nex wrote it; it cannot be changed). Then submit the draft again.",
+    ], next: "No draft was counted." }
+  }
+
+  private async startGapReview(run: BriefingRun, chief: BriefingTask, config: GapRoundBudget): Promise<Record<string, unknown> | null> {
+    await this.mergeInto(run, chief)
+    const leads = (["us", "cn"] as const).map((country) => this.latestLead(run, country)).filter((lead): lead is BriefingTask => lead?.state === "accepted")
+    const listed = this.parseJson<{ gaps: GapRecord[]; not_listed: number; skipped_types?: string[] }>(await this.py(run, ["brief.py", "gaps", run.runDir,
+      ...leads.flatMap((lead) => ["--lead", `${lead.country}=${this.taskDir(run, lead)}`]),
+      "--max", String(config.maxListed), "--discovery-top", String(config.discoveryTop)]))
+    if (!listed || !Array.isArray(listed.gaps)) throw new WorkflowError("brief.py gaps gave no result")
+    const gaps = listed.gaps.map((gap) => {
+      const lead = this.routeGap(run, gap)
+      return { ...gap, ...(lead ? { lead_task: lead } : {}) }
+    })
+    const round: NonNullable<BriefingRun["gapRound"]> = run.gapRound = {
+      state: "planning", at: iso(this.now()), gaps, notListed: listed.not_listed ?? 0, skippedTypes: listed.skipped_types ?? [], leads: {},
+    }
+    if (gaps.length === 0) {
+      round.state = "done"
+      round.note = "the gap check found no gap"
+      await this.writeGapFiles(run)
+      await this.record(run, { gap_round: "no gap found" })
+      return null
+    }
+    await this.advance(run, "gap_review", `${gaps.length} gap(s)${round.notListed ? `, ${round.notListed} not listed` : ""}`)
+    await this.writeGapFiles(run)
+    await this.record(run, { gap_round: "listed", gaps: gaps.map((gap) => `${gap.gap_id}:${gap.type}:${gap.side}`) })
+    return { accepted: false,
+      gaps: gaps.map((gap) => ({ gap_id: gap.gap_id, type: gap.type, side: gap.side, priority: gap.priority, why: gap.why,
+        suggested_source: gap.suggested_source, lead_task: gap.lead_task ?? null })),
+      problems: [
+        `The gap check found ${gaps.length} coverage gap(s) in the merged research${round.notListed ? ` (${round.notListed} more not listed)` : ""}: `
+          + `${path.join(run.runDir, "gaps.json")}.`,
+        `Decide every one in gap_plan.json: pursue (with a brief) or skip (with a reason); at most ${config.maxPursued} pursued. `
+          + "Then briefing_submit with kind gap_plan.",
+        "A gap without a lead_task (side both or other, no lead of origin) needs \"side\": \"us\" or \"cn\" to be pursued.",
+      ], next: "No draft was counted." }
+  }
+
+  /** The accepted lead that pursues a gap: by the chosen or the gap's side, else by the lead its event came from. */
+  private routeGap(run: BriefingRun, gap: Pick<GapRecord, "side" | "target">, side?: BriefingCountry) {
+    const accepted = (country: BriefingCountry) => {
+      const lead = this.latestLead(run, country)
+      return lead?.state === "accepted" ? lead.id : undefined
+    }
+    const country = side ?? (gap.side === "us" || gap.side === "cn" ? gap.side : undefined)
+    if (country) return accepted(country)
+    for (const origin of (gap.target.origin as Array<{ task?: string }> | undefined) ?? []) {
+      const task = run.tasks.find((entry) => entry.id === origin.task)
+      const lead = task?.country ? accepted(task.country) : undefined
+      if (lead) return lead
+    }
+    return undefined
+  }
+
+  private async submitGapPlan(run: BriefingRun, chief: BriefingTask) {
+    const round = run.gapRound
+    const config = run.budgets.gapRound
+    if (!config || round?.state !== "planning") {
+      return this.refuse([round ? `The gap plan is already decided (gap round ${round.state}).` : "No gap plan is expected yet: submit the draft; the gap check runs first."])
+    }
+    const { value, problems } = await this.readOutput(run, chief, "gap_plan.json", gapPlanSchema)
+    if (!value) return this.refuse(problems!)
+    const plan = value as GapPlan
+    const byId = new Map(round.gaps.map((gap) => [gap.gap_id, gap]))
+    const issues: string[] = []
+    const seen = new Set<string>()
+    const routes = new Map<string, string>()
+    for (const decision of plan.decisions) {
+      const gap = byId.get(decision.gap_id)
+      if (!gap) {
+        issues.push(`${decision.gap_id} is not in gaps.json`)
+        continue
+      }
+      if (seen.has(gap.gap_id)) issues.push(`${gap.gap_id} is decided more than once`)
+      seen.add(gap.gap_id)
+      if (decision.action !== "pursue") continue
+      const lead = this.routeGap(run, gap, decision.side)
+      if (lead) routes.set(gap.gap_id, lead)
+      else if (decision.side) issues.push(`${gap.gap_id}: there is no accepted ${COUNTRY_NAMES[decision.side]} lead to pursue it; skip it with a reason`)
+      else issues.push(`${gap.gap_id} (side ${gap.side}) has no lead of origin: give "side": "us" or "cn", or skip it with a reason`)
+    }
+    const undecided = round.gaps.filter((gap) => !seen.has(gap.gap_id)).map((gap) => gap.gap_id)
+    if (undecided.length > 0) issues.push(`Decide every gap: ${undecided.join(", ")} ${undecided.length === 1 ? "is" : "are"} missing from gap_plan.json`)
+    if (routes.size > config.maxPursued) issues.push(`${routes.size} gaps pursued; at most ${config.maxPursued} may be. Skip the rest with a reason.`)
+    if (issues.length > 0) return this.refuse(issues)
+    for (const decision of plan.decisions) {
+      const gap = byId.get(decision.gap_id)!
+      gap.decision = decision
+      if (decision.action === "skip") {
+        gap.outcome = "skipped"
+        gap.detail = decision.reason!.trim()
+      } else {
+        gap.lead_task = routes.get(gap.gap_id)
+      }
+    }
+    const byLead = new Map<string, string[]>()
+    for (const [id, lead] of routes) byLead.set(lead, [...(byLead.get(lead) ?? []), id])
+    // Saved as running before any lead hears of it, so a retried submission after a restart reopens nobody twice.
+    round.state = byLead.size > 0 ? "running" : "done"
+    if (byLead.size === 0) round.note = "every gap skipped"
+    const reopened: string[] = []
+    for (const [leadId, ids] of byLead) {
+      const lead = this.task(run, leadId)
+      const blocked = this.launchBlocked(run, "lead", "research", config.leadTokens)
+      if (blocked || !lead.chatId) {
+        for (const id of ids) Object.assign(byId.get(id)!, { outcome: "not_reached", detail: `not started: ${blocked ?? "the lead has no chat"}` })
+        await this.record(run, { gap_round: "lead not reopened", task: leadId, reason: blocked ?? "no chat" })
+        continue
+      }
+      await this.reopenForGaps(run, chief, lead, ids)
+      reopened.push(leadId)
+    }
+    if (reopened.length === 0 && round.state === "running") {
+      round.state = "done"
+      round.note = "no lead could be reopened"
+    }
+    await this.writeGapFiles(run)
+    await this.record(run, { gap_round: round.state, pursued: [...routes.keys()], skipped: plan.decisions.filter((entry) => entry.action === "skip").map((entry) => entry.gap_id) })
+    return { accepted: true, reopened, gapRound: this.gapSummary(run),
+      next: reopened.length > 0
+        ? `Reopened ${reopened.join(", ")} for the gap round. briefing_wait for ${reopened.length === 1 ? "it" : "them"}, then submit the draft again.`
+        : `No lead was reopened (${round.note}); the outcomes are in gap_report.json. Submit the draft again.` }
+  }
+
+  /** Reopens an accepted lead for its gaps. Its chat keeps its context; its first-round hand-in is kept until it hands in again. */
+  private async reopenForGaps(run: BriefingRun, chief: BriefingTask, lead: BriefingTask, ids: string[]) {
+    const config = run.budgets.gapRound!
+    const round = run.gapRound!
+    const dir = this.taskDir(run, lead)
+    const events = await readJson<{ events?: Array<{ id: string }>; searches?: unknown[] }>(path.join(dir, "events.json"))
+    const ledger = await readJson<{ claims?: Array<{ id: string }> }>(path.join(dir, "evidence_ledger.json"))
+    round.leads[lead.id] = {
+      gaps: ids,
+      baseline: { events: (events?.events ?? []).map((entry) => entry.id), claims: (ledger?.claims ?? []).map((entry) => entry.id), searches: events?.searches?.length ?? 0 },
+      firstRound: { accepted: lead.accepted!, merged: lead.merged ?? false },
+    }
+    lead.previous = [...(lead.previous ?? []), { at: lead.accepted!.at, hashes: lead.accepted!.hashes }]
+    // The round has its own allowance and time, counted from now.
+    lead.usageBaseline = { ...(lead.usage ?? emptyUsage()) }
+    lead.reopenedFor = "gap"
+    lead.wrapUpSent = undefined
+    lead.accepted = null
+    lead.merged = false
+    lead.delivered = false
+    lead.endedAt = undefined
+    lead.deadlineAt = iso(this.now() + config.leadMinutes * 60_000)
+    await this.setTaskState(run, lead, "running", `reopened for the gap round: ${ids.join(", ")}`)
+    await this.writeGapFiles(run)
+    await this.save(run)
+    await this.fault("gap:saved")
+    const tickets = ids.map((id) => this.gapTicket(round.gaps.find((gap) => gap.gap_id === id)!))
+    await this.chats.sendMessage(chief.chatId!, {
+      chatId: lead.chatId!,
+      message: [
+        `Gap round for task ${lead.id} in briefing run ${run.runId}: the Chief Editor asks you to look again at ${ids.length} coverage gap(s) found by rule.`,
+        "Follow the Gap round section of your instructions: fill each gap in your task directory with brief.py, or delegate a gap scout",
+        `(briefing_delegate, role scout, gap set to the gap ID; at most ${config.maxScoutsPerLead}). Log every search with brief.py search.`,
+        "Then add gap_results to output.json (one entry per gap: filled, searched_none or not_reached), update narrative.md,",
+        "run check_handoff.py --role lead and call briefing_submit again. Nex checks each outcome against your records.",
+        `Budget: about ${config.leadMinutes} minutes and ${config.leadTokens} fresh tokens from now.`,
+        "",
+        "```json",
+        JSON.stringify(tickets, null, 2),
+        "```",
+      ].join("\n"),
+    })
+    await this.save(run)
+  }
+
+  /** What a lead or a gap scout is told about a gap. */
+  private gapTicket(gap: GapRecord) {
+    return { gap_id: gap.gap_id, type: gap.type, side: gap.side, why: gap.why, suggested_source: gap.suggested_source, target: gap.target,
+      ...(gap.decision?.brief ? { brief: gap.decision.brief } : {}) }
+  }
+
+  private gapForScout(run: BriefingRun, lead: BriefingTask, gapId: string) {
+    const round = run.gapRound
+    if (round?.state !== "running" || lead.state !== "running" || !round.leads[lead.id]?.gaps.includes(gapId)) {
+      throw new WorkflowError(`${gapId} is not one of ${lead.id}'s gaps in a running gap round.`)
+    }
+    return round.gaps.find((gap) => gap.gap_id === gapId)!
+  }
+
+  /**
+   * Once every reopened lead has ended: what each reported is checked against its records (`brief.py gap-check`).
+   * A lead that did not hand in again leaves its gaps not reached; its first-round hand-in is restored if its records
+   * are as they were, and otherwise its first-round research stays in the chief's records, where it was merged.
+   */
+  private async settleGapRound(run: BriefingRun) {
+    const round = run.gapRound
+    if (round?.state !== "running") return
+    const leads = Object.keys(round.leads).map((id) => this.task(run, id))
+    if (leads.some((lead) => !isTerminal(lead.state))) return
+    await this.writeGapFiles(run)
+    for (const lead of leads) {
+      const entry = round.leads[lead.id]!
+      const handedIn = lead.state === "accepted"
+      let results: Record<string, Partial<GapRecord> & { outcome: GapOutcome; detail?: string }> = {}
+      if (handedIn) {
+        const checked = this.parseJson<{ results: typeof results }>(await this.py(run, ["brief.py", "gap-check",
+          path.join(run.runDir, "gap_report.json"), this.taskDir(run, lead), "--task", lead.id]))
+        results = checked?.results ?? {}
+      } else if (entry.firstRound) {
+        const now = await hashRecords(this.taskDir(run, lead))
+        const before = entry.firstRound.accepted.hashes
+        const same = [...new Set([...Object.keys(now), ...Object.keys(before)])].every((name) => now[name] === before[name])
+        if (same) {
+          const failure = lead.failure
+          lead.accepted = entry.firstRound.accepted
+          lead.merged = entry.firstRound.merged
+          lead.delivered = false
+          await this.setTaskState(run, lead, "accepted", `gap round ended without a hand-in (${failure ?? lead.state}); the first-round hand-in stands`)
+        }
+      }
+      for (const id of entry.gaps) {
+        const gap = round.gaps.find((item) => item.gap_id === id)!
+        const result = results[id]
+        if (result) {
+          Object.assign(gap, { outcome: result.outcome, detail: result.detail ?? "" },
+            result.event_ids ? { event_ids: result.event_ids } : {}, result.claim_ids ? { claim_ids: result.claim_ids } : {},
+            result.searched ? { searched: result.searched } : {})
+        } else {
+          gap.outcome = "not_reached"
+          gap.detail = handedIn ? "brief.py gap-check gave no result for it"
+            : `the lead did not hand in again (${lead.failure ?? lead.state}); its first-round research stands`
+        }
+      }
+    }
+    round.state = "checked"
+    await this.writeGapFiles(run)
+    await this.record(run, { gap_round: "checked", outcomes: this.gapSummary(run)!.outcomes })
+  }
+
+  private gapSummary(run: BriefingRun) {
+    const round = run.gapRound
+    if (!round) return null
+    const outcomes: Partial<Record<GapOutcome | "pending", number>> = {}
+    for (const gap of round.gaps) outcomes[gap.outcome ?? "pending"] = (outcomes[gap.outcome ?? "pending"] ?? 0) + 1
+    return { state: round.state, listed: round.gaps.length, notListed: round.notListed, outcomes, leads: Object.keys(round.leads),
+      file: path.join(run.runDir, "gap_report.json"), ...(round.note ? { note: round.note } : {}) }
+  }
+
+  private gapLine(run: BriefingRun) {
+    const summary = this.gapSummary(run)!
+    const outcomes = Object.entries(summary.outcomes).map(([outcome, count]) => `${count} ${outcome.replace("_", " ")}`).join(", ")
+    return `${summary.listed} gap(s) listed${outcomes ? ` (${outcomes})` : ""}${summary.notListed ? `; ${summary.notListed} more not listed` : ""}`
+      + `${summary.note ? `; ${summary.note}` : ""}. See gap_report.json.`
+  }
+
+  /** gaps.json (the listing) and gap_report.json (decisions, outcomes, baselines). Written by the controller only. */
+  private async writeGapFiles(run: BriefingRun) {
+    const round = run.gapRound
+    if (!round) return
+    const listing = round.gaps.map(({ decision: _decision, outcome: _outcome, detail: _detail, event_ids: _events, claim_ids: _claims, searched: _searched, ...gap }) => gap)
+    await writeJsonAtomic(path.join(run.runDir, "gaps.json"), { run_id: run.runId, gaps: listing, not_listed: round.notListed, skipped_types: round.skippedTypes })
+    await writeJsonAtomic(path.join(run.runDir, "gap_report.json"), {
+      run_id: run.runId, state: round.state, ...(round.note ? { note: round.note } : {}), not_listed: round.notListed, skipped_types: round.skippedTypes,
+      gaps: round.gaps,
+      leads: Object.fromEntries(Object.entries(round.leads).map(([id, entry]) => [id, { gaps: entry.gaps, baseline: entry.baseline }])),
+    })
   }
 
   // ── Independent verification ──────────────────────────────────────────
@@ -2233,6 +2666,7 @@ export class BriefingWorkflow {
         // Assess each of these in findings.json "previous"; blocker and major ones are required.
         previous_findings: open.map((finding) => ({ key: finding.key, severity: finding.severity, target: finding.target, problem: finding.problem, status: finding.status })),
         independent_verification: this.verificationSummary(run),
+        gap_round: this.gapSummary(run),
       },
     })
     version.reviewTasks.push(reviewer.id)
@@ -2435,6 +2869,7 @@ export class BriefingWorkflow {
       `- Window: ${run.window.start} to ${run.window.end} (${run.timezone}); cutoff ${run.cutoff}`,
       `- Validator readiness: ${run.final?.readiness ?? "not run"}; provenance: ${run.final?.provenance ?? "not run"}`,
       `- Review rounds: ${run.reviewRounds}; rework rounds: ${run.reworkRounds}; cross-border requests: ${run.crossBorderCount}`,
+      ...(run.gapRound ? [`- Gap round: ${this.gapLine(run)}`] : []),
       ...(run.verification ? [`- Independent verification: ${this.verificationLine(run)}`] : []),
       ...(run.partialReason ? [`- Missing input: ${run.partialReason}`] : []),
       "- Human sign-off is still required: qa/signoff.md. Mechanical checks and the agent review do not establish factual accuracy.",
@@ -2590,6 +3025,7 @@ export class BriefingWorkflow {
       })),
       ...(run.final ? { final: run.final } : {}),
       ...(run.partialReason ? { partialReason: run.partialReason } : {}),
+      ...(run.gapRound ? { gapRound: this.gapSummary(run) } : {}),
       ...(run.verification ? { verification: this.verificationSummary(run) } : {}),
     }
   }

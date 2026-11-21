@@ -1,0 +1,19 @@
+{
+  "note": "Machine-readable deadlines for the monitor. One entry per case in active_cases.md that has a dated deadline; the question, carry-over and closure condition stay in active_cases.md. Deadlines are copied from active_cases.md (2026-10-09 issue, unverified carry-over): update both files together. watch_sources are ids from discovery_sources.json; match_terms are case-insensitive substrings of an item's title or summary.",
+  "cases": [
+    {
+      "case_id": "A001",
+      "deadline": "2026-11-09T23:59",
+      "timezone": "America/New_York",
+      "watch_sources": ["fr-bis", "fr-terms", "bis-news"],
+      "match_terms": ["affiliates rule", "affiliate rule", "affiliates of", "50 percent rule", "50% rule"]
+    },
+    {
+      "case_id": "A002",
+      "deadline": "2026-11-10T23:59",
+      "timezone": "Asia/Shanghai",
+      "watch_sources": ["mofcom", "mofcom-xwfb", "govcn"],
+      "match_terms": ["稀土", "rare earth", "rare-earth"]
+    }
+  ]
+}

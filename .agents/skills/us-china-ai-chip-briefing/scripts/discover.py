@@ -12,6 +12,11 @@ Writes RUN/events.json (structured), RUN/candidates.md (ranked table for the wri
 (every source checked, with its access status). Everything here is discovery metadata as published by feeds and
 listings: titles, publishers and dates are what the source says, nothing is verified, and aggregator links must be
 resolved to the original before any claim is made. Blocked sources are recorded and skipped, never bypassed.
+
+  python3 scripts/discover.py --monitor --dir PROJECT/monitor
+
+runs one tick of the incremental monitor instead (new items since the last tick, source health, case deadlines, daily
+digest); see scripts/monitor_scan.py and references/monitor.json.
 """
 import argparse
 from datetime import date, datetime, timedelta, timezone
@@ -438,6 +443,9 @@ def write_outputs(out, start, end, tz, events, log, elapsed, top=40):
 
 
 def main():
+    if '--monitor' in sys.argv[1:]:  # incremental monitoring: scripts/monitor_scan.py
+        import monitor_scan
+        return monitor_scan.main(sys.argv[1:])
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--start', required=True); ap.add_argument('--end', required=True); ap.add_argument('--out', required=True)
     ap.add_argument('--tz', default='Asia/Hong_Kong'); ap.add_argument('--min-score', type=float, default=3)

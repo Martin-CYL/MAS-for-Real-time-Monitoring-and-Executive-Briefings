@@ -22,6 +22,7 @@ import { TurnFileTracker } from "./worktree-snapshot"
 import { backfillTouchedFileBases } from "./touched-file-backfill"
 import { resumeInterruptedTurns } from "./resume-turns"
 import { BriefingWorkflow, briefingWorkflowEnabled } from "./briefing-workflow"
+import { startBriefingMonitor } from "./briefing-monitor"
 import { ChatOrchestrator } from "./orchestrator"
 import { createChatCommands } from "./chat-commands"
 import { discoverProjects, type DiscoveredProject } from "./discovery"
@@ -241,6 +242,8 @@ export async function startNexServer(options: StartNexServerOptions = {}) {
   // Agents resumed after a restart must be recognised before their first turn.
   if (briefing) void briefing.loadProjects(store.listProjects().map((project) => project.localPath))
   agent.briefing = briefing
+  // The briefing monitor (phase 0): a timer over the Skill's incremental scan. No model, no chat. Opt-in.
+  const briefingMonitor = await startBriefingMonitor()
   agent.onChatSettled = (chatId) => {
     orchestrator.handleChatSettled(chatId)
     briefing?.handleChatSettled(chatId)
@@ -637,6 +640,7 @@ export async function startNexServer(options: StartNexServerOptions = {}) {
     clearInterval(staleChatDeleteInterval)
     worktreeProbe.stop()
     projectIcons.stop()
+    briefingMonitor?.stop()
     // Cancels every in-flight turn *and* marks its chat, so the next boot
     // restarts the work instead of leaving it interrupted (see resume-turns.ts).
     orchestrator.dispose()

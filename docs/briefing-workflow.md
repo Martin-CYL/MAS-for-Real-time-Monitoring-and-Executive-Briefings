@@ -279,6 +279,28 @@ NEX_BRIEFING_WORKFLOW=1 bun run start:production --host 127.0.0.1 --port 3210 --
 Install the Skill with multi-agent support where Codex finds it for the project (`.agents/skills/` in the project or
 the account's Codex skills directory), then ask in a chat: `/us-china-ai-chip-briefing … in multi-agent mode`.
 
+## Monitor (phase 0)
+
+A separate opt-in: a timer that runs the Skill's incremental scan (`discover.py --monitor`) every `tick_minutes`
+from the Skill's `references/monitor.json`. It is phase 0 of [the monitor design](briefing-monitor-design.md): no
+model is called, no chat is opened, no agent starts. The Skill decides which sources are due, what is new, the source
+health and case-deadline alerts and the daily digest; Nex runs one scan at a time and prints each result as `[monitor]`
+server log lines (one summary line per tick, one line per alert).
+
+```sh
+NEX_BRIEFING_MONITOR=1 NEX_BRIEFING_MONITOR_PROJECT=/absolute/path/to/project \
+  bun run start:production --host 127.0.0.1 --port 3210 --no-open
+```
+
+The project must have the Skill with `scripts/monitor_scan.py` (in its `.agents/skills/` or the account's Codex
+skills directory). Everything is written to `<project>/monitor/`: `state.json`, `log.jsonl`,
+`batches/<stamp>/items.json` and `digests/<date>.md`. It needs a host that stays on; a laptop that sleeps only scans
+when awake (each due tier once on waking, not once per missed slot). Alerts reach the server log and the files only;
+posting them in a chat is not part of phase 0.
+
+Tests: `src/server/briefing-monitor.test.ts` (scripted scan, timers, enabling; with `BRIEFING_SKILL_DIR` one tick
+through the real Skill with an empty source list) and the Skill's `tests/test_monitor.py`.
+
 ## Tests
 
 - `src/server/briefing-workflow.test.ts`: real coordinator, store and orchestrator with a scripted provider and a

@@ -15,11 +15,23 @@
     "run_fresh_tokens": 3000000,
     "task_fresh_tokens": {"scout": 250000, "lead": 400000, "cross_border": 150000, "reviewer": 250000, "verifier": 60000, "chief": 500000},
     "reserve_note": "Held back from research for the stages every report needs. New research may start only if, with every running agent spending its whole cap plus the in-flight margin, the reserve stays untouched.",
-    "reserve_fresh_tokens": {"synthesis": 250000, "review": 250000, "rework": 250000, "verification": 150000},
+    "reserve_fresh_tokens": {"synthesis": 250000, "review": 250000, "rework": 250000, "verification": 150000, "gap_research": 400000},
     "in_flight_margin": 25000,
     "wrap_up_at": 0.8,
     "rework_fresh_tokens": 150000,
     "lane_fresh_tokens": {"official": 150000, "company": 100000, "media": 150000}
+  },
+  "gap_round": {
+    "note": "One bounded round after the leads hand in (references/roles/chief-editor.md, Gap round): brief.py gaps lists coverage gaps by rule, the chief decides each one (a skip needs a reason), Nex reopens the leads for the pursued ones and checks their gap_results with brief.py gap-check. reserve_fresh_tokens.gap_research is held back from the first round and released when the gap round starts.",
+    "enabled": true,
+    "max_gaps_listed": 20,
+    "max_gaps_pursued": 8,
+    "max_gap_scouts_per_lead": 2,
+    "discovery_top": 10,
+    "lead_fresh_tokens": 80000,
+    "scout_fresh_tokens": 60000,
+    "lead_minutes": 30,
+    "scout_minutes": 15
   },
   "verification": {
     "note": "Independent verifiers check high-risk claims before the draft, without the author's sources (references/roles/verifier.md). Claims are chosen by brief.py verify-select.",

@@ -16,6 +16,12 @@ VERIFIED = {'independent': '独立核验找到一手来源支持', 'media_only':
             'not_found': '独立核验未能找到来源', 'contradicted': '独立核验发现来源与说法矛盾',
             'status_differs': '独立核验发现法律状态不符', 'scope_differs': '独立核验发现适用范围不符',
             'unverified': '核验员未完成，未独立核验'}
+# The multi-agent gap round (RUN/gap_report.json, written by the workflow controller): what was looked for again.
+GAP_TYPES = {'case_unfollowed': '持续跟踪事项没有交代', 'side_empty': '一边没有新事件', 'single_source': '重要事件只有媒体来源',
+             'discovery_unhandled': '发现阶段的线索没有处理', 'declared': 'Lead 自报的缺口', 'category_empty': '计划的类别没有事件'}
+GAP_OUTCOMES = {'filled': '补上了（记录核对通过）', 'filled_unconfirmed': '报告补上，但记录核对未通过',
+                'searched_none': '搜过，确实没有', 'not_searched': '报告没找到，但搜索记录不足',
+                'not_reached': '没来得及', 'skipped': '主编决定不补'}
 DECISIONS = {'approve': 'approve', 'hold': 'hold', 'reject': 'reject',
              '批准': 'approve', '暂缓': 'hold', '退回': 'reject'}
 
@@ -27,7 +33,37 @@ def first_quoted_source(c):
     return None
 
 
-def render_signoff(ledger, risk, report_sha, ledger_sha, coverage_excluded=None, limit=None, verification=None):
+def gap_target(gap):
+    t = gap.get('target') or {}
+    return (t.get('case_id') and f"{t['case_id']} {t.get('question', '')}".strip()) or t.get('event_id') and f"{t['event_id']} {t.get('title', '')}".strip() \
+        or t.get('candidate_id') and f"{t['candidate_id']} {t.get('title', '')}".strip() or t.get('category') or t.get('question') \
+        or t.get('topic') or t.get('side', '').upper() or '—'
+
+
+def render_gaps(report):
+    """The gap round for the person signing off: skipped cases and empty sides first, then every other gap."""
+    gaps = (report or {}).get('gaps') or []
+    if not gaps and not (report or {}).get('note'):
+        return []
+    count = {}
+    for g in gaps:
+        count[g.get('outcome', 'not_reached')] = count.get(g.get('outcome', 'not_reached'), 0) + 1
+    out = ['## 补搜（缺口检查）', '',
+           f"按规则算出 {len(gaps)} 个缺口" + (f"（另有 {report['not_listed']} 个未列出）" if report.get('not_listed') else '') + '：'
+           + ('；'.join(f'{GAP_OUTCOMES.get(k, k)} {v} 个' for k, v in count.items()) or '无') + '。'
+           + (f"{report['note']}。" if report.get('note') else ''), '']
+    first = [g for g in gaps if g.get('outcome') in ('skipped', 'not_reached', 'not_searched') and g.get('type') in ('case_unfollowed', 'side_empty')]
+    line = lambda g: (f"- {g.get('gap_id')} [{GAP_TYPES.get(g.get('type'), g.get('type'))} · {str(g.get('side', '')).upper()}] {gap_target(g)}"
+                      f" — {GAP_OUTCOMES.get(g.get('outcome'), g.get('outcome'))}：{g.get('detail') or '—'}")
+    if first:
+        out += ['### 先看：被跳过或没有补上的持续跟踪事项、空缺的一边', ''] + [line(g) for g in first] + ['']
+    rest = [g for g in gaps if g not in first]
+    if rest:
+        out += ['### 其余缺口', ''] + [line(g) for g in rest] + ['']
+    return out
+
+
+def render_signoff(ledger, risk, report_sha, ledger_sha, coverage_excluded=None, limit=None, verification=None, gaps=None):
     claims = {c['id']: c for c in (ledger or {}).get('claims', []) if isinstance(c, dict) and isinstance(c.get('id'), str)}
     high = sorted((cid for cid, r in risk.items() if r['tier'] == 'high' and cid in claims),
                   key=lambda cid: -risk[cid]['score'])
@@ -42,6 +78,7 @@ def render_signoff(ledger, risk, report_sha, ledger_sha, coverage_excluded=None,
            'reviewer: ', 'date: ', 'decision: hold        # approve / hold / reject',
            'coverage_checked: no  # 浏览过未列入事件清单并扫过报告中未标 claim ID 的事实后改为 yes', '',
            f'自动通过的低风险事项：{len(auto)} 项；未能自动确认的低风险事项：{len(low) - len(auto)} 项（见 review_report.md）。', '',
+           *render_gaps(gaps),
            f'## 需人工确认的高风险事项（{len(high)} 项，按风险排序）', '']
     for cid in high:
         c, r = claims[cid], risk[cid]

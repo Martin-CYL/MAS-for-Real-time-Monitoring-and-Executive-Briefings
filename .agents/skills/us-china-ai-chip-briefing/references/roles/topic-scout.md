@@ -26,5 +26,9 @@ you do not render HTML.
 6. Write `narrative.md` and `output.json`, run `python3 scripts/check_handoff.py TASK --role scout`, fix FAILs,
    then call `briefing_submit`.
 
+A gap scout (`gap` in your assignment) works on one gap from the Chief Editor's gap check: try the suggested kind of
+source first, log every search, and say plainly in the narrative whether the gap is filled or what you searched
+without result.
+
 Do not start other chats or agents. If the topic is empty in the window, say so in the narrative with what you
 searched; that is a valid result.

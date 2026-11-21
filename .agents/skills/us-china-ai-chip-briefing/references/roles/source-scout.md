@@ -24,6 +24,10 @@ the same time; the lead joins what you all find. You do not write the briefing a
 5. Write `narrative.md` and `output.json`, run `python3 scripts/check_handoff.py TASK --role scout`, fix FAILs, then
    call `briefing_submit`. The check reads your lane from `assignment.json`.
 
+A gap scout (`gap` in your assignment) works on one gap from the Chief Editor's gap check, within your lane: try the
+suggested kind of source first, log every search, and say plainly in the narrative whether the gap is filled or what
+you searched without result.
+
 Do not start other chats or agents. If your lane is quiet for a category, say so in the narrative with what you
 searched; that is a valid result. A blocked or paywalled page is a limitation, never evidence that a claim is false.
 

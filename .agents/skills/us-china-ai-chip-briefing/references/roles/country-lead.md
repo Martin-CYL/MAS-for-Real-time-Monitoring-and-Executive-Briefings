@@ -61,6 +61,30 @@ work as follows. `assignment.json` `lanes` lists the lanes (`SKILL/references/ro
    (`{"topic": "L002", "reason": "low materiality; reported only"}`); otherwise your handoff carries a
    `PRIMARY_LEAD_UNHANDLED` warning to the Chief Editor.
 
+## Gap round
+
+After your hand-in, the Chief Editor may send you gaps to fill, by ID (`G001`), each with its type, why it is a gap,
+the kind of source to try (`suggested_source`) and a brief. Your chat keeps its context; your earlier records stay.
+
+- Work in TASK as before. Fill a gap yourself, or delegate a gap scout: `briefing_delegate` (role `scout`,
+  `gap: "G003"`, a narrow topic and questions). Gap scouts have their own small budget and do not count against your
+  first-round scouts. In lane mode, also give `lane`: the lane that may record the gap's `suggested_source` (for
+  `official_document`, `official`; for `company_statement`, `company`). The scout is checked as that lane.
+- Log every search with `brief.py search TASK "query" --found "…"`: "nothing found" is checked against that log.
+- For an active case, record the event with `--case A00x`; for an empty category, `--category`.
+- Add to `output.json` one entry per gap you were given, in `"gap_results"`:
+  ```json
+  [{"gap_id": "G001", "outcome": "filled", "event_ids": ["E014"], "claim_ids": ["C031"]},
+   {"gap_id": "G003", "outcome": "searched_none", "searched": ["federalregister.gov: 'affiliates rule' March 2030", "bis.gov press"],
+    "note": "No notice in the window"},
+   {"gap_id": "G005", "outcome": "not_reached", "reason": "time budget"}]
+  ```
+  `filled` names the new events or claims that fill it; Nex checks they exist, are new, and fit the gap (a case
+  event for a case gap, a primary source for a media-only event, a page of the candidate for a discovery gap).
+  `searched_none` lists at least two searches you also logged. Report honestly: an unfilled gap reported as
+  `searched_none` or `not_reached` is a valid result; a `filled` the records do not show is printed as such.
+- Update `narrative.md` for anything you added, run `check_handoff.py --role lead` and `briefing_submit` again.
+
 ## Cross-border requests from the Chief Editor
 
 The Chief Editor may later send you a cross-border request with its own task ID and directory. Research it there

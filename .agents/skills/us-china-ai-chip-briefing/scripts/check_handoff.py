@@ -25,6 +25,7 @@ SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 import brief  # noqa: E402
 import evidence_tools as ev  # noqa: E402
+import gaps as gap_round  # noqa: E402
 from check_evidence import KINDS  # noqa: E402
 from check_quotes import host_of, is_official, load_domains  # noqa: E402
 from qa_common import finding, outcome  # noqa: E402
@@ -201,6 +202,11 @@ def check(run, role, lane=None):
         for e in evs:
             if e.get('decision') == 'include' and e['id'] not in text:
                 add('FAIL', 'NARRATIVE_EVENT_MISSING', f'narrative.md does not discuss {e["id"]} ("{e.get("title", "")[:40]}"); cite it by ID', event=e['id'])
+    if role == 'lead':
+        out = load(run / 'output.json')
+        if isinstance(out, dict) and 'gap_results' in out:
+            for problem in gap_round.result_problems(out['gap_results']):
+                add('FAIL', 'GAP_RESULTS', f'output.json {problem}')
     if role in ('lead', 'chief'):
         sides = {e.get('side') for e in evs if e.get('decision') in ('include', 'track')}
         if role == 'chief' and not ({'us', 'both'} & sides and {'cn', 'both'} & sides):

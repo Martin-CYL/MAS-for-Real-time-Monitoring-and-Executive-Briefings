@@ -25,9 +25,26 @@ coordination, materiality judgment, cross-border synthesis and the final report 
 3. **Cross-border.** Review the leads' `cross_border_requests` and your own watch list. Forward only questions with
    an evidence-backed basis using `briefing_cross_border` (to the other lead), then `briefing_wait`. Replies are merged
    into TASK like other research.
-4. **Select and synthesise** in TASK with `brief.py`: settle merge conflicts and duplicates, apply Link / Size / New,
+4. **Gap round.** Your first draft submission first runs the gap check (when the Skill enables it): Nex runs
+   `brief.py gaps` on your merged records and the leads' hand-ins, and lists what the rules can see is missing
+   (`RUN/gaps.json`): active cases nobody followed, a side with no new event, high-materiality events with only media
+   sources, top or official discovery candidates not in the records, the leads' own gaps and open questions, planned
+   categories with no event. You do not choose the gaps; you decide each one. Write `TASK/gap_plan.json`:
+   ```json
+   {"decisions": [
+     {"gap_id": "G001", "action": "pursue", "brief": "Check the Federal Register for a BIS notice on the rule"},
+     {"gap_id": "G004", "action": "skip", "reason": "Candidate D007 is a reprint of E003; already covered"},
+     {"gap_id": "G006", "action": "pursue", "side": "cn", "brief": "…"}]}
+   ```
+   Decide every listed gap once. `skip` needs a reason; skipped active cases and empty sides are printed first on the
+   sign-off sheet. `pursue` goes to the lead of the gap's side; a gap whose side is `both` or `other` and has no lead
+   of origin needs `"side": "us"` or `"cn"`. Pursue only what could change the report; the number is capped. Submit
+   with `briefing_submit` (kind `gap_plan`). Nex reopens the leads with their gaps (one round only), then
+   `briefing_wait` for them; their records are merged into TASK as before. Nex checks each reported outcome against
+   the records and writes `RUN/gap_report.json`, which you can read and cannot change. Then submit the draft again.
+5. **Select and synthesise** in TASK with `brief.py`: settle merge conflicts and duplicates, apply Link / Size / New,
    rank by importance. Identify cross-border relationships only where the evidence supports them.
-5. **Draft.** Write `TASK/report.json` (fields in the included report-content section; write everything in English).
+6. **Draft.** Write `TASK/report.json` (fields in the included report-content section; write everything in English).
    Facts appear in the report only through claims, word for word, so write analysis, not new facts. Submit with
    `briefing_submit` (kind `draft`). Nex merges, runs the handoff, provenance and report checks, renders
    `report.html` with the existing template and validator, and starts the Independent Reviewer. A refused draft
@@ -39,11 +56,11 @@ coordination, materiality judgment, cross-border synthesis and the final report 
    answer lists the findings by key (`verify-1/V001`): send them to the responsible lead (`briefing_delegate`, role
    `lead`, `reworkOf`, `findings` with those keys) once before the draft, or submit again and they go to the reviewer
    open. Their results are in `RUN/claim_verification.json`; you cannot change them.
-6. **Rework.** `briefing_wait` on the review task. Each finding names the affected claim, event or section and, where
+7. **Rework.** `briefing_wait` on the review task. Each finding names the affected claim, event or section and, where
    Nex can trace it, the responsible lead. Fix editorial findings yourself. Send evidence findings to the
    responsible lead with `briefing_delegate` (role `lead`, `reworkOf` the lead task, `findings` with the finding IDs). Then submit
    the draft again. Rework rounds are limited; unresolved findings are escalated to the human reviewer, not hidden.
-7. Finish with a short reply: run status, report path, what passed, what needs a person, and any missing input.
+8. Finish with a short reply: run status, report path, what passed, what needs a person, and any missing input.
 
 If a lead fails after its retry, do not invent its side: the run can continue only as `partial`, and your draft
 submission must acknowledge the missing input (`briefing_submit` with `partialReason`). The report will not be marked ready.

@@ -272,15 +272,19 @@ REQUIRED_SECTIONS = (
 VERIFIED_WORDS = r'已验证|已核实|已核验|经核实|(?i:\bfully verified\b|\bverified\b)'
 
 
-# Evidence wording brief.py writes in the status table (brief.LABELS[lang]['evidence'], 'proposed', 'verify_gap';
-# tests keep them in step), and the dot class each one gets there.
+# Evidence wording brief.py writes in the status table (brief.LABELS[lang]['evidence'], 'proposed', 'verify_gap', 'mixed',
+# 'chip'; tests keep them in step), and the status each one gets there.
 ROW_EVIDENCE = (
     {'supported': 'Official or company source opened', 'partial': 'Media reports only',
      'unresolved': 'Original not obtained or not yet checked', 'unsupported': 'Core claim not supported by a source',
-     'proposed': 'Proposed:', 'verify_gap': 'an independent check found no source for a key claim'},
+     'proposed': 'Proposed:', 'verify_gap': 'an independent check found no source for a key claim',
+     'mixed': 'some claims rest on media reports only'},
     {'supported': '官方或公司原文已打开', 'partial': '仅有媒体报道', 'unresolved': '原文未能取得或尚未核实',
-     'unsupported': '核心说法无法得到来源支持', 'proposed': '拟议：', 'verify_gap': '独立核验未能找到关键说法的来源'},
+     'unsupported': '核心说法无法得到来源支持', 'proposed': '拟议：', 'verify_gap': '独立核验未能找到关键说法的来源',
+     'mixed': '部分说法仅有媒体报道'},
 )
+CHIP_WORDS = ({'confirmed': 'Official', 'reported': 'Media report', 'pending': 'Proposed', 'unverified': 'No source yet'},
+              {'confirmed': '官方', 'reported': '媒体报道', 'pending': '拟议', 'unverified': '暂无来源'})
 DOT_STATE = (({'g', 'key-dot'}, 'confirmed'), ({'a', 'report'}, 'reported'), ({'s', 'pending'}, 'pending'),
              ({'u', 'unverified'}, 'unverified'))
 
@@ -289,38 +293,75 @@ def dot_state(classes):
     return next((state for names, state in DOT_STATE if classes & names), None)
 
 
+def expected_states(evidence, proposed=False, mixed=False, verify_gap=False):
+    """The statuses brief.py shows for an item (brief.labels_for): proposed first; no source is unverified; an
+    official source shows official, plus media when some claims rest on media only, or unverified when an
+    independent check found no source for a key claim."""
+    if proposed:
+        return {'pending'}
+    if evidence in ('unresolved', 'unsupported'):
+        return {'unverified'}
+    if evidence == 'supported':
+        return {'unverified'} if verify_gap else {'confirmed', 'reported'} if mixed else {'confirmed'}
+    return {'reported'} if evidence == 'partial' else None
+
+
 def row_state(text):
-    """The status brief.py shows for a row with this evidence text, or None when the text is not its wording
-    (a hand-written table is then left to the reviewer)."""
+    """Statuses for a status cell written as brief.py's evidence wording (reports built before the chips), or None
+    when the text is not its wording (a hand-written table is then left to the reviewer)."""
     for words in ROW_EVIDENCE:
         proposed = text.startswith(words['proposed'])
         body = text[len(words['proposed']):].strip() if proposed else text
         status = next((k for k in ('supported', 'partial', 'unresolved', 'unsupported') if body.startswith(words[k])), None)
-        if status is None:
-            continue
-        if proposed:
-            return 'pending'
-        if status in ('unresolved', 'unsupported'):
-            return 'unverified'
-        if status == 'supported':
-            return 'unverified' if words['verify_gap'] in body else 'confirmed'
-        return 'reported'
+        if status is not None:
+            return expected_states(status, proposed, words['mixed'] in body, words['verify_gap'] in body)
     return None
 
 
-def status_dots(doc):
-    """A status-table dot must match its row's evidence text: the legend gives each colour a meaning, and an amber
-    "media report" or green "official" dot on a row with no source misstates the evidence. Live reviews found this
-    twice after agents edited report.html by hand."""
-    items = []
-    for dot in doc.nodes:
-        if dot.tag != 'i' or 'dot' not in dot.classes or not dot.parent or dot.parent.tag != 'td':
+def status_cells(doc):
+    """Every table cell holding status dots: the statuses its dots show, the statuses its evidence implies (from
+    brief.py's data-evidence attributes, else its wording) and any chip whose word contradicts its own dot."""
+    cells = {}
+    for node in doc.nodes:
+        if node.tag != 'i' or 'dot' not in node.classes:
             continue
-        shown, text = dot_state(dot.classes), normalized(dot.parent.text())
-        want = row_state(text)
-        if shown and want and shown != want:
-            items.append(finding('FAIL', 'STATUS_DOT_MISMATCH', f'Status-table dot shows {shown}; the row\'s evidence reads {want}',
-                                 line=dot.line, excerpt=text[:80]))
+        td = next((a for a in node.ancestors() if a.tag == 'td'), None)
+        if td is not None:
+            cells.setdefault(id(td), (td, []))[1].append(node)
+    out = []
+    for td, dots in cells.values():
+        attrs = td.attrs
+        text = normalized(td.text())
+        if attrs.get('data-evidence'):
+            want = expected_states(attrs['data-evidence'], attrs.get('data-proposed') == '1', attrs.get('data-mixed') == '1',
+                                   attrs.get('data-verify-gap') == '1')
+        else:
+            want = row_state(text)
+        chips = []
+        for dot in dots:
+            chip = next((a for a in dot.ancestors() if 'chip' in a.classes), None)
+            state = dot_state(dot.classes)
+            if chip is not None and state and normalized(chip.text()) not in {w[state] for w in CHIP_WORDS}:
+                chips.append((normalized(chip.text()), state))
+        out.append({'line': dots[0].line, 'shown': {s for s in (dot_state(d.classes) for d in dots) if s},
+                    'expected': want, 'text': text[:80], 'chip_errors': chips})
+    return out
+
+
+def status_dots(doc):
+    """Status-table dots must match the row's evidence: the legend gives each colour a meaning, and an amber
+    "media report" or green "official" dot on a row with no source misstates the evidence. Live reviews found this
+    after agents edited report.html by hand, and when a row resting on official and media sources showed only the
+    official dot. A chip's word must also match its own dot."""
+    items = []
+    for cell in status_cells(doc):
+        if cell['expected'] and cell['shown'] and cell['shown'] != cell['expected']:
+            items.append(finding('FAIL', 'STATUS_DOT_MISMATCH',
+                                 f"Status cell shows {', '.join(sorted(cell['shown']))}; its evidence calls for "
+                                 f"{', '.join(sorted(cell['expected']))}", line=cell['line'], excerpt=cell['text']))
+        for word, state in cell['chip_errors']:
+            items.append(finding('FAIL', 'STATUS_DOT_MISMATCH', f'Chip reads "{word}" but its dot means {state}',
+                                 line=cell['line'], excerpt=cell['text']))
     return items
 
 

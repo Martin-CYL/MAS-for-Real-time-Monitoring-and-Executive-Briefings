@@ -94,6 +94,26 @@
       }
     },
     {
+      "id": "mixed-row-official-only",
+      "control": "negative",
+      "origin": [
+        "mas-20261121-175138-3f1e review-3 R003"
+      ],
+      "problem": "A row whose claims rest partly on media reports shows only the green official dot (the status cell as brief.py wrote it before chips).",
+      "mutations": [
+        {
+          "op": "replace",
+          "find": "data-evidence=\"supported\"><div><span class=\"chips\"><span class=\"chip\"><i class=\"dot g\"></i>Official</span></span></div></td>",
+          "replace": "><div><i class=\"dot g\"></i>Official or company source opened; some claims rest on media reports only</div></td>"
+        }
+      ],
+      "expect": {
+        "codes": [
+          "STATUS_DOT_MISMATCH"
+        ]
+      }
+    },
+    {
       "id": "legal-deadline-unmarked",
       "control": "negative",
       "origin": [
@@ -116,9 +136,10 @@
       "control": "negative",
       "detector": "reviewer",
       "origin": [
-        "mas-20261106-075318-300b review-3 R001"
+        "mas-20261106-075318-300b review-3 R001",
+        "mas-20261121-175138-3f1e review-3 R001"
       ],
-      "problem": "A group of notices is described by the subject of only some of them (six notices called rare-earth measures when four are)."
+      "problem": "A rule or group of notices is described more broadly than it applies: six notices called rare-earth measures when four are; a licence requirement stated without its exception for US-headquartered recipients."
     },
     {
       "id": "closed-item-as-milestone",
@@ -137,6 +158,15 @@
         "mas-20261022-173211-7579 review-1 R001"
       ],
       "problem": "The headline ranks one side's signal first although the other side's research is missing."
+    },
+    {
+      "id": "selection-note-in-status",
+      "control": "negative",
+      "detector": "reviewer",
+      "origin": [
+        "mas-20261121-175138-3f1e review-3 R002"
+      ],
+      "problem": "A status cell carries an editorial instruction ('keep its current legal status visible') instead of the item's status. brief.py no longer prints the selection reason in the table (only --status-note); a hand-written note is left to the reviewer."
     }
   ]
 }

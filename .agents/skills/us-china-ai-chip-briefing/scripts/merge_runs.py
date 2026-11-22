@@ -37,7 +37,7 @@ SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 import evidence_tools as ev  # noqa: E402
 
-EVENT_FIELDS = ('title', 'date', 'side', 'materiality', 'why_it_matters', 'decision', 'reason', 'followup', 'url',
+EVENT_FIELDS = ('title', 'date', 'side', 'materiality', 'why_it_matters', 'decision', 'reason', 'followup', 'status_note', 'url',
                 'proposed', 'unsupported', 'assessment', 'case_id', 'category')
 RANK = {'high': 3, 'medium': 2, 'low': 1, '': 0, None: 0}
 VISIBILITY = {'include': 3, 'track': 2, 'exclude': 1, None: 0}
@@ -370,7 +370,7 @@ def _join(t, m, task_id, out):
     assessment = {**(m.get('assessment') or {}), **(t.get('assessment') or {})}
     if assessment:
         t['assessment'] = assessment
-    for k in ('date', 'side', 'decision', 'why_it_matters', 'followup'):
+    for k in ('date', 'side', 'decision', 'why_it_matters', 'followup', 'status_note'):
         a, b = t.get(k), m.get(k)
         if not a and b:
             t[k] = b

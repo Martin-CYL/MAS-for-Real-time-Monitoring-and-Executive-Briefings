@@ -2,6 +2,7 @@
 import copy
 import io
 import json
+import re
 from contextlib import redirect_stdout
 from pathlib import Path
 import shutil
@@ -14,7 +15,7 @@ SKILL = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL / 'scripts'))
 import replay_eval as rv  # noqa: E402
 import brief  # noqa: E402
-from check_report import ROW_EVIDENCE, row_state, validate_report  # noqa: E402
+from check_report import CHIP_WORDS, ROW_EVIDENCE, row_state, validate_report  # noqa: E402
 
 
 def quiet(fn, *args, **kwargs):
@@ -43,7 +44,7 @@ class ControlTests(unittest.TestCase):
     def test_wrong_dot_fails_the_qa_and_the_row_audit(self):
         r = self.results['unsupported-row-amber']
         self.assertEqual((r['verdict'], r['new_codes']), ('DETECTED', ['STATUS_DOT_MISMATCH']))
-        self.assertEqual([(m['shown'], m['expected']) for m in r['rows']['mismatched']], [('reported', 'unverified')])
+        self.assertEqual([(m['shown'], m['expected']) for m in r['rows']['mismatched']], [(['reported'], ['unverified'])])
 
     def test_known_gap_that_is_now_caught_fails_until_the_case_is_updated(self):
         cases = copy.deepcopy(self.cases)
@@ -81,7 +82,7 @@ class MutationTests(unittest.TestCase):
 
     def test_status_dot_changes_one_row(self):
         page = rv.mutate(self.PAGE, {'op': 'status_dot', 'row': 1, 'to': 'a'})
-        self.assertEqual([d for d, _ in rv.status_rows(page)], ['g', 'a'])
+        self.assertEqual(re.findall(r'class="dot (\w)"', page), ['g', 'a'])
         for bad in ({'op': 'status_dot', 'row': 5, 'to': 'a'}, {'op': 'status_dot', 'row': 0, 'to': 'g'}, {'op': 'drop'}):
             with self.assertRaises(rv.CaseError):
                 rv.mutate(self.PAGE, bad)
@@ -153,20 +154,41 @@ class StatusDotTests(unittest.TestCase):
         return [x for x in validate_report(page, '2030-01-02') if x['code'] == 'STATUS_DOT_MISMATCH']
 
     def test_row_wording_is_brief_wording(self):
-        for words, lang in zip(ROW_EVIDENCE, ('en', 'zh')):
+        for words, chips, lang in zip(ROW_EVIDENCE, CHIP_WORDS, ('en', 'zh')):
             L = brief.LABELS[lang]
             self.assertEqual({k: words[k] for k in L['evidence']}, L['evidence'], lang)
-            self.assertEqual((words['proposed'], words['verify_gap']), (L['proposed'].strip(), L['verify_gap']), lang)
+            self.assertEqual((words['proposed'], words['verify_gap'], words['mixed']), (L['proposed'].strip(), L['verify_gap'], L['mixed']), lang)
+            self.assertEqual(chips, L['chip'], lang)
 
     def test_states_follow_brief_label_rules(self):
-        self.assertEqual(row_state('Official or company source opened; some claims rest on media reports only'), 'confirmed')
-        self.assertEqual(row_state('Official or company source opened; an independent check found no source for a key claim'), 'unverified')
-        self.assertEqual(row_state('Media reports only; an independent check found no source for a key claim'), 'reported')
-        self.assertEqual(row_state('Core claim not supported by a source; reason'), 'unverified')
-        self.assertEqual(row_state('Proposed: Official or company source opened'), 'pending')
-        self.assertEqual(row_state('拟议：仅有媒体报道'), 'pending')
-        self.assertEqual(row_state('原文未能取得或尚未核实；合成'), 'unverified')
+        self.assertEqual(row_state('Official or company source opened; some claims rest on media reports only'), {'confirmed', 'reported'})
+        self.assertEqual(row_state('Official or company source opened; an independent check found no source for a key claim'), {'unverified'})
+        self.assertEqual(row_state('Media reports only; an independent check found no source for a key claim'), {'reported'})
+        self.assertEqual(row_state('Core claim not supported by a source; reason'), {'unverified'})
+        self.assertEqual(row_state('Proposed: Official or company source opened'), {'pending'})
+        self.assertEqual(row_state('拟议：仅有媒体报道'), {'pending'})
+        self.assertEqual(row_state('原文未能取得或尚未核实；合成'), {'unverified'})
+        self.assertEqual(row_state('官方或公司原文已打开；部分说法仅有媒体报道'), {'confirmed', 'reported'})
         self.assertIsNone(row_state('Something a model wrote'))
+
+    def chip_cell(self, chips, **attrs):
+        a = ''.join(f' data-{k.replace("_", "-")}="{v}"' for k, v in attrs.items())
+        body = ''.join(f'<span class="chip"><i class="dot {d}"></i>{word}</span>' for d, word in chips)
+        return f'<table><tbody><tr><td>Item</td><td class="status-cell"{a}><span class="chips">{body}</span></td></tr></tbody></table>'
+
+    def test_chip_cells_are_checked_against_their_evidence(self):
+        ok = (([('g', 'Official'), ('a', 'Media report')], {'evidence': 'supported', 'mixed': '1'}),
+              ([('u', 'No source yet')], {'evidence': 'unsupported'}),
+              ([('s', 'Proposed')], {'evidence': 'partial', 'proposed': '1'}),
+              ([('u', 'No source yet')], {'evidence': 'supported', 'verify_gap': '1'}),
+              ([('a', '媒体报道')], {'evidence': 'partial'}))
+        for chips, attrs in ok:
+            self.assertEqual(self.mismatches(self.chip_cell(chips, **attrs)), [], (chips, attrs))
+        bad = (([('g', 'Official')], {'evidence': 'supported', 'mixed': '1'}),       # R003: media part not shown
+               ([('a', 'Media report')], {'evidence': 'unresolved'}),
+               ([('g', 'No source yet')], {'evidence': 'unresolved'}))             # chip word contradicts its dot
+        for chips, attrs in bad:
+            self.assertTrue(self.mismatches(self.chip_cell(chips, **attrs)), (chips, attrs))
 
     def test_wrong_dot_fails_and_right_dot_passes(self):
         bad = self.mismatches(self.row('a', 'Core claim not supported by a source; no dated source'))

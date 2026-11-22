@@ -17,6 +17,7 @@ from test_multi_agent import RULE, REPORT, Runs, call, codes, jload, jsave
 SKILL = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL / 'scripts'))
 import merge_runs  # noqa: E402
+from check_report import validate_report  # noqa: E402
 
 TZ = 'Asia/Hong_Kong'
 
@@ -161,7 +162,12 @@ class ClaimLevelLabelTests(unittest.TestCase):
     def test_one_official_claim_does_not_make_a_media_claim_official(self):
         html = self.build(mixed=True)
         self.assertEqual([l.split('"')[0] for l in self.story_labels()], ['confirmed', 'reported'])
-        self.assertIn('Official or company source opened; some claims rest on media reports only', html)
+        # The status table shows both chips in one cell, and the checker agrees with it.
+        cell = html[html.index('data-mixed="1"'):]
+        cell = cell[:cell.index('</td>')]
+        self.assertIn('<i class="dot g"></i>Official</span>', cell)
+        self.assertIn('<i class="dot a"></i>Media report</span>', cell)
+        self.assertNotIn('STATUS_DOT_MISMATCH', {x['code'] for x in validate_report(html, None)})
 
     def test_proposed_measure_reads_as_proposed_in_the_status_table(self):
         run = self.r.root
@@ -172,7 +178,9 @@ class ClaimLevelLabelTests(unittest.TestCase):
         self.r.report_json(run, eid)
         led = jload(run / 'evidence_ledger.json'); led['generated_at'] = '2030-03-10T19:00:00+08:00'; jsave(run / 'evidence_ledger.json', led)
         call('build', run)
-        self.assertIn('Proposed: Official or company source opened', (run / 'report.html').read_text(encoding='utf-8'))
+        html = (run / 'report.html').read_text(encoding='utf-8')
+        self.assertIn('data-proposed="1"><div><span class="chips"><span class="chip"><i class="dot s"></i>Proposed</span></span>'
+                      '<span class="note">Official or company source opened</span>', html)
 
 
 class MergeRecoveryTests(unittest.TestCase):

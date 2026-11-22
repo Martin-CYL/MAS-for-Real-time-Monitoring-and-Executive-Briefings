@@ -72,6 +72,8 @@ the kind of source to try (`suggested_source`) and a brief. Your chat keeps its 
   `official_document`, `official`; for `company_statement`, `company`). The scout is checked as that lane.
 - Log every search with `brief.py search TASK "query" --found "…"`: "nothing found" is checked against that log.
 - For an active case, record the event with `--case A00x`; for an empty category, `--category`.
+- For every tracked or carried-over item, add `--status-note` to `event decide`: one sentence for the reader on where it
+  stands now, from your sources. `--reason` is your selection note and is not shown in the report.
 - Add to `output.json` one entry per gap you were given, in `"gap_results"`:
   ```json
   [{"gap_id": "G001", "outcome": "filled", "event_ids": ["E014"], "claim_ids": ["C031"]},

@@ -76,6 +76,9 @@ h2{font:400 27px/1.42 var(--serif);letter-spacing:-.02em;margin:0 0 11px}
 .matrix-table th{font:750 11px/1.56 var(--sans);text-align:left;color:#535860;border-top:1px solid #c9c7c3;border-bottom:1px solid #d4d3d0;padding:11px;background:var(--light);vertical-align:top}
 .matrix-table td{font-size:12px;line-height:1.78;color:#444951;border-bottom:1px solid #e5e3e0;padding:12px 11px;vertical-align:top}
 .matrix-table td:first-child{font-weight:700;color:#292e34}.muted{color:#81858a;font-weight:400}
+.status-table .group th{font:800 10px/1.6 var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--red);background:transparent;border-top:0;border-bottom:1px solid #d4d3d0;padding:18px 11px 6px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}.chip{display:inline-flex;align-items:center;font:700 11px/1.55 var(--sans);color:#30343a;background:#f4f3f0;border:1px solid #e1dfdb;border-radius:999px;padding:1px 9px 1px 7px;white-space:nowrap}
+.status-cell .note{display:block;margin-top:6px;color:#5d6268;font-size:11.5px;line-height:1.6}.status-table td a{color:inherit;text-decoration:underline;text-underline-offset:2px}
 /* timeline (two tracks) */
 .policy-timeline{margin:22px 0 25px;padding:17px 0 19px;border-top:2px solid #34373a;border-bottom:1px solid var(--line)}
 .tl-heading{font:400 21px/1.42 var(--serif);margin:0 0 5px}.tl-explain{font-size:11px;color:#777e83;margin:0 0 16px}
@@ -114,7 +117,8 @@ footer{border-top:1px solid var(--line);padding:16px 0 22px;display:flex;justify
 @media(max-width:720px){.mobile-cards thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
 .mobile-cards,.mobile-cards tbody,.mobile-cards tr{display:block;width:100%}.mobile-cards tr{border:1px solid #e0dfdc;padding:6px 12px;margin-bottom:10px}
 .mobile-cards td{display:grid;grid-template-columns:82px minmax(0,1fr);gap:10px;padding:8px 0;border-bottom:1px solid #f0efed}.mobile-cards td:last-child{border-bottom:0}
-.mobile-cards td:before{content:attr(data-label);font:700 10px/1.7 var(--sans);color:#747a7e}}
+.mobile-cards td:before{content:attr(data-label);font:700 10px/1.7 var(--sans);color:#747a7e}
+.mobile-cards tr.group{border:0;padding:10px 0 0;margin:0}.mobile-cards tr.group th{display:block;padding:8px 0 4px}}
 @media(max-width:640px){.inner{padding:0 16px}.mastmeta>span{display:none}.takeaways{display:block}.takeaways .summary{margin-top:12px}h1{font-size:28px}h2{font-size:23px}
 .chartbar{grid-template-columns:80px 1fr 92px;gap:8px}.chartbar .val{font-size:11px}.glossary-grid{grid-template-columns:1fr}footer{display:block}}
 @media print{@page{size:A4;margin:9mm}body{background:#fff}.sheet{margin:0;border:0;border-top:3px solid var(--red)}.inner{padding:0 3mm}.print{display:none}
@@ -139,9 +143,10 @@ footer{border-top:1px solid var(--line);padding:16px 0 22px;display:flex;justify
 <div class="summary"><b>{{Judgment title}}</b>{{…}}</div></section>
 
 <div class="panel"><div class="micro">MONITORING STATUS / Event status</div><h2>What is confirmed, and what comes next?</h2>
-<table class="matrix-table mobile-cards"><thead><tr><th style="width:29%">Item</th><th style="width:22%">Evidence status</th><th style="width:25%">Next milestone</th><th style="width:24%">Relevant work</th></tr></thead><tbody>
-<!-- First rows: last issue's tracked items with outcome (resolved / changed / no change / overdue). Then new items. -->
-<tr><td data-label="Item">{{Item}}<br><span class="muted">{{Carried over: outcome, or New this period}}</span></td><td data-label="Evidence status">{{…}}</td><td data-label="Next milestone">{{Exact date}}</td><td data-label="Relevant work">{{KYC / underwriting / …}}</td></tr>
+<table class="matrix-table status-table mobile-cards"><thead><tr><th style="width:29%">Item</th><th style="width:22%">Evidence status</th><th style="width:25%">Next milestone</th><th style="width:24%">Relevant work</th></tr></thead><tbody>
+<!-- Two groups: "New this period", then "Carried-over cases" (outcome — resolved / changed / no change / overdue — in the note). One chip per evidence label: an item resting on official and media sources gets both. Notes are for the reader; selection reasons stay out of the table. -->
+<tr class="group"><th colspan="4" scope="colgroup">New this period</th></tr>
+<tr><td data-label="Item"><div>{{Item}}</div></td><td data-label="Evidence status" class="status-cell"><div><span class="chips"><span class="chip"><i class="dot g"></i>Official</span><span class="chip"><i class="dot a"></i>Media report</span></span><span class="note">{{…}}</span></div></td><td data-label="Next milestone"><div>{{Exact date}}</div></td><td data-label="Relevant work"><div>{{KYC / underwriting / …}}</div></td></tr>
 </tbody></table>
 <div class="status-key"><b>Key</b><span><i class="dot g"></i>Official or company announcement</span><span><i class="dot a"></i>Media report, not independently confirmed</span><span><i class="dot s"></i>Proposed, pending approval or not yet in force</span><span><i class="dot u"></i>No supporting source located</span></div>
 </div>

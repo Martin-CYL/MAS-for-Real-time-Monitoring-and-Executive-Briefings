@@ -14,7 +14,7 @@ Commands (run from the skill folder):
   brief.py fetch RUN URL [--file PAGE.txt] [--route browser|http_tool|api|reprint]
   brief.py event RUN add --title T --date YYYY-MM-DD --side us|cn|both|other [--source S001] [--url U]
                          [--materiality high|medium|low] [--why TEXT] [--category ID] [--case A001]
-  brief.py event RUN decide E001 include|track|exclude --reason TEXT [--followup TEXT] [--proposed] [--unsupported]
+  brief.py event RUN decide E001 include|track|exclude --reason TEXT [--followup TEXT] [--status-note TEXT] [--proposed] [--unsupported]
                          [--link TEXT --size TEXT --new TEXT]
   brief.py add-claim RUN E001 S001 --quote "exact words from the page" --text "中文句子" [--kind legal] [--type news]
   brief.py withdraw RUN C001 --reason TEXT
@@ -62,8 +62,9 @@ LABELS = {
         'thesis_sep': '，', 'readpath': '3 分钟阅读：本期三个判断 → 事件状态表 → 管理层参考',
         'questions': '管理层关注的三个问题', 'public_only': '公开资料情报简报；不使用任何金融机构的内部客户信息、授信记录或敞口数据。',
         'judgments': '本期三个判断', 'panel': 'MONITORING STATUS / 事件状态', 'panel_title': '哪些事项已确认，下一步看什么？',
-        'columns': ('事项', '证据状态', '下一节点', '位置'), 'carried': '上期跟踪', 'new': '本期新增', 'join': '；',
-        'chapter': '见第 {n} 章', 'tracking': '持续跟踪', 'key': '标记',
+        'columns': ('事项', '证据状态', '下一节点', '位置'), 'carried': '延续跟踪的事项', 'new': '本期新增', 'join': '；',
+        'chapter': '见第 {n} 章', 'tracking': '仅跟踪', 'key': '标记',
+        'chip': {'confirmed': '官方', 'reported': '媒体报道', 'pending': '拟议', 'unverified': '暂无来源'},
         'background': '背景：', 'change': '本次变化：', 'impact': '影响：', 'response': '企业回应：', 'uncertain': '尚不确定：',
         'source': '来源：', 'blocked': '；未能打开：', 'host_join': '、', 'watch': '后续观察',
         'closing': '后续监测事项', 'closing_title': '未来一个月的关键节点', 'view': 'MANAGEMENT VIEW / 管理层参考',
@@ -80,8 +81,9 @@ LABELS = {
         'questions': 'Three questions for management',
         'public_only': 'Public-source intelligence briefing; uses no internal client, credit or exposure data of any financial institution.',
         'judgments': 'Three key judgments', 'panel': 'MONITORING STATUS / Event status', 'panel_title': 'What is confirmed, and what comes next?',
-        'columns': ('Item', 'Evidence status', 'Next milestone', 'Where'), 'carried': 'Carried over', 'new': 'New this period', 'join': '; ',
-        'chapter': 'See chapter {n}', 'tracking': 'Tracking', 'key': 'Key',
+        'columns': ('Item', 'Evidence status', 'Next milestone', 'Where'), 'carried': 'Carried-over cases', 'new': 'New this period', 'join': '; ',
+        'chapter': 'Chapter {n}', 'tracking': 'Tracking only', 'key': 'Key',
+        'chip': {'confirmed': 'Official', 'reported': 'Media report', 'pending': 'Proposed', 'unverified': 'No source yet'},
         'background': 'Background: ', 'change': 'What changed: ', 'impact': 'Why it matters: ', 'response': 'Company response: ',
         'uncertain': 'Still uncertain: ', 'source': 'Source: ', 'blocked': '; could not open: ', 'host_join': ', ', 'watch': 'Watch next',
         'closing': 'What to watch', 'closing_title': 'Key milestones in the next month', 'view': 'MANAGEMENT VIEW / Management view',
@@ -250,7 +252,12 @@ def cmd_event(a):
             print('--reason is required (one line)'); return 1
         if a.category and a.category not in gap_round.categories():
             print(f'--category must be one of {", ".join(sorted(gap_round.categories()))} (references/roles/categories.json)'); return 1
+        note = ' '.join((a.status_note or '').split())
+        if len(note) > 240:
+            print('--status-note is one short sentence for the reader (240 characters at most)'); return 1
         e.update(decision=a.decision, reason=a.reason)
+        if note:
+            e['status_note'] = note
         for key, field in (('followup', 'followup'), ('materiality', 'materiality'), ('why', 'why_it_matters'), ('side', 'side'), ('title', 'title'),
                            ('category', 'category')):
             if getattr(a, key, None):
@@ -560,25 +567,46 @@ def page(run, issue_date=None):
          f'<section class="takeaways"><div class="label">{L["judgments"]}</div>'
          + ''.join(f'<div class="summary"><b>{w(j["title"])}</b>{w(j["text"])}</div>' for j in rep['judgments']) + '</section>']
     # Status table from the event records: tracked and unresolved items stay visible without extra writing.
-    order = sorted((e for e in evs.values() if e.get('decision') in ('include', 'track')),
-                   key=lambda e: (e['decision'] != 'include', not e.get('case_id'), e['id']))
+    # Two groups (new this period, carried-over cases). The status cell shows one chip per evidence label, so a story
+    # resting on official and media sources shows both; a short note only where the chip alone says too little
+    # (what a proposal rests on, a claim no source supports, a failed independent check, the item's reader-facing
+    # status note). Selection reasons stay
+    # in coverage.json. data-* attributes let check_report.py compare the chips with the evidence record.
+    watch = {s['event']: s.get('watch') for s in rep['stories'] if s.get('watch')}
+    visible = [e for e in evs.values() if e.get('decision') in ('include', 'track')]
+    order = sorted(visible, key=lambda e: (e['decision'] != 'include', not e.get('case_id'), e['id']))
+    groups = [(L['new'], [e for e in visible if not e.get('case_id')]), (L['carried'], [e for e in visible if e.get('case_id')])]
     rows = []
     c1, c2, c3, c4 = L['columns']
-    for e in order:
-        shown = [claims[c] for c in e.get('claim_ids') or [] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
-        labels = labels_for(e, shown, verification)
-        st = labels[0]
-        ev_text = (L['proposed'] if e.get('proposed') else '') + L['evidence'][e['evidence_status']] \
-            + (f'{L["join"]}{L["mixed"]}' if len(labels) > 1 else '') \
-            + (f'{L["join"]}{L["verify_gap"]}' if verify_gap(shown, verification) else '') \
-            + ('' if e['decision'] == 'include' else f'{L["join"]}{e.get("reason", "")}')
-        where = L['chapter'].format(n=e['_chapter']) if e.get('_chapter') else L['tracking']
-        rows.append(f'<tr><td data-label="{c1}">{w(e["title"])}<br><span class="muted">{L["carried"] if e.get("case_id") else L["new"]}</span></td>'
-                    f'<td data-label="{c2}"><i class="dot {STATUS[st][0]}"></i>{w(ev_text)}</td>'
-                    f'<td data-label="{c3}">{w(e.get("followup") or "—")}</td><td data-label="{c4}">{w(where)}</td></tr>')
+    for heading, members in groups:
+        if not members:
+            continue
+        rows.append(f'<tr class="group"><th colspan="4" scope="colgroup">{heading}</th></tr>')
+        for e in sorted(members, key=lambda e: (e['decision'] != 'include', e['id'])):
+            shown = [claims[c] for c in e.get('claim_ids') or [] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
+            labels = labels_for(e, shown, verification)
+            gap = verify_gap(shown, verification)
+            notes = []
+            if labels[0] == 'pending' or (labels[0] == 'unverified' and e['evidence_status'] == 'unsupported'):
+                notes.append(L['evidence'][e['evidence_status']])  # what a proposal rests on; a claim no source supports
+            if gap:
+                notes.append(L['verify_gap'])
+            if (e.get('status_note') or '').strip():
+                notes.append(e['status_note'].strip())
+            attrs = f' data-evidence="{e["evidence_status"]}"' + (' data-proposed="1"' if e.get('proposed') else '') \
+                + (' data-mixed="1"' if len(labels) > 1 else '') + (' data-verify-gap="1"' if gap else '')
+            chips = ''.join(f'<span class="chip"><i class="dot {STATUS[st][0]}"></i>{L["chip"][st]}</span>' for st in labels)
+            note = f'<span class="note">{w(L["join"].join(notes))}</span>' if notes else ''
+            where = f'<a href="#ch{e["_chapter"]}">{L["chapter"].format(n=e["_chapter"])}</a>' if e.get('_chapter') else f'<span class="muted">{w(L["tracking"])}</span>'
+            # One wrapper per cell: on a phone each cell is a two-column grid (label, content), so loose children
+            # (a note, an abbreviation) would otherwise fall into the label column.
+            rows.append(f'<tr><td data-label="{c1}"><div>{w(e["title"])}</div></td>'
+                        f'<td data-label="{c2}" class="status-cell"{attrs}><div><span class="chips">{chips}</span>{note}</div></td>'
+                        f'<td data-label="{c3}"><div>{w(e.get("followup") or watch.get(e["id"]) or "—")}</div></td>'
+                        f'<td data-label="{c4}"><div>{where}</div></td></tr>')
     P.append(f'<div class="panel"><div class="micro">{L["panel"]}</div><h2>{L["panel_title"]}</h2>'
-             f'<table class="matrix-table mobile-cards"><thead><tr><th style="width:29%">{c1}</th><th style="width:29%">{c2}</th>'
-             f'<th style="width:26%">{c3}</th><th style="width:16%">{c4}</th></tr></thead><tbody>{"".join(rows)}</tbody></table>'
+             f'<table class="matrix-table status-table mobile-cards"><thead><tr><th style="width:34%">{c1}</th><th style="width:30%">{c2}</th>'
+             f'<th style="width:24%">{c3}</th><th style="width:12%">{c4}</th></tr></thead><tbody>{"".join(rows)}</tbody></table>'
              f'<div class="status-key"><b>{L["key"]}</b>' + ''.join(f'<span><i class="dot {STATUS[k][0]}"></i>{lab}</span>' for k, lab in L['status'].items())
              + '</div></div>')
     for ci, ch in enumerate(chapters, 1):
@@ -738,6 +766,8 @@ def main():
     p.add_argument('--title'); p.add_argument('--date'); p.add_argument('--side'); p.add_argument('--source', action='append')
     p.add_argument('--url'); p.add_argument('--materiality', choices=['high', 'medium', 'low']); p.add_argument('--why')
     p.add_argument('--reason'); p.add_argument('--followup')
+    p.add_argument('--status-note', dest='status_note',
+                   help='one sentence for the reader on where the item stands; shown in the status table (the reason is not)')
     p.add_argument('--proposed', action='store_true'); p.add_argument('--unsupported', action='store_true')
     p.add_argument('--case'); p.add_argument('--link'); p.add_argument('--size'); p.add_argument('--new')
     p.add_argument('--category', help='research category id from references/roles/categories.json')

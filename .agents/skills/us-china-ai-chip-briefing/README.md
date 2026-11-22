@@ -35,7 +35,8 @@ workflow above is unchanged. Each agent works in its own `brief.py` run under `r
 | `scripts/gaps.py` | The gap round: `brief.py gaps` lists coverage gaps by rule after the leads hand in; `brief.py gap-check` tests a reopened lead's `gap_results` against its records (see the module docstring) |
 
 `brief.py` additions: `init --lang en --no-cases`, `event add --case`, `event add|decide --category`, `event decide --link --size --new` (stored as
-`assessment`; an explicit decision settles merge conflicts), and `withdraw RUN CID --reason` (a claim leaves the
+`assessment`; an explicit decision settles merge conflicts), `event decide --status-note` (one sentence for the reader,
+shown in the status table; `--reason` never is), and `withdraw RUN CID --reason` (a claim leaves the
 report but stays in the ledger's `withdrawn` list; its ID is never reused).
 
 ## Incremental monitor (phase 0)
@@ -176,6 +177,15 @@ python3 scripts/validate.py tests/fixtures/flawed_report.html --ledger tests/fix
 
 Expected: dates/figures FAIL, legal C002 FAIL, late definition/unchecked links/human hold UNVERIFIED, valid traceability/recorded C001 review PASS. `tests/evaluate_fixtures.py` additionally simulates reachable/404/403 sources, clearly labeled **mock** in the QA report. `evaluation/flawed_mock/review_report.md` in the delivery package is a generated example of all three statuses and human sign-off prompts.
 
+### Status table
+
+`brief.py build` groups the status table into "New this period" and "Carried-over cases". The status cell shows one
+chip per evidence label, so an item that rests on both official and media sources shows both. It adds a short note
+only where the chip alone says too little: what a proposal rests on, a claim no source supports, an independent check
+that failed, or the item's `--status-note`. The milestone falls back to the story's `watch`, and "Where" links to the
+chapter. `STATUS_DOT_MISMATCH` checks the chips against the cell's `data-evidence`, `data-proposed`, `data-mixed` and
+`data-verify-gap` attributes, and checks each chip's word against its own dot.
+
 ### Replay evaluation (no model call)
 
 ```sh
@@ -187,7 +197,7 @@ python3 scripts/replay_eval.py runs PATH/TO/RUN [PATH/TO/RUN ...] --output-dir P
 `evaluation/replay-cases.json`, each reproducing a finding from a live run's review. It reports which ones the
 mechanical QA notices. Cases it misses today are marked `known_gap`, so the tool still exits 0. When one of them starts
 being caught, the tool exits 1 until the case is updated. Findings only a reviewer can judge are listed but not run.
-Current result: 4 of 5 noticed. The remaining known gap is a legal deadline stated outside any claim.
+Current result: 5 of 6 noticed. The remaining known gap is a legal deadline stated outside any claim.
 
 `check_report.py` fails `STATUS_DOT_MISMATCH` when a status-table dot disagrees with its row's `brief.py` evidence
 wording. Examples: amber "media report" on a row with no source, or green "official" on an unresolved one. Both live

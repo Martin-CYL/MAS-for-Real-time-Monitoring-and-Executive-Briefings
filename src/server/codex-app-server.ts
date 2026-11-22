@@ -175,7 +175,32 @@ interface SessionContext {
   unclaimedTurns: Map<string, string>
   stderrLines: string[]
   closed: boolean
+  /** When the reaper first saw the session with nothing in flight; null while it is busy. */
+  idleSince?: number | null
 }
+
+/**
+ * How long a chat's app-server may sit idle before it is stopped. Every chat keeps its own process, and a briefing
+ * run alone opens about fifteen chats, so without this idle processes accumulate until the container's memory or
+ * pids limit kills processes mid-run (found live: 30 idle sessions held 1.08 of 1.2 GB, oom_kill 6). The next turn
+ * restarts the process and resumes the thread, Nex tools included. `NEX_CODEX_IDLE_STOP_MS`; 0 keeps them forever.
+ */
+export const DEFAULT_CODEX_IDLE_STOP_MS = 120_000
+
+function idleStopFromEnv(value: string | undefined) {
+  if (value === undefined || value.trim() === "") return DEFAULT_CODEX_IDLE_STOP_MS
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : DEFAULT_CODEX_IDLE_STOP_MS
+}
+
+class RequestTimeoutError extends Error {}
+
+function errorText(error: unknown) {
+  return error instanceof Error ? error.message : String(error)
+}
+
+/** How long a restarted briefing session may take to connect its Nex tools before the start is retried. */
+const NEX_TOOLS_READY_MS = 20_000
 
 export interface StartCodexSessionArgs {
   customTools?: NexToolHost
@@ -191,6 +216,8 @@ export interface StartCodexSessionArgs {
    * Its cwd replaces `cwd`.
    */
   restriction?: CodexRestriction
+  /** Internal: set on the one restart after a briefing session came up without its Nex tools. */
+  nexToolsRetried?: boolean
 }
 
 export interface StartCodexTurnArgs {
@@ -822,9 +849,23 @@ export class CodexAppServerManager {
   private readonly spawnProcess: SpawnCodexAppServer
   private onRateLimits: ((snapshot: CodexRateLimitSnapshot) => void) | null = null
   private onTaskActivity: ((chatId: string, update: SubagentActivityUpdate) => void) | null = null
+  private readonly idleStopMs: number
+  private readonly sweepIntervalMs: number
+  private readonly nexToolsReadyMs: number
+  private sweeper: ReturnType<typeof setInterval> | null = null
 
-  constructor(args: { spawnProcess?: SpawnCodexAppServer; now?: () => number } = {}) {
+  constructor(args: {
+    spawnProcess?: SpawnCodexAppServer
+    now?: () => number
+    /** See DEFAULT_CODEX_IDLE_STOP_MS. */
+    idleStopMs?: number
+    sweepIntervalMs?: number
+    nexToolsReadyMs?: number
+  } = {}) {
     this.now = args.now ?? (() => performance.now())
+    this.idleStopMs = args.idleStopMs ?? idleStopFromEnv(process.env.NEX_CODEX_IDLE_STOP_MS)
+    this.sweepIntervalMs = args.sweepIntervalMs ?? Math.min(30_000, Math.max(1_000, this.idleStopMs))
+    this.nexToolsReadyMs = args.nexToolsReadyMs ?? NEX_TOOLS_READY_MS
     this.spawnProcess = args.spawnProcess ?? ((cwd) =>
       spawn("codex", ["app-server"], {
         cwd,
@@ -945,13 +986,15 @@ export class CodexAppServerManager {
     }
   }
 
-  async startSession(args: StartCodexSessionArgs) {
+  async startSession(args: StartCodexSessionArgs): Promise<{ sessionToken: string | null; resumeFellBack: boolean } | undefined> {
     const existing = this.sessions.get(args.chatId)
     const cwd = args.restriction?.cwd ?? args.cwd
     const restriction = restrictionKey(args.restriction)
     if (existing && !existing.closed && existing.cwd === cwd && existing.restriction === restriction && !args.pendingForkSessionToken) {
+      existing.idleSince = null
       return
     }
+    this.ensureSweeper()
 
     if (existing) {
       this.stopSession(args.chatId)
@@ -1066,11 +1109,75 @@ export class CodexAppServerManager {
       }
 
       context.sessionToken = response.thread.id
+      if (customTools && args.restriction) {
+        const missing = await this.missingNexTools(context, args.restriction.nexTools)
+        if (missing) {
+          this.stopSession(args.chatId)
+          if (args.nexToolsRetried) throw new Error(`Nex tools unavailable in this Codex session: ${missing}`)
+          return await this.startSession({ ...args, sessionToken: context.sessionToken, pendingForkSessionToken: null, nexToolsRetried: true })
+        }
+      }
       return { sessionToken: context.sessionToken, resumeFellBack }
     } catch (error) {
       this.stopSession(args.chatId)
       throw error
     }
+  }
+
+  /**
+   * Whether a briefing agent's session really offers its Nex tools. A session can start with the Nex MCP server
+   * failed (found live: under memory pressure a restarted chief kept working with its briefing_* tools gone, and
+   * could not submit). Null when they are all connected, or when this Codex cannot report it.
+   */
+  private async missingNexTools(context: SessionContext, expected: readonly string[]): Promise<string | null> {
+    if (!expected.length || !context.sessionToken) return null
+    const deadline = this.now() + this.nexToolsReadyMs
+    let last = "not reported"
+    while (!context.closed) {
+      let response: { data?: Array<{ name?: string; runtimeStatus?: string; tools?: Record<string, unknown> }> }
+      try {
+        response = await this.sendRequest(context, "mcpServerStatus/list",
+          { threadId: context.sessionToken, serverName: "nex", detail: "toolsAndAuthOnly" }, Math.min(5_000, this.nexToolsReadyMs))
+      } catch (error) {
+        // An older Codex without the method, or one that does not answer it: nothing to check against.
+        if (error instanceof RequestTimeoutError || /method|unknown|not found|unsupported|variant/i.test(errorText(error))) return null
+        throw error
+      }
+      const nex = (response.data ?? []).find((server) => server.name === "nex")
+      const missing = expected.filter((tool) => !(nex?.tools && tool in nex.tools))
+      if (nex?.runtimeStatus === "connected" && missing.length === 0) return null
+      last = nex ? `${nex.runtimeStatus ?? "unknown"}${missing.length ? `, missing ${missing.join(", ")}` : ""}` : "nex server absent"
+      if (nex?.runtimeStatus === "failed" || this.now() >= deadline) break
+      await new Promise((resolve) => setTimeout(resolve, 250))
+    }
+    return context.closed ? "session closed while starting" : last
+  }
+
+  /** Stops app-servers that have had nothing in flight for idleStopMs. Returns the chats stopped. */
+  reapIdleSessions(): string[] {
+    if (this.idleStopMs <= 0) return []
+    const now = this.now()
+    const stopped: string[] = []
+    for (const [chatId, context] of this.sessions) {
+      const busy = context.pendingTurn !== null || context.pendingRequests.size > 0
+        || [...context.agents.values()].some((agent) => agent.turnId !== null)
+      if (busy || context.closed) {
+        context.idleSince = null
+        continue
+      }
+      context.idleSince ??= now
+      if (now - context.idleSince >= this.idleStopMs) {
+        this.stopSession(chatId)
+        stopped.push(chatId)
+      }
+    }
+    return stopped
+  }
+
+  private ensureSweeper() {
+    if (this.sweeper || this.idleStopMs <= 0) return
+    this.sweeper = setInterval(() => this.reapIdleSessions(), this.sweepIntervalMs)
+    ;(this.sweeper as { unref?: () => void }).unref?.()
   }
 
   async startTurn(args: StartCodexTurnArgs): Promise<HarnessTurn> {
@@ -1279,6 +1386,8 @@ export class CodexAppServerManager {
     for (const chatId of this.sessions.keys()) {
       this.stopSession(chatId)
     }
+    if (this.sweeper) clearInterval(this.sweeper)
+    this.sweeper = null
   }
 
   private requireSession(chatId: string) {
@@ -1325,12 +1434,16 @@ export class CodexAppServerManager {
       this.failContext(context, error.message)
     })
 
-    context.child.on("close", (code) => {
+    context.child.on("close", (code: number | null, signal?: NodeJS.Signals | null) => {
       if (context.closed) return
       queueMicrotask(() => {
         if (context.closed) return
-        const message = context.stderrLines.at(-1) || `Codex app-server exited with code ${code ?? 1}`
-        this.failContext(context, message)
+        // The exit itself first: the last stderr line is often an unrelated startup warning (found live: a
+        // SIGKILL from the container's OOM killer was reported as "Codex could not find bubblewrap on PATH").
+        const exit = signal ? `Codex app-server was killed (${signal}${signal === "SIGKILL" ? ", possibly out of memory" : ""})`
+          : `Codex app-server exited with code ${code ?? 1}`
+        const last = context.stderrLines.at(-1)
+        this.failContext(context, last ? `${exit}; last stderr: ${last}` : exit)
       })
     })
   }
@@ -1972,21 +2085,32 @@ export class CodexAppServerManager {
     }
   }
 
-  private async sendRequest<TResult>(context: SessionContext, method: string, params: unknown): Promise<TResult> {
+  private async sendRequest<TResult>(context: SessionContext, method: string, params: unknown, timeoutMs?: number): Promise<TResult> {
     const id = randomUUID()
+    let timer: ReturnType<typeof setTimeout> | undefined
     const promise = new Promise<TResult>((resolve, reject) => {
       context.pendingRequests.set(id, {
         method,
         resolve: resolve as (value: unknown) => void,
         reject,
       })
+      if (timeoutMs !== undefined) {
+        timer = setTimeout(() => {
+          if (!context.pendingRequests.delete(id)) return
+          reject(new RequestTimeoutError(`${method} got no reply within ${timeoutMs} ms`))
+        }, timeoutMs)
+      }
     })
     this.writeMessage(context, {
       id,
       method,
       params,
     })
-    return await promise
+    try {
+      return await promise
+    } finally {
+      if (timer) clearTimeout(timer)
+    }
   }
 
   private writeMessage(context: SessionContext, message: Record<string, unknown>) {

@@ -205,6 +205,13 @@ class MergeTests(unittest.TestCase):
         _, _, _, risk, _ = brief.snapshot_state(self.lead)
         self.assertEqual({r['quote_state'] for r in risk.values()}, {'FOUND'})  # snapshots still match after the copy
 
+    def test_merge_carries_the_status_note(self):
+        self.r.rule(self.a)
+        evs = jload(self.a / 'events.json'); evs['events'][0]['status_note'] = 'The comment period closes on April 9, 2030.'
+        jsave(self.a / 'events.json', evs)
+        merge_runs.merge(self.lead, 'scout-a', self.a)
+        self.assertEqual(jload(self.lead / 'events.json')['events'][0]['status_note'], 'The comment period closes on April 9, 2030.')
+
     def test_duplicate_events_join_and_cautious_values_win(self):
         self.r.rule(self.a)
         self.r.rule(self.b)

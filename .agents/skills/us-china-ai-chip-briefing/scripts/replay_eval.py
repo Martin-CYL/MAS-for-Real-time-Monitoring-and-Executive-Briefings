@@ -22,7 +22,6 @@ import argparse
 from collections import Counter
 from contextlib import redirect_stdout
 import hashlib
-import html
 import io
 import json
 from pathlib import Path
@@ -35,7 +34,8 @@ SCRIPTS = Path(__file__).resolve().parent
 SKILL = SCRIPTS.parent
 sys.path.insert(0, str(SCRIPTS))
 import brief  # noqa: E402
-from check_report import dot_state, row_state  # noqa: E402
+from check_report import status_cells  # noqa: E402
+from html_model import Document  # noqa: E402
 from validate import run_all  # noqa: E402
 
 CASES = SKILL / 'evaluation' / 'replay-cases.json'
@@ -106,26 +106,12 @@ ROW = re.compile(r'<tr\b.*?</tr>', re.S)
 DOT = re.compile(r'<i class="dot (\w+)"></i>(.*?)</td>', re.S)
 
 
-def status_rows(page):
-    """(dot class, visible evidence text) for each status-table row that carries a dot."""
-    rows = []
-    for row in ROW.findall(page):
-        m = DOT.search(row)
-        if m:
-            rows.append((m[1], ' '.join(html.unescape(re.sub(r'<[^>]+>', '', m[2])).split())))
-    return rows
-
-
 def audit_rows(page):
-    rows = status_rows(page)
-    mismatched, unparsed = [], 0
-    for i, (dot, text) in enumerate(rows):
-        shown, want = dot_state({dot}), row_state(text)
-        if want is None:
-            unparsed += 1
-        elif want != shown:
-            mismatched.append({'row': i, 'shown': shown, 'expected': want, 'text': text[:60]})
-    return {'rows': len(rows), 'unparsed': unparsed, 'mismatched': mismatched}
+    """Status cells whose dots disagree with their evidence (check_report.status_cells, the STATUS_DOT_MISMATCH rule)."""
+    cells = status_cells(Document(page))
+    mismatched = [{'row': i, 'shown': sorted(c['shown']), 'expected': sorted(c['expected']), 'text': c['text'][:60]}
+                  for i, c in enumerate(cells) if c['expected'] and (c['shown'] != c['expected'] or c['chip_errors'])]
+    return {'rows': len(cells), 'unparsed': sum(c['expected'] is None for c in cells), 'mismatched': mismatched}
 
 
 def mutate(page, mutation):

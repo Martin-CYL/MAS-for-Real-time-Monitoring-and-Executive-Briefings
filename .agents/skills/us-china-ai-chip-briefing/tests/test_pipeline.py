@@ -250,6 +250,31 @@ class PipelineTests(unittest.TestCase):
         allx = [x for xs in result['checks'].values() for x in xs]
         self.assertFalse([x for x in allx if x['status'] == 'FAIL'], [x for x in allx if x['status'] == 'FAIL'])
 
+    def test_status_table_groups_items_and_shows_notes_not_reasons(self):
+        eid = self.complete()
+        self.call('add-claim', str(self.run_dir), eid, 'S001', '--quote', '合成机构今日发布合成规则', '--text', '合成机构发布合成规则。')
+        case = next(e['id'] for e in self.j('events.json')['events'] if e.get('case_id'))
+        code, out = self.call('event', str(self.run_dir), 'decide', case, 'track', '--reason', '合成：保留其法律状态可见',
+                              '--status-note', '合成通知把暂停延长到 2027 年 1 月。')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.j('events.json')['events'][[e['id'] for e in self.j('events.json')['events']].index(case)]['status_note'],
+                         '合成通知把暂停延长到 2027 年 1 月。')
+        self.report(eid)
+        self.call('build', str(self.run_dir))
+        html = (self.run_dir / 'report.html').read_text(encoding='utf-8')
+        table = html[html.index('<table'):html.index('</table>')]
+        self.assertLess(table.index('本期新增'), table.index('延续跟踪的事项'))
+        self.assertIn('合成通知把暂停延长到 2027 年 1 月。', table)
+        self.assertNotIn('保留其法律状态可见', table)          # the selection reason stays in coverage.json
+        self.assertIn('<a href="#ch1">见第 1 章</a>', table)
+        self.assertIn('3 月 20 日', table)                     # the story's watch date fills an empty milestone
+
+    def test_status_note_is_one_short_sentence(self):
+        self.complete()
+        case = next(e['id'] for e in self.j('events.json')['events'] if e.get('case_id'))
+        code, out = self.call('event', str(self.run_dir), 'decide', case, 'track', '--reason', 'x', '--status-note', 'x' * 241)
+        self.assertEqual(code, 1); self.assertIn('--status-note', out)
+
     def test_story_label_comes_from_evidence_not_writer(self):
         eid = self.complete(url='https://www.reuters.com/x')
         self.call('add-claim', str(self.run_dir), eid, 'S001', '--quote', '合成机构今日发布合成规则', '--text', '据路透社报道，合成机构发布合成规则。')

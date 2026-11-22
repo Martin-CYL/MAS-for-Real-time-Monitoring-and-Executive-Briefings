@@ -25,7 +25,7 @@ HTML and runs the checks. A person signs off afterwards.
 | Start (window and cutoff are computed) | `python3 scripts/brief.py init RUN --days 7` (add `--end YYYY-MM-DD` for a past period) |
 | Save a page you found | `python3 scripts/brief.py fetch RUN URL` · if you already have the text: add `--file PAGE.txt` |
 | Record an event | `python3 scripts/brief.py event RUN add --title "…" --date YYYY-MM-DD --side us\|cn\|both\|other --source S001 --materiality high\|medium\|low --why "…"` |
-| Decide an event | `python3 scripts/brief.py event RUN decide E004 include\|track\|exclude --reason "…" [--title "中文标题"] [--followup "11 月 9 日前"]` |
+| Decide an event | `python3 scripts/brief.py event RUN decide E004 include\|track\|exclude --reason "…" [--title "中文标题"] [--followup "11 月 9 日前"] [--status-note "…"]` |
 | Record a fact | `python3 scripts/brief.py add-claim RUN E004 S001 --quote "exact words copied from the page" --text "中文事实句"` |
 | Log a search | `python3 scripts/brief.py search RUN "query" --found "what it turned up"` |
 | See what is left | `python3 scripts/brief.py status RUN` |
@@ -51,6 +51,11 @@ Decide every event, with a one-line reason. Use this rubric, not convenience:
 |---|---|
 | **include** | Government action on export controls, sanctions, licensing, trade terms or enforcement (either side, even if not chip-specific); a major AI-model, chip, manufacturing or supply-chain development with a US-China dimension; financing, deals or litigation of AI/chip firms with a US-China angle; real new information on a carried-over case. |
 | **track** | Material but unresolved: original not obtainable, outcome pending (approvals, votes, deadlines), or no update this period on a carried-over case. Tracked events appear in the report's status table automatically. |
+
+The status table never prints `--reason`: it records why you chose, for coverage.json. For each tracked or carried-over
+item, give `--status-note`: one sentence for the reader on where the item stands now, from your sources (for example
+"A Federal Register notice of November 20 extends the stay to January 2027."). Never write instructions to yourself
+there ("keep its status visible"). Without a note the row shows only its status chip.
 | **exclude** | No US-China dimension and no market-wide significance (e.g. a routine product launch); duplicate; outside the period with no new information. |
 
 Materiality: **high** = changes rules, enforcement, market access or a major company's position; **medium** = useful

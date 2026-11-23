@@ -99,10 +99,16 @@ function heldFor(stage: BudgetStage, plan: BudgetPlan, reserve: number) {
  * review may use what is left; rework may use the rework reserve but must
  * leave a second review possible.
  */
-export function authorize(stage: BudgetStage, cap: number, spent: number, tasks: BudgetTask[], plan: BudgetPlan): Authorization {
+export function authorize(stage: BudgetStage, cap: number, spent: number, tasks: BudgetTask[], plan: BudgetPlan,
+  /** Held back on top of the stage's reserve, for others who must get a turn first (another lead's first scout). */
+  alsoHold?: { tokens: number; for: string }): Authorization {
   const snap = snapshot(spent, tasks, plan)
   const requested = cap + plan.inFlightMargin
-  const { held, label, keep: after } = heldFor(stage, plan, snap.reserve)
+  const base = heldFor(stage, plan, snap.reserve)
+  const extra = alsoHold && alsoHold.tokens > 0 ? alsoHold : null
+  const held = base.held + (extra?.tokens ?? 0)
+  const { label } = base
+  const after = [base.held > 0 ? base.keep : "", extra?.for ?? ""].filter(Boolean).join(", ")
   const free = plan.run - spent - snap.outstanding - held
   if (requested <= free) return { ok: true, requested, snapshot: snap }
   const fitsLater = requested <= plan.run - spent - held

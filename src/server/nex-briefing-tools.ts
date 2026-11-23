@@ -41,8 +41,8 @@ const delegate = z.strictObject({
   leads: z.array(z.string()).optional().describe("Discovery candidate IDs (D001…) worth opening."),
   brief: z.string().optional().describe("Anything else the agent needs to know."),
   retryOf: z.string().optional().describe("Task ID of a failed task to retry once, with the same assignment."),
-  reworkOf: z.string().optional().describe("Chief Editor, after a review asks for rework: the accepted lead task to reopen."),
-  findings: z.array(z.string()).optional().describe("With reworkOf: the review finding IDs (R001…) to fix."),
+  reworkOf: z.string().optional().describe("Chief Editor, after a review or independent verification asks for rework: the accepted task whose records hold the disputed claim, a lead or a cross-border reply (xb-NN), as the finding's responsible task says."),
+  findings: z.array(z.string()).optional().describe("With reworkOf: the review finding IDs (R001…), or verification keys (verify-1/V001), to fix."),
   gap: z.string().optional().describe("A lead in the gap round: the gap ID (G001…) this scout works on. Gap scouts have their own budget."),
   forTaskId: z.string().optional().describe("Only when this chat holds several open tasks."),
 })
@@ -83,7 +83,7 @@ export const BRIEFING_TOOLS: readonly NexToolDefinition[] = [
   },
   {
     name: "briefing_delegate",
-    description: "In a briefing run: hand a research task to a new agent. The Chief Editor delegates country leads (after its plan is accepted); a country lead delegates scouts, by topic or, when its assignment says scout_mode lane, by source lane (follow-ups on media leads with primaryLeads). Nex checks roles and budgets, prepares the task directory and starts the agent, or queues it when the concurrency budget is full. Also retries a failed task (retryOf) and sends review rework to a lead (reworkOf).",
+    description: "In a briefing run: hand a research task to a new agent. The Chief Editor delegates country leads (after its plan is accepted); a country lead delegates scouts, by topic or, when its assignment says scout_mode lane, by source lane (follow-ups on media leads with primaryLeads). Nex checks roles and budgets, prepares the task directory and starts the agent, or queues it when the concurrency budget is full. Also retries a failed task (retryOf) and sends rework to the lead or cross-border reply that holds a disputed claim (reworkOf).",
     schema: delegate,
     async execute(input, context) {
       return reply(await workflow(context).delegate(context.chatId, context.cwd, delegate.parse(input)))

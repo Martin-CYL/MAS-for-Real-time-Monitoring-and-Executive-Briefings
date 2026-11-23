@@ -926,6 +926,12 @@ export class BriefingWorkflow {
     return run.tasks.filter((entry) => entry.parentTaskId === task.id)
   }
 
+  /** The last retry of a task (cn-lead → cn-lead-a2), or the task itself. */
+  private latestAttempt(run: BriefingRun, task: BriefingTask): BriefingTask {
+    const retry = run.tasks.find((entry) => entry.retryOf === task.id)
+    return retry ? this.latestAttempt(run, retry) : task
+  }
+
   private latestLead(run: BriefingRun, country: BriefingCountry) {
     return [...run.tasks].reverse().find((task) => task.role === "lead" && task.country === country)
   }
@@ -1379,7 +1385,8 @@ export class BriefingWorkflow {
    * starts and a backoff delays them. Otherwise the budget plan decides:
    * research may not touch what synthesis, review and rework need.
    */
-  private launchBlocked(run: BriefingRun, role: BriefingRole, stage: BudgetStage = this.stageOf(role), capOverride?: number): string | null {
+  private launchBlocked(run: BriefingRun, role: BriefingRole, stage: BudgetStage = this.stageOf(role), capOverride?: number,
+    alsoHold?: { tokens: number; for: string }): string | null {
     if (run.provider?.state === "halted") {
       return `the provider refused this run (${run.provider.lastError?.class}); no new agent starts until it is restarted`
     }
@@ -1389,13 +1396,30 @@ export class BriefingWorkflow {
     if (role === "chief") return null
     const tokens = run.budgets.tokens ?? DEFAULT_BUDGETS.tokens
     const cap = capOverride ?? (stage === "rework" ? tokens.rework ?? DEFAULT_BUDGETS.tokens.rework! : tokens.task[role])
-    const decision = authorize(stage, cap, freshTokens(run.usage?.totals ?? emptyUsage()), this.budgetTasks(run), budgetPlan(run))
+    const decision = authorize(stage, cap, freshTokens(run.usage?.totals ?? emptyUsage()), this.budgetTasks(run), budgetPlan(run), alsoHold)
     return decision.ok ? null : decision.reason!
   }
 
+  /**
+   * What a lead's second or later scout must leave for the other running leads that have not started a scout yet: one scout each.
+   * Without it the first lead to delegate can take the whole research pool (run mas-20261123-054533-ef3d: the China
+   * lead's two scouts left nothing, and all four of the US lead's were refused). Released once those leads delegate or end.
+   */
+  private firstScoutHold(run: BriefingRun, requester: BriefingTask) {
+    const hasScout = (lead: BriefingTask) => run.tasks.some((scout) => scout.role === "scout" && !scout.gap && scout.parentTaskId === lead.id)
+    // A lead's own first scout is never held back; only its further scouts wait for the others' first.
+    if (run.budgets.maxScoutsPerLead < 2 || !hasScout(requester)) return undefined
+    const waiting = run.tasks.filter((task) => task.role === "lead" && task.chatId !== requester.chatId && task.state === "running" && !task.reopenedFor && !hasScout(task))
+    if (waiting.length === 0) return undefined
+    const tokens = run.budgets.tokens ?? DEFAULT_BUDGETS.tokens
+    const lanes = run.budgets.scoutMode === "lane" ? (run.budgets.lanes ?? []).map((lane) => lane.freshTokens ?? tokens.task.scout) : []
+    const scout = (lanes.length > 0 ? Math.min(...lanes) : tokens.task.scout) + (tokens.inFlightMargin ?? DEFAULT_BUDGETS.tokens.inFlightMargin!)
+    return { tokens: scout * waiting.length, for: `a first scout for ${waiting.map((task) => task.id).join(", ")}` }
+  }
+
   /** Refuses a start the provider state or the budget plan does not allow, saying which and why. */
-  private assertCanStart(run: BriefingRun, role: BriefingRole, stage: BudgetStage, cap?: number) {
-    const blocked = this.launchBlocked(run, role, stage, cap)
+  private assertCanStart(run: BriefingRun, role: BriefingRole, stage: BudgetStage, cap?: number, alsoHold?: { tokens: number; for: string }) {
+    const blocked = this.launchBlocked(run, role, stage, cap, alsoHold)
     if (!blocked) return
     const advice = /may release enough/.test(blocked)
       ? "Wait for running tasks (briefing_wait) and try again, or record the gap and hand off what you have."
@@ -1472,9 +1496,12 @@ export class BriefingWorkflow {
           ? `provider error (${providerError.class}${providerError.status ? `, HTTP ${providerError.status}` : ""}): ${providerError.detail}`
           : `turn failed: ${message.slice(0, 300) || "unknown error"}`)
       } else {
-        await this.setTaskState(run, task, "failed", task.submissions > 0
-          ? `turn ended after ${task.submissions} refused submission(s): ${(task.lastRejection ?? []).slice(0, 3).join("; ")}`
-          : "turn ended without an accepted submission")
+        // lastRejection is cleared on reopening, so earlier accepted submissions are not reported as refusals.
+        await this.setTaskState(run, task, "failed", task.lastRejection?.length
+          ? `turn ended after ${task.submissions} refused submission(s): ${task.lastRejection.slice(0, 3).join("; ")}`
+          : task.reopenedFor
+            ? `turn ended without submitting again after it was reopened for ${task.reopenedFor}`
+            : "turn ended without an accepted submission")
       }
     }
     return changed
@@ -1704,7 +1731,7 @@ export class BriefingWorkflow {
         if (!previous && same) {
           return { taskId: same.id, state: same.state, chatId: same.chatId ?? null, dir: this.taskDir(run, same), note: `Already delegated with this topic${lane ? ` in the ${lane.id} lane` : ""}; use briefing_wait for it.` }
         }
-        this.assertCanStart(run, "scout", "research", gap ? run.budgets.gapRound!.scoutTokens : lane?.freshTokens)
+        this.assertCanStart(run, "scout", "research", gap ? run.budgets.gapRound!.scoutTokens : lane?.freshTokens, gap ? undefined : this.firstScoutHold(run, requester))
         const attempt = previous ? previous.attempt + 1 : 1
         const sequence = run.tasks.filter((entry) => entry.role === "scout" && entry.country === country && !entry.retryOf && Boolean(entry.gap) === Boolean(gap)).length + 1
         task = this.newTask(run, {
@@ -1831,6 +1858,20 @@ export class BriefingWorkflow {
   }
 
   /** Sends targeted rework to an accepted lead. Its chat keeps its context; its next acceptance replaces the last. */
+  /**
+   * The tasks a finding's rework may go to: the lead or cross-border reply whose records hold the claim. A scout's
+   * claim is fixed by its lead. Empty when the finding names no such task (a chief-only claim), so no check applies.
+   */
+  private reworkOwners(run: BriefingRun, responsible: string[]) {
+    const owners = new Set<string>()
+    for (const id of responsible) {
+      let task = run.tasks.find((entry) => entry.id === id)
+      while (task?.role === "scout") task = run.tasks.find((entry) => entry.id === task!.parentTaskId)
+      if (task?.role === "lead" || task?.role === "cross_border") owners.add(this.latestAttempt(run, task).id)
+    }
+    return [...owners]
+  }
+
   private async reopenForRework(run: BriefingRun, requester: BriefingTask, taskId: string, findings: string[], brief: string) {
     if (requester.role !== "chief") throw new WorkflowError("Only the Chief Editor sends rework.")
     // Before the draft, once the chief has seen the verification outcome: one round on the claims it disputes.
@@ -1838,7 +1879,10 @@ export class BriefingWorkflow {
     if (run.stage !== "rework" && !beforeDraft) throw new WorkflowError("Rework goes out after a review asks for it, or after independent verification disputes a claim.")
     if (beforeDraft && (run.budgets.verification?.maxReworkRounds ?? 0) < 1) throw new WorkflowError("No rework is allowed before the draft; submit it and the disputes go to review.")
     const target = this.task(run, taskId)
-    if (target.role !== "lead" || target.state !== "accepted" || !target.chatId) throw new WorkflowError(`${taskId} is not an accepted lead task.`)
+    // A cross-border reply merges into the chief on its own, so a claim that came from it is fixed in its records, not the lead's.
+    if ((target.role !== "lead" && target.role !== "cross_border") || target.state !== "accepted" || !target.chatId) {
+      throw new WorkflowError(`${taskId} is not an accepted lead task or cross-border reply.`)
+    }
     const review = [...run.tasks].reverse().find((task) => task.role === "reviewer" && task.state === "accepted")
     const known = new Map<string, unknown>()
     if (beforeDraft) {
@@ -1851,6 +1895,14 @@ export class BriefingWorkflow {
     const unknown = findings.filter((id) => !known.has(id))
     if (findings.length === 0 || unknown.length > 0) {
       throw new WorkflowError(`Name the ${beforeDraft ? "verification findings by key (verify-1/V001)" : "review findings"} to fix (unknown: ${unknown.join(", ") || "none given"}).`)
+    }
+    // Each finding goes to the task whose records hold the claim: reworking another task's files would change an accepted handoff.
+    const misrouted = findings.flatMap((id) => {
+      const owners = this.reworkOwners(run, (known.get(id) as { responsible?: string[] } | undefined)?.responsible ?? [])
+      return owners.length > 0 && !owners.includes(target.id) ? [`${id} → ${owners.join(" or ")}`] : []
+    })
+    if (misrouted.length > 0) {
+      throw new WorkflowError(`Not sent: these findings concern another task's records (${misrouted.join("; ")}). Send each to its own task with reworkOf; a cross-border reply (xb-NN) is reopened in its lead's chat.`)
     }
     this.assertCanStart(run, "lead", "rework")
     if (beforeDraft) run.verification!.reworks = 1
@@ -1866,20 +1918,25 @@ export class BriefingWorkflow {
       }
     }
     target.wrapUpSent = undefined
+    target.lastRejection = undefined
     target.accepted = null
     target.merged = false
     target.delivered = false
-    target.deadlineAt = iso(this.now() + run.budgets.taskMinutes.lead * 60_000)
+    const crossBorder = target.role === "cross_border"
+    target.deadlineAt = iso(this.now() + run.budgets.taskMinutes[crossBorder ? "cross_border" : "lead"] * 60_000)
     await this.setTaskState(run, target, "running", `reopened for rework: ${findings.join(", ")}`)
     // Saved before the message goes out: a retried call after a restart finds the lead running and sends nothing twice.
     await this.save(run)
     await this.fault("rework:saved")
+    // The lead and its cross-border replies share one chat and nested directories; only the reopened task's records may change.
+    const others = run.tasks.filter((task) => task.chatId === target.chatId && task.id !== target.id && task.state === "accepted").map((task) => task.id)
     await this.chats.sendMessage(requester.chatId!, {
       chatId: target.chatId,
       message: [
-        `Rework for task ${target.id} in briefing run ${run.runId}, requested by the Chief Editor after ${beforeDraft ? "independent verification" : "independent review"}.`,
-        "Fix only what these findings concern, in your task directory, with brief.py (withdraw wrong claims; add corrected ones with add-claim).",
-        "Then update narrative.md and output.json, run check_handoff.py --role lead, and call briefing_submit again.",
+        `Rework for task ${target.id}${crossBorder ? " (your cross-border reply)" : ""} in briefing run ${run.runId}, requested by the Chief Editor after ${beforeDraft ? "independent verification" : "independent review"}.`,
+        `Fix only what these findings concern, in ${this.taskDir(run, target)} and nowhere else, with brief.py (withdraw wrong claims; add corrected ones with add-claim).`,
+        ...(others.length > 0 ? [`Do not change the records of ${others.join(", ")}: they were accepted on their own, and a changed handoff is refused.`] : []),
+        `Then update narrative.md and output.json, run check_handoff.py --role ${crossBorder ? "cross_border" : "lead"}, and call briefing_submit again with taskId ${target.id}.`,
         "",
         "```json",
         JSON.stringify(findings.map((id) => known.get(id)), null, 2),
@@ -2382,6 +2439,7 @@ export class BriefingWorkflow {
     lead.usageBaseline = { ...(lead.usage ?? emptyUsage()) }
     lead.reopenedFor = "gap"
     lead.wrapUpSent = undefined
+    lead.lastRejection = undefined
     lead.accepted = null
     lead.merged = false
     lead.delivered = false
@@ -2524,9 +2582,12 @@ export class BriefingWorkflow {
     if (open.length === 0) return null
     const rounds = config.maxReworkRounds - run.verification.reworks
     return { accepted: false, verification: this.verificationSummary(run), problems: [
-      `Independent verification disputes ${open.length} claim(s): ${open.map((finding) => `${finding.key} (${finding.target.claim_id}: ${finding.problem.slice(0, 160)})`).join("; ")}.`,
+      `Independent verification disputes ${open.length} claim(s): ${open.map((finding) => {
+        const owners = this.reworkOwners(run, finding.responsible)
+        return `${finding.key} (${finding.target.claim_id}: ${finding.problem.slice(0, 160)})${owners.length > 0 ? ` → ${owners.join(" or ")}` : ""}`
+      }).join("; ")}.`,
       rounds > 0
-        ? `Send rework to the responsible lead (briefing_delegate with reworkOf and these keys as findings; ${rounds} round(s) before the draft), or submit the draft again to take them to review open.`
+        ? `Send rework to the task after each arrow (briefing_delegate with reworkOf that task and its keys as findings; ${rounds} round(s) before the draft), or submit the draft again to take them to review open.`
         : "Submit the draft again: they go to the reviewer as open findings.",
     ], next: "No draft was counted." }
   }

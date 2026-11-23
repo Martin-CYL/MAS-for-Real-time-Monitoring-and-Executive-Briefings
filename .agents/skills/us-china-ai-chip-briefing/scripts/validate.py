@@ -133,6 +133,9 @@ def run_all(html_path,ledger_path=None,review_path=None,expected_date=None,gloss
     allx=[x for xs in checks.values() for x in xs]
     result['readiness']=readiness(allx)[0]
     result['categories']=dict(Counter(category(x) for x in allx if x['status']!='PASS'))
+    # The codes that keep readiness below READY_FOR_HUMAN_REVIEW, so a caller can say why without re-deriving it.
+    result['readiness_codes']=dict(sorted(Counter(x['code'] for x in allx if x['status']!='PASS'
+                                                  and category(x) in ('rule_violation','author_fix','evidence_gap')).items()))
     signoff_md=render_signoff(ledger,risk,report_sha,ledger_sha,excluded_summary(coverage),verification=verification,gaps=gaps) if ledger else None
     return result,render_review(result,ledger),signoff_md
 

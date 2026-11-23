@@ -269,6 +269,18 @@ class PipelineTests(unittest.TestCase):
         self.assertIn('<a href="#ch1">见第 1 章</a>', table)
         self.assertIn('3 月 20 日', table)                     # the story's watch date fills an empty milestone
 
+    def test_review_report_names_the_codes_that_hold_readiness_back(self):
+        eid = self.complete()
+        self.call('add-claim', str(self.run_dir), eid, 'S001', '--quote', '合成机构今日发布合成规则', '--text', '合成机构发布合成规则。')
+        self.report(eid)
+        self.call('build', str(self.run_dir))
+        qa = json.loads((self.run_dir / 'qa' / 'review_report.json').read_text(encoding='utf-8'))
+        from qa_common import category
+        lowering = {x['code'] for xs in qa['checks'].values() for x in xs
+                    if x['status'] != 'PASS' and category(x) in ('rule_violation', 'author_fix', 'evidence_gap')}
+        self.assertEqual(set(qa['readiness_codes']), lowering)
+        self.assertEqual(qa['readiness'] in ('READY_FOR_HUMAN_REVIEW', 'AWAITING_SIGNOFF', 'PASS'), not lowering)
+
     def test_status_note_is_one_short_sentence(self):
         self.complete()
         case = next(e['id'] for e in self.j('events.json')['events'] if e.get('case_id'))

@@ -163,7 +163,10 @@ def validate_dates(raw,ledger,review=None,now=None):
             if pub and cutoff:
                 if pub.start>=cutoff.end:
                     add('UNVERIFIED','PUBLICATION_AFTER_CUTOFF',f'{pub.raw} postdates the information cutoff; justify as a later corroboration or update cutoff and re-review','publication_date',**loc)
-                elif cutoff.precision=='timestamp' and pub.end>cutoff.start and not (pub.precision=='timestamp' and pub.start==cutoff.start and pub.end==cutoff.end):
+                # Ambiguous only if the publication may fall after the cutoff's own last instant. A cutoff at the last
+                # second of a day (23:59:59, as runs set it) ends with that day, so a date-only publication on it
+                # cannot be later (found live: every claim of a one-day run was flagged, holding readiness INCOMPLETE).
+                elif cutoff.precision=='timestamp' and pub.end>cutoff.end:
                     add('UNVERIFIED','CUTOFF_ELIGIBILITY_AMBIGUOUS','Publication overlaps the exact cutoff at available precision; supply a precise source timestamp or review eligibility','publication_date',**loc)
             # Future events are deliberately not compared to runtime/publication.
     if isinstance(review,dict):

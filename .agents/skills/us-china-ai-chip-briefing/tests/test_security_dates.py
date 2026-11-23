@@ -336,6 +336,23 @@ class CrossFieldDateTests(unittest.TestCase):
         led=record();led['cutoff']='2030-01-01T12:00:00Z'
         self.assertIn('CUTOFF_ELIGIBILITY_AMBIGUOUS',codes(dates(led)))
 
+    def test_date_only_publication_within_an_end_of_day_cutoff_is_eligible(self):
+        led=record();led.update(timezone='Asia/Hong_Kong',cutoff='2030-01-01T23:59:59+08:00',generated_at='2030-01-02T01:00:00+08:00')
+        led['claims'][0]['sources'][0].update(publication_date='2030-01-01',date_checked='2030-01-02T00:30:00+08:00')
+        found=codes(dates(led,'2030-01-02T00:00:00Z'))
+        self.assertNotIn('CUTOFF_ELIGIBILITY_AMBIGUOUS',found);self.assertNotIn('PUBLICATION_AFTER_CUTOFF',found)
+
+    def test_date_only_publication_the_next_day_is_after_an_end_of_day_cutoff(self):
+        led=record();led.update(timezone='Asia/Hong_Kong',cutoff='2030-01-01T23:59:59+08:00',generated_at='2030-01-02T01:00:00+08:00')
+        led['claims'][0]['sources'][0].update(publication_date='2030-01-02',date_checked='2030-01-02T00:30:00+08:00')
+        found=codes(dates(led,'2030-01-02T00:00:00Z'))
+        self.assertIn('PUBLICATION_AFTER_CUTOFF',found);self.assertNotIn('CUTOFF_ELIGIBILITY_AMBIGUOUS',found)
+
+    def test_date_only_publication_before_a_mid_day_cutoff_stays_ambiguous(self):
+        led=record();led.update(timezone='Asia/Hong_Kong',cutoff='2030-01-01T18:00:00+08:00',generated_at='2030-01-02T01:00:00+08:00')
+        led['claims'][0]['sources'][0].update(publication_date='2030-01-01',date_checked='2030-01-02T00:30:00+08:00')
+        self.assertIn('CUTOFF_ELIGIBILITY_AMBIGUOUS',codes(dates(led,'2030-01-02T00:00:00Z')))
+
     def test_same_instant_different_offsets_not_ambiguous(self):
         led=record();led['claims'][0]['sources'][0].update(publication_date='2030-01-01T00:00:00Z',date_checked='2030-01-01T08:00:00+08:00')
         self.assertNotIn('DATE_ORDER_AMBIGUOUS',codes(dates(led)))

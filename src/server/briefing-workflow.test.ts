@@ -6,7 +6,7 @@ import path from "node:path"
 import { AgentCoordinator } from "./agent"
 import { NoopAnalyticsReporter } from "./analytics"
 import { AsyncQueue } from "./async-queue"
-import { BriefingWorkflow, buildRoleInstructions, extractSection, InjectedCrash, keepLane, type FaultPoint, type PythonRunner } from "./briefing-workflow"
+import { BriefingWorkflow, buildRoleInstructions, describeReadinessCodes, extractSection, InjectedCrash, keepLane, type FaultPoint, type PythonRunner } from "./briefing-workflow"
 import type { CodexRestriction, SandboxRunner } from "./briefing-sandbox"
 import { createChatCommands } from "./chat-commands"
 import { EventStore } from "./event-store"
@@ -130,8 +130,10 @@ function fakePython(calls: string[][]): PythonRunner {
       // The claims the report prints, as the real build writes them.
       const printed = path.join(run, "fixture-printed-claims.json")
       await writeFile(path.join(run, "report_ledger.json"), existsSync(printed) ? await readFile(printed, "utf8") : JSON.stringify({ claims: [] }))
-      const readiness = existsSync(path.join(run, "fixture-blocked")) ? "BLOCKED" : "READY_FOR_HUMAN_REVIEW"
-      await writeFile(path.join(run, "qa", "review_report.json"), JSON.stringify({ readiness }))
+      const incomplete = existsSync(path.join(run, "fixture-incomplete"))
+      const readiness = existsSync(path.join(run, "fixture-blocked")) ? "BLOCKED" : incomplete ? "INCOMPLETE" : "READY_FOR_HUMAN_REVIEW"
+      await writeFile(path.join(run, "qa", "review_report.json"), JSON.stringify({ readiness,
+        ...(incomplete ? { readiness_codes: { PRIMARY_LEGAL_SOURCE: 1, DATE_UNKNOWN: 3 } } : {}) }))
       const fix = readiness === "BLOCKED" ? "FIX 1: GENERATION_REPORT_MISMATCH [generated_at] → generated_at is outside report_date\n" : ""
       return { exitCode: readiness === "BLOCKED" ? 1 : 2, stdout: `Wrote report\n${fix}`, stderr: "" }
     }
@@ -425,6 +427,36 @@ describe("briefing workflow", () => {
     codex.finish(run.cnLead)
     const reply = await workflow.wait(run.chief, projectDir, { taskIds: ["xb-01"] })
     expect(reply.tasks[0]).toMatchObject({ taskId: "xb-01", state: "accepted", output: { answer: "None named in the window." } })
+  })
+
+  test("an incomplete run names the validator codes that kept it from ready", async () => {
+    const { startRun, researchCountry, workflow, codex, projectDir } = await setup()
+    const run = await startRun()
+    await researchCountry(run.usLead, run.usDir, "us-lead")
+    await researchCountry(run.cnLead, run.cnDir, "cn-lead")
+    codex.finish(run.usLead)
+    codex.finish(run.cnLead)
+    await workflow.wait(run.chief, projectDir, {})
+    await writeFile(path.join(run.runDir, "report.json"), "{}")
+    await writeFile(path.join(run.runDir, "fixture-incomplete"), "")
+    const draft = await workflow.submit(run.chief, projectDir, { kind: "draft" }) as { accepted: boolean; next: string }
+    expect(draft.accepted).toBe(true)
+    // The chief learns what to fix while the review runs.
+    expect(draft.next).toContain("Validator readiness INCOMPLETE (DATE_UNKNOWN ×3, PRIMARY_LEGAL_SOURCE ×1)")
+    const reviewer = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "review-1")!
+    await writeFile(path.join(run.runDir, reviewer.dir, "findings.json"), JSON.stringify({ verdict: "pass", summary: "Sound.", findings: [] }))
+    expect(await workflow.submit(reviewer.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    const final = workflow.getRun(run.runId)!
+    expect(final.status).toBe("incomplete")
+    expect(final.final!.reasons).toContain("validator readiness INCOMPLETE (DATE_UNKNOWN ×3, PRIMARY_LEGAL_SOURCE ×1)")
+  })
+
+  test("readiness codes are listed most frequent first and capped", () => {
+    expect(describeReadinessCodes(undefined)).toBe("")
+    expect(describeReadinessCodes({})).toBe("")
+    expect(describeReadinessCodes({ B: 1, A: 1, C: 5 })).toBe(" (C ×5, A ×1, B ×1)")
+    const many = Object.fromEntries(["A", "B", "C", "D", "E", "F", "G", "H"].map((code, i) => [code, 10 - i]))
+    expect(describeReadinessCodes(many)).toBe(" (A ×10, B ×9, C ×8, D ×7, E ×6, F ×5, 2 more)")
   })
 
   test.each(["sandbox", "container"] as const)("draft → review → rework → ready (%s)", async (executionMode) => {

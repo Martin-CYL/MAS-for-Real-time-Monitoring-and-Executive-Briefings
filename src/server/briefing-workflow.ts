@@ -619,6 +619,15 @@ function iso(time: number) {
   return new Date(time).toISOString()
 }
 
+/** " (CODE ×n, …)": the validator codes that kept readiness down (qa/review_report.json readiness_codes), or "". */
+export function describeReadinessCodes(codes: Record<string, number> | undefined) {
+  const entries = Object.entries(codes ?? {}).filter(([, count]) => typeof count === "number" && count > 0)
+  if (entries.length === 0) return ""
+  entries.sort(([a, x], [b, y]) => y - x || a.localeCompare(b))
+  const shown = entries.slice(0, 6).map(([code, count]) => `${code} ×${count}`)
+  return ` (${shown.join(", ")}${entries.length > 6 ? `, ${entries.length - 6} more` : ""})`
+}
+
 function isTerminal(state: BriefingTaskState) {
   return state === "accepted" || state === "failed" || state === "cancelled"
 }
@@ -2122,15 +2131,16 @@ export class BriefingWorkflow {
     run.reviewRounds += 1
     const version = { version: drafts.versions.length + 1, at: run.draft.at, readiness: validation.readiness, reviewTasks: [] as string[], claims: validation.claims }
     drafts.versions.push(version)
-    await this.advance(run, "editorial_draft_completed", `version ${version.version}, validator readiness ${validation.readiness}`)
+    await this.advance(run, "editorial_draft_completed", `version ${version.version}, validator readiness ${validation.readiness}${validation.readinessCodes}`)
     const reviewer = await this.launchReviewer(run, chief, version, `review-${run.reviewRounds}`)
     await this.advance(run, "independent_review", reviewer.id)
     return { accepted: true, readiness: validation.readiness, provenance: validation.provenance, version: version.version, reviewTask: reviewer.id,
-      next: `Draft version ${version.version} built (${path.join(run.runDir, "report.html")}). Independent review ${reviewer.id} started: briefing_wait for it.` }
+      next: `Draft version ${version.version} built (${path.join(run.runDir, "report.html")}). Independent review ${reviewer.id} started: briefing_wait for it.`
+        + (validation.readinessCodes ? ` Validator readiness ${validation.readiness}${validation.readinessCodes}: fix what you can with the next draft (qa/review_report.md lists each one).` : "") }
   }
 
   /** Every check a draft must pass. Problems, or what the accepted version records. */
-  private async validateDraft(run: BriefingRun, chief: BriefingTask): Promise<{ problems: string[] } | { readiness: string; provenance: string; claims: Record<string, string> }> {
+  private async validateDraft(run: BriefingRun, chief: BriefingTask): Promise<{ problems: string[] } | { readiness: string; readinessCodes: string; provenance: string; claims: Record<string, string> }> {
     await this.mergeInto(run, chief)
     if (!existsSync(path.join(run.runDir, "report.json"))) return { problems: ["report.json is missing in the run root."] }
     const check = await this.checkHandoff(run, chief)
@@ -2147,14 +2157,14 @@ export class BriefingWorkflow {
     if (build.stdout.includes("Not ready to build") || builtAt === 0) {
       return { problems: build.stdout.split("\n").filter((line) => line.startsWith("TODO")).concat(build.exitCode !== 0 && !build.stdout ? [build.stderr.slice(-500)] : []) }
     }
-    const qa = await readJson<{ readiness: string }>(path.join(run.runDir, "qa", "review_report.json"))
+    const qa = await readJson<{ readiness: string; readiness_codes?: Record<string, number> }>(path.join(run.runDir, "qa", "review_report.json"))
     if (!qa || qa.readiness === "BLOCKED") {
       return { problems: ["The validator blocked the report (qa/review_report.md):", ...build.stdout.split("\n").filter((line) => /^\s*(FIX|\d+\.)/.test(line)).slice(0, 25)] }
     }
     const claims = await this.printedClaims(run)
     const lost = await this.lostClaims(run, claims)
     if (lost.length > 0) return { problems: lost }
-    return { readiness: qa.readiness, provenance: provenance.outcome, claims }
+    return { readiness: qa.readiness, readinessCodes: describeReadinessCodes(qa.readiness_codes), provenance: provenance.outcome, claims }
   }
 
   /** The issue date of a build: today in the run's time zone. The coverage window and cutoff do not move. */
@@ -2786,6 +2796,7 @@ export class BriefingWorkflow {
     const reasons = [input.reason]
     let status: BriefingRunStatus = input.status ?? "ready_for_human_review"
     let readiness: string | undefined
+    let readinessCodes = ""
     let provenanceOutcome: string | undefined
     if (run.draft) {
       const now = await this.draftHashes(run)
@@ -2794,12 +2805,14 @@ export class BriefingWorkflow {
         status = "blocked"
         reasons.push(`changed after the reviewed draft was built: ${changed.join(", ")}`)
       }
-      readiness = (await readJson<{ readiness: string }>(path.join(run.runDir, "qa", "review_report.json")))?.readiness
+      const qa = await readJson<{ readiness: string; readiness_codes?: Record<string, number> }>(path.join(run.runDir, "qa", "review_report.json"))
+      readiness = qa?.readiness
+      readinessCodes = describeReadinessCodes(qa?.readiness_codes)
       const provenance = this.parseJson<{ outcome: string }>(await this.py(run, ["check_provenance.py", run.runDir, "--json"]))
       provenanceOutcome = provenance?.outcome ?? "not run"
       if (readiness === "BLOCKED" || provenanceOutcome === "FAIL" || provenanceOutcome === "not run") {
         status = "blocked"
-        reasons.push(`validator ${readiness}, provenance ${provenanceOutcome}`)
+        reasons.push(`validator ${readiness}${readinessCodes}, provenance ${provenanceOutcome}`)
       }
     } else if (status === "ready_for_human_review") {
       status = "blocked"
@@ -2807,7 +2820,7 @@ export class BriefingWorkflow {
     }
     if (status === "ready_for_human_review" && (run.partialReason || readiness === "INCOMPLETE")) {
       status = "incomplete"
-      reasons.push(run.partialReason ?? "validator readiness INCOMPLETE")
+      reasons.push(run.partialReason ?? `validator readiness INCOMPLETE${readinessCodes}`)
     }
     const open = Object.values(run.findings ?? {}).filter((finding) => finding.status !== "resolved" && finding.status !== "escalated")
     const openSerious = open.filter((finding) => finding.severity !== "minor")

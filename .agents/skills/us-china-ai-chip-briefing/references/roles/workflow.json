@@ -1,0 +1,46 @@
+{
+  "note": "Budgets the Nex briefing workflow enforces. Nex also enforces its own chat limits (depth 3, 8 live sub-chats per conversation); these stay below them.",
+  "max_scouts_per_lead": 4,
+  "scout_mode_note": "topic: each scout covers one topic from categories.json (topic-scout.md). lane: each scout covers one source lane from lanes.json (source-scout.md) across categories, and media leads go to a follow-up scout. Lane mode needs lanes.json and source-scout.md; without them Nex runs topic scouts.",
+  "scout_mode": "topic",
+  "max_concurrent_scouts": 4,
+  "max_task_attempts": 2,
+  "max_cross_border_requests": 3,
+  "max_rework_rounds": 2,
+  "max_draft_rejections": 4,
+  "max_review_attempts": 2,
+  "task_minutes": {"scout": 30, "lead": 90, "cross_border": 30, "reviewer": 30, "verifier": 20, "chief": 240},
+  "token_budget": {
+    "note": "Fresh tokens = uncached input + output, as the provider reports them per request. Best-effort: checked after each reported request and about once a minute, so a request in flight can overshoot.",
+    "run_fresh_tokens": 3000000,
+    "task_fresh_tokens": {"scout": 300000, "lead": 400000, "cross_border": 250000, "reviewer": 250000, "verifier": 100000, "chief": 500000},
+    "reserve_note": "Held back from research for the stages every report needs. New research may start only if, with every running agent spending its whole cap plus the in-flight margin, the reserve stays untouched.",
+    "reserve_fresh_tokens": {"synthesis": 250000, "review": 250000, "rework": 250000, "verification": 300000, "gap_research": 400000},
+    "in_flight_margin": 25000,
+    "wrap_up_at": 0.8,
+    "rework_fresh_tokens": 150000,
+    "lane_fresh_tokens": {"official": 150000, "company": 100000, "media": 150000}
+  },
+  "gap_round": {
+    "note": "One bounded round after the leads hand in (references/roles/chief-editor.md, Gap round): brief.py gaps lists coverage gaps by rule, the chief decides each one (a skip needs a reason), Nex reopens the leads for the pursued ones and checks their gap_results with brief.py gap-check. reserve_fresh_tokens.gap_research is held back from the first round and released when the gap round starts.",
+    "enabled": true,
+    "max_gaps_listed": 20,
+    "max_gaps_pursued": 8,
+    "max_gap_scouts_per_lead": 2,
+    "discovery_top": 10,
+    "lead_fresh_tokens": 80000,
+    "scout_fresh_tokens": 60000,
+    "lead_minutes": 30,
+    "scout_minutes": 15
+  },
+  "verification": {
+    "note": "Independent verifiers check high-risk claims before the draft, without the author's sources (references/roles/verifier.md). Claims are chosen by brief.py verify-select.",
+    "enabled": true,
+    "max_claims": 12,
+    "claims_per_verifier": 4,
+    "max_concurrent": 3,
+    "max_rework_rounds": 1
+  },
+  "discovery": true,
+  "days": 7
+}

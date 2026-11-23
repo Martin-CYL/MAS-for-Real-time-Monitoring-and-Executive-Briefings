@@ -1,0 +1,18 @@
+{
+  "note": "Source lanes for scout_mode \"lane\" in workflow.json: each country lead's scouts are split by where they look, not by topic. A lane fixes which evidence types its scout may record; scripts/check_handoff.py refuses anything else. Categories (categories.json) are covered inside each lane. Instructions per lane: source-scout.md, section \"Lane: <id>\".",
+  "lanes": [
+    {"id": "official", "title": "Official documents",
+     "evidence_types": ["official_document", "dataset"],
+     "official_host_required": ["official_document"],
+     "follow_up": true,
+     "channels": "references/sources.md section 3 (government, regulator and ministry channels, official APIs and reprints)"},
+    {"id": "company", "title": "Company disclosures",
+     "evidence_types": ["company_statement", "dataset"],
+     "follow_up": true,
+     "channels": "company investor-relations pages and newsrooms, SEC EDGAR, HKEXnews, SSE, SZSE, CNINFO"},
+    {"id": "media", "title": "Media reports",
+     "evidence_types": ["news", "other"],
+     "primary_leads": true,
+     "channels": "references/sources.md section 5 (wire, financial, Greater China, trade and tech press)"}
+  ]
+}

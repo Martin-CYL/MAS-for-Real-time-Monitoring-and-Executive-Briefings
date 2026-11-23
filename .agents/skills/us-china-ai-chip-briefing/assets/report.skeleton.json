@@ -1,0 +1,14 @@
+{
+  "thesis": {"lead": "", "emphasis": ""},
+  "deck": "",
+  "questions": ["", "", ""],
+  "judgments": [
+    {"title": "", "text": ""},
+    {"title": "", "text": ""},
+    {"title": "", "text": ""}
+  ],
+  "stories": [
+    {"event": "E0XX", "chapter": "", "chapter_title": "", "title": "", "background": "", "impact": "", "response": "", "uncertain": "", "watch": ""}
+  ],
+  "management_view": ""
+}

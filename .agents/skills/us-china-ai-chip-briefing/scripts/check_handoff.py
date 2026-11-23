@@ -16,6 +16,7 @@ material, and a clean handoff is not a reviewed one.
 """
 import argparse
 from datetime import date, datetime
+import hashlib
 import json
 from pathlib import Path
 import re
@@ -105,6 +106,19 @@ def check(run, role, lane=None):
         add('FAIL', 'CUTOFF_MISSING', 'run_config.json has no valid cutoff')
     start = cfg.get('window', {}).get('start')
 
+    # Saved pages must still be the bytes registered by brief.py fetch: merge_runs.py refuses a changed one, and
+    # found live a lead's edited S008.txt passed this check, was accepted, and then failed the whole run at the
+    # chief's merge. Refused here, the agent can register the page again and finish.
+    registry = load(run / 'sources.json', {})
+    for s in (registry.get('sources') or []) if isinstance(registry, dict) else []:
+        if not isinstance(s, dict) or not s.get('file') or not s.get('sha256'):
+            continue
+        saved = run / s['file']
+        if not saved.is_file():
+            add('FAIL', 'SOURCE_SNAPSHOT_MISSING', f'{s.get("id")}: {s["file"]} is missing; register the page again with brief.py fetch', field=s['file'])
+        elif hashlib.sha256(saved.read_bytes()).hexdigest() != s['sha256']:
+            add('FAIL', 'SOURCE_SNAPSHOT_CHANGED', f'{s.get("id")}: {s["file"]} changed after it was registered. Saved pages are never edited: '
+                'register the page again with brief.py fetch (it gets a new ID) and re-add its claims from it', field=s['file'])
     for cid in ev.hand_edited(ledger):
         add('FAIL', 'CLAIM_EDITED_BY_HAND', f'{cid} was changed after add-claim; withdraw it and record the corrected claim with add-claim', claim=cid)
     for cid, r in risk.items():

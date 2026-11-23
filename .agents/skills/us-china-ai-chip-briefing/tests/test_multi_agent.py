@@ -309,6 +309,19 @@ class HandoffTests(unittest.TestCase):
         items = check_handoff.check(self.run, 'scout')
         self.assertFalse([x for x in items if x['status'] == 'FAIL'], items)
 
+    def test_changed_or_missing_saved_page_is_refused_at_handoff(self):
+        # Found live: a lead's edited S008.txt was accepted, then failed the whole run at the chief's merge.
+        self.r.rule(self.run)
+        self.r.narrative(self.run)
+        page = self.run / 'sources' / 'S001.txt'
+        page.write_text(page.read_text(encoding='utf-8') + ' edited', encoding='utf-8')
+        found = codes(check_handoff.check(self.run, 'scout'))
+        self.assertIn('SOURCE_SNAPSHOT_CHANGED', found)
+        with self.assertRaises(merge_runs.MergeError):  # what the merge would have done
+            merge_runs.merge(self.r.task('us-lead'), 'scout', self.run)
+        page.unlink()
+        self.assertIn('SOURCE_SNAPSHOT_MISSING', codes(check_handoff.check(self.run, 'scout')))
+
     def test_missing_pieces_fail(self):
         call('fetch', self.run, 'https://www.example.gov/x', '--file', self.r.page(RULE, 'x.txt'))
         call('event', self.run, 'add', '--title', 'Synthetic rule', '--date', '2030-03-06', '--side', 'us', '--source', 'S001')

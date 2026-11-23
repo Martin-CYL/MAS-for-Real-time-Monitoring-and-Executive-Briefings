@@ -61,7 +61,9 @@ coordination, materiality judgment, cross-border synthesis and the final report 
 7. **Rework.** `briefing_wait` on the review task. Each finding names the affected claim, event or section and, where
    Nex can trace it, the responsible lead. Fix editorial findings yourself. Send evidence findings to the
    responsible task with `briefing_delegate` (role `lead`, `reworkOf` the lead task or cross-border reply, `findings` with the finding IDs). Then submit
-   the draft again. Rework rounds are limited; unresolved findings are escalated to the human reviewer, not hidden.
+   the draft again. If a rework ends without a new hand-in, Nex puts that task's accepted records back and it stays
+   accepted, with its finding still open: do not rewrite its claims yourself; send the finding to it again in the next
+   round, or leave it for the review. Rework rounds are limited; unresolved findings are escalated to the human reviewer, not hidden.
 8. Finish with a short reply: run status, the full path of RUN/report.html, what passed, what needs a person, and any
    missing input. Once the review passes the run is final: do not edit the report or records after that (a later edit
    cannot be resubmitted and leaves the report differing from what was reviewed). Name remaining fixes in the reply.

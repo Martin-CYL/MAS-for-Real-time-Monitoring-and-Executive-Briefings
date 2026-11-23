@@ -1,0 +1,385 @@
+#!/usr/bin/env python3
+"""Check one research task's records before its results are handed to the parent agent.
+
+  python3 scripts/check_handoff.py TASK_RUN --role scout|lead|cross_border|chief|verifier [--lane LANE] [--json]
+
+TASK_RUN is a brief.py run directory with assignment.json (written by the workflow controller) and, except for the
+chief, narrative.md. Findings use the validator's PASS / FAIL / UNVERIFIED semantics: any FAIL means the handoff is
+refused and the agent must fix its records; UNVERIFIED items travel with the handoff for the parent to judge.
+
+A scout with a source lane (assignment.json `lane`, or --lane; lanes in references/roles/lanes.json) may record only
+its lane's evidence types; a media scout's primary leads must name its own events, and a follow-up scout must report
+every lead it was given, recording a found lead on an event the merge can join to the reported one.
+
+The check is mechanical. A quote found in a saved page shows the page says it, not that the claim is right or
+material, and a clean handoff is not a reviewed one.
+"""
+import argparse
+from datetime import date, datetime
+import hashlib
+import json
+from pathlib import Path
+import re
+import sys
+
+SCRIPTS = Path(__file__).resolve().parent
+sys.path.insert(0, str(SCRIPTS))
+import brief  # noqa: E402
+import evidence_tools as ev  # noqa: E402
+import gaps as gap_round  # noqa: E402
+from check_evidence import KINDS  # noqa: E402
+from check_quotes import host_of, is_official, load_domains  # noqa: E402
+from qa_common import finding, outcome  # noqa: E402
+
+ROLES = ('scout', 'lead', 'cross_border', 'chief', 'verifier')
+LANES_FILE = SCRIPTS.parent / 'references' / 'roles' / 'lanes.json'
+LEAD_OUTCOMES = ('found', 'not_found')
+VERDICTS = ('confirmed', 'contradicted', 'scope_differs', 'status_differs', 'not_found')
+MIN_NARRATIVE = 80
+# Record IDs mean nothing to a reader; the renderer prints tracked events' titles and reasons as they are.
+INTERNAL_ID = re.compile(r'\b[ACES]\d{3,}\b')
+# Legal state: a proposal must not be written up as law. Negated or future forms ("not yet in force",
+# "would take effect") are not claims of enactment.
+ENACTED = re.compile(r'\b(enacted|took effect|takes effect|has taken effect|came into (?:force|effect)|(?:is|are|now) in (?:force|effect)|'
+                     r'finali[sz]ed|issued a final rule|adopted the (?:rule|regulation|law))\b', re.I)
+NOT_ENACTED = re.compile(r'\b(not|yet|would|will|could|may|expected to|proposed to|before it)\b[^.;]{0,25}$', re.I)
+PROPOSAL = re.compile(r'propos|draft|would (?:require|impose|restrict|ban|add)|comments? (?:are|is) due|comment period|consultation|'
+                      r'征求意见|草案|拟', re.I)
+
+
+def says_enacted(text):
+    return any(not NOT_ENACTED.search(text[:m.start()]) for m in ENACTED.finditer(text or ''))
+
+
+def load(path, default=None):
+    try:
+        return json.loads(Path(path).read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        return default
+    except json.JSONDecodeError as e:
+        return {'_invalid': str(e)}
+
+
+def lanes(path=LANES_FILE):
+    doc = load(path, {}) or {}
+    return {lane['id']: lane for lane in doc.get('lanes') or [] if isinstance(lane, dict) and lane.get('id')}
+
+
+def check(run, role, lane=None):
+    run = Path(run)
+    items = []
+    add = lambda status, code, message, **kw: items.append(finding(status, code, message, **kw))
+    for name in ('run_config.json', 'events.json', 'evidence_ledger.json', 'sources.json'):
+        doc = load(run / name)
+        if doc is None:
+            add('FAIL', 'RECORD_MISSING', f'{name} missing: initialise the task run with brief.py init', field=name)
+        elif '_invalid' in doc:
+            add('FAIL', 'RECORD_INVALID', f'{name} is not valid JSON: {doc["_invalid"]}', field=name)
+    if any(x['status'] == 'FAIL' for x in items):
+        return items
+    cfg = load(run / 'run_config.json')
+    assignment = load(run / 'assignment.json')
+    if assignment is None or '_invalid' in assignment:
+        add('FAIL', 'ASSIGNMENT_MISSING', 'assignment.json missing or invalid: this directory was not issued by the workflow')
+    else:
+        if assignment.get('window') != cfg.get('window'):
+            add('FAIL', 'WINDOW_MISMATCH', f'run window {cfg.get("window")} differs from the assigned window {assignment.get("window")}')
+        if assignment.get('cutoff') and assignment.get('cutoff') != cfg.get('cutoff'):
+            add('FAIL', 'CUTOFF_MISMATCH', f'run cutoff {cfg.get("cutoff")} differs from the assigned cutoff {assignment.get("cutoff")}')
+        if assignment.get('report_date') and assignment.get('report_date') != cfg.get('report_date'):
+            add('FAIL', 'REPORT_DATE_MISMATCH', f'run_config.json report date {cfg.get("report_date")} differs from the assigned '
+                f'{assignment.get("report_date")}; the run\'s dates are set by the workflow, not edited')
+        if cfg.get('language', 'zh') != 'en':
+            add('FAIL', 'LANGUAGE', 'the multi-agent briefing is written in English: initialise with brief.py init … --lang en')
+
+    events, ledger, claims, risk, sources = brief.snapshot_state(run)
+    evs = events['events']
+    # The ledger's header must stay what init wrote: the validator's date checks read it.
+    changed = [k for k in ('report_date', 'timezone', 'cutoff') if ledger.get(k) != cfg.get(k)]
+    if changed:
+        add('FAIL', 'LEDGER_HEADER_MISMATCH', f'evidence_ledger.json {", ".join(changed)} differ from run_config.json; '
+            'these are set when the run starts and are not edited')
+    cutoff_day = None
+    try:
+        cutoff_day = datetime.fromisoformat(cfg['cutoff']).date()
+    except (KeyError, TypeError, ValueError):
+        add('FAIL', 'CUTOFF_MISSING', 'run_config.json has no valid cutoff')
+    start = cfg.get('window', {}).get('start')
+
+    # Saved pages must still be the bytes registered by brief.py fetch: merge_runs.py refuses a changed one, and
+    # found live a lead's edited S008.txt passed this check, was accepted, and then failed the whole run at the
+    # chief's merge. Refused here, the agent can register the page again and finish.
+    registry = load(run / 'sources.json', {})
+    for s in (registry.get('sources') or []) if isinstance(registry, dict) else []:
+        if not isinstance(s, dict) or not s.get('file') or not s.get('sha256'):
+            continue
+        saved = run / s['file']
+        if not saved.is_file():
+            add('FAIL', 'SOURCE_SNAPSHOT_MISSING', f'{s.get("id")}: {s["file"]} is missing; register the page again with brief.py fetch', field=s['file'])
+        elif hashlib.sha256(saved.read_bytes()).hexdigest() != s['sha256']:
+            add('FAIL', 'SOURCE_SNAPSHOT_CHANGED', f'{s.get("id")}: {s["file"]} changed after it was registered. Saved pages are never edited: '
+                'register the page again with brief.py fetch (it gets a new ID) and re-add its claims from it', field=s['file'])
+    for cid in ev.hand_edited(ledger):
+        add('FAIL', 'CLAIM_EDITED_BY_HAND', f'{cid} was changed after add-claim; withdraw it and record the corrected claim with add-claim', claim=cid)
+    for cid, r in risk.items():
+        if r.get('quote_state') != 'FOUND':
+            add('FAIL', 'QUOTE_NOT_FOUND', f'{cid}: quote not found in its saved snapshot ({r.get("quote_state")})', claim=cid)
+    proposed_claims = {cid for e in evs if e.get('proposed') for cid in e.get('claim_ids') or []}
+    for c in claims.values():
+        if says_enacted(c.get('text')):
+            quotes = ' '.join(src.get('quote') or '' for src in c.get('sources') or [])
+            if c['id'] in proposed_claims:
+                add('FAIL', 'STATUS_WORDING', f'{c["id"]}: its event is marked proposed, but the claim says it was enacted or took effect; '
+                    'withdraw it and record what the source says', claim=c['id'])
+            elif PROPOSAL.search(quotes) and not ENACTED.search(quotes):
+                add('FAIL', 'STATUS_WORDING', f'{c["id"]}: the claim says enacted or in force, but its quote only shows a proposal or draft; '
+                    'withdraw it and record what the source says, or quote the passage that shows enactment', claim=c['id'])
+        bad = [k for k in c.get('kinds') or [] if k not in KINDS]
+        if bad or not c.get('kinds'):
+            add('FAIL', 'CLAIM_KINDS', f'{c["id"]}: kinds {bad or "missing"} are not accepted by the validator ({", ".join(sorted(KINDS))}); '
+                'withdraw it and add it again with valid --kind values', claim=c['id'])
+
+    assigned_lane = (assignment or {}).get('lane') if assignment and '_invalid' not in assignment else None
+    if lane and assigned_lane and lane != assigned_lane:
+        add('FAIL', 'LANE_MISMATCH', f'checked as lane {lane!r}, but assignment.json assigns lane {assigned_lane!r}')
+    lane = lane or (assigned_lane if role == 'scout' else None)
+    if lane:
+        known = lanes()
+        if role != 'scout':
+            add('FAIL', 'LANE_ROLE', f'only scouts have a source lane; {role} was given {lane!r}')
+        elif lane not in known:
+            add('FAIL', 'LANE_UNKNOWN', f'lane {lane!r} is not in references/roles/lanes.json ({", ".join(sorted(known)) or "none"})')
+        else:
+            check_lane(run, known[lane], assignment or {}, evs, claims, risk, add)
+
+    if role == 'verifier':
+        # A verifier's records are its own evidence for its verdicts; it decides no events and writes no narrative.
+        check_verification(run, assignment or {}, claims, risk, add)
+        if not items or all(x['status'] == 'PASS' for x in items):
+            add('PASS', 'HANDOFF_RECORDS', 'records are complete for this role')
+        return items
+
+    for e in evs:
+        eid = e['id']
+        if not e.get('decision'):
+            add('FAIL', 'EVENT_UNDECIDED', f'{eid} {e.get("title", "")[:50]}: decide include / track / exclude with a reason', event=eid)
+            continue
+        if not (e.get('reason') or '').strip():
+            add('FAIL', 'EVENT_REASON_MISSING', f'{eid}: decision needs a one-line reason', event=eid)
+        if e['decision'] in ('include', 'track'):
+            if not e.get('side'):
+                add('FAIL', 'EVENT_SIDE_MISSING', f'{eid}: add --side us|cn|both|other', event=eid)
+            if not e.get('materiality'):
+                add('FAIL', 'MATERIALITY_MISSING', f'{eid}: set --materiality high|medium|low', event=eid)
+            missing = [k for k in ('link', 'size', 'new') if not ((e.get('assessment') or {}).get(k) or '').strip()]
+            if missing:
+                add('FAIL', 'ASSESSMENT_MISSING', f'{eid}: answer the selection questions with --{" --".join(missing)} (SKILL.md Step 3)', event=eid)
+            if re.search(r'[一-鿿]', e.get('title') or ''):
+                add('FAIL', 'TITLE_LANGUAGE', f'{eid}: give it a short English title (decide … --title "…")', event=eid)
+        if e['decision'] == 'track':
+            shown = f'{e.get("title") or ""} {e.get("reason") or ""}'
+            if INTERNAL_ID.search(shown):
+                add('FAIL' if role == 'chief' else 'UNVERIFIED', 'INTERNAL_ID_SHOWN',
+                    f'{eid}: its title and reason are printed in the report status table, but mention {INTERNAL_ID.search(shown)[0]}; '
+                    'describe the event instead of citing record IDs', event=eid)
+        if e['decision'] == 'include' and e.get('evidence_status') == 'unresolved':
+            add('FAIL', 'INCLUDED_WITHOUT_EVIDENCE', f'{eid}: included without a located quote; add-claim from a page you opened or decide it as track', event=eid)
+        if e.get('merge_conflicts'):
+            fields = ', '.join(sorted({c['field'] for c in e['merge_conflicts']}))
+            add('FAIL', 'MERGE_CONFLICT', f'{eid}: merged reports disagree on {fields}; settle it with brief.py event decide', event=eid)
+        d = e.get('date')
+        if d and cutoff_day:
+            try:
+                day = date.fromisoformat(d)
+                if day > cutoff_day:
+                    add('FAIL', 'EVENT_AFTER_CUTOFF', f'{eid}: dated {d}, after the cutoff', event=eid)
+                elif start and day < date.fromisoformat(start) and e['decision'] == 'include' and not e.get('case_id'):
+                    add('UNVERIFIED', 'EVENT_BEFORE_WINDOW', f'{eid}: dated {d}, before the window; the "new" answer must say what changed in the window', event=eid)
+            except ValueError:
+                add('FAIL', 'EVENT_DATE_INVALID', f'{eid}: date {d!r} is not YYYY-MM-DD', event=eid)
+
+    ids = {e['id'] for e in evs}
+    for pair in events.get('possible_duplicates') or []:
+        a, b = pair['events']
+        if a not in ids or b not in ids:
+            continue
+        reasons = ' '.join((e.get('reason') or '') for e in evs if e['id'] in (a, b))
+        if a not in reasons and b not in reasons:
+            add('UNVERIFIED', 'POSSIBLE_DUPLICATE', f'{a} and {b} may be the same event: exclude one with reason "duplicate of …", '
+                'or keep both if they are distinct (this note is only a warning)', events=[a, b])
+
+    if role != 'chief':
+        path = run / 'narrative.md'
+        text = path.read_text(encoding='utf-8') if path.exists() else ''
+        if len(text.strip()) < MIN_NARRATIVE:
+            add('FAIL', 'NARRATIVE_MISSING', 'narrative.md missing or too short: explain what happened, why it matters and what to watch')
+        for e in evs:
+            if e.get('decision') == 'include' and e['id'] not in text:
+                add('FAIL', 'NARRATIVE_EVENT_MISSING', f'narrative.md does not discuss {e["id"]} ("{e.get("title", "")[:40]}"); cite it by ID', event=e['id'])
+    if role == 'lead':
+        out = load(run / 'output.json')
+        if isinstance(out, dict) and 'gap_results' in out:
+            for problem in gap_round.result_problems(out['gap_results']):
+                add('FAIL', 'GAP_RESULTS', f'output.json {problem}')
+    if role in ('lead', 'chief'):
+        sides = {e.get('side') for e in evs if e.get('decision') in ('include', 'track')}
+        if role == 'chief' and not ({'us', 'both'} & sides and {'cn', 'both'} & sides):
+            add('UNVERIFIED', 'ONE_SIDED', 'the merged research has no included or tracked event on one side (US or China)')
+    blocked = [s for s in sources.values() if s.get('access') != 'opened']
+    for s in blocked:
+        add('UNVERIFIED', 'SOURCE_NOT_OPENED', f'{s["id"]} {s.get("host", "")}: {s.get("access_note", "not opened")} (an access limit, not evidence of falsity)', source=s['id'])
+    if not items or all(x['status'] == 'PASS' for x in items):
+        add('PASS', 'HANDOFF_RECORDS', 'records are complete for this role')
+    return items
+
+
+def check_lane(run, lane, assignment, evs, claims, risk, add):
+    """A lane's scout records only its lane's evidence types; media leads and follow-up results are well formed."""
+    allowed = set(lane.get('evidence_types') or [])
+    host_bound = set(lane.get('official_host_required') or [])
+    domains = load_domains()
+    for c in claims.values():
+        for src in c.get('sources') or []:
+            etype = src.get('evidence_type')
+            if etype not in allowed:
+                add('FAIL', 'LANE_EVIDENCE_TYPE', f'{c["id"]}: recorded as {etype!r}, but the {lane["id"]} lane records only '
+                    f'{", ".join(sorted(allowed))}; withdraw it (another lane covers this source{", or hand it over as a primary lead" if lane.get("primary_leads") else ""})',
+                    claim=c['id'])
+            elif etype in host_bound and not is_official(host_of(src.get('url') or ''), domains):
+                add('FAIL', 'LANE_SOURCE_HOST', f'{c["id"]}: {etype} from {host_of(src.get("url") or "") or "an unknown host"}, which '
+                    'references/source_domains.json does not list as official; record the official original, or add the host there '
+                    'if it really is a government site', claim=c['id'])
+    output = load(run / 'output.json', {}) or {}
+    if '_invalid' in output:
+        return  # the workflow refuses an invalid output.json with its own message
+    by_id = {e['id']: e for e in evs}
+    if lane.get('primary_leads'):
+        led = set()
+        leads = output.get('primary_leads') or []
+        if not isinstance(leads, list):
+            add('FAIL', 'PRIMARY_LEAD_INVALID', 'output.json primary_leads must be a list of leads')
+            leads = []
+        for i, lead in enumerate(leads):
+            if not isinstance(lead, dict):
+                add('FAIL', 'PRIMARY_LEAD_INVALID', f'primary_leads[{i}] is not an object')
+                continue
+            eid = lead.get('event_id')
+            if eid not in by_id:
+                add('FAIL', 'PRIMARY_LEAD_EVENT', f'primary_leads[{i}]: event {eid!r} is not one of your events', event=eid)
+                continue
+            missing = [k for k in ('agency', 'document_hint') if not str(lead.get(k) or '').strip()]
+            if missing:
+                add('FAIL', 'PRIMARY_LEAD_INVALID', f'primary_leads[{i}] ({eid}): give {" and ".join(missing)}', event=eid)
+                continue
+            led.add(eid)
+        questions = ' '.join(str(q) for q in output.get('open_questions') or [])
+        for e in evs:
+            if e.get('decision') in ('include', 'track') and e.get('materiality') == 'high' and e['id'] not in led \
+                    and e['id'] not in questions and not any(brief.is_primary(claims[c]) for c in e.get('claim_ids') or [] if c in claims):
+                add('UNVERIFIED', 'MEDIA_EVENT_NO_LEAD', f'{e["id"]} ({(e.get("title") or "")[:50]}): high materiality and only reported; add a '
+                    'primary lead for the document or statement it rests on, or say in open_questions why there is none', event=e['id'])
+    assigned = {lead.get('lead_id'): lead for lead in assignment.get('primary_leads') or [] if isinstance(lead, dict)}
+    if not assigned:
+        return
+    results = output.get('lead_results') or []
+    seen = set()
+    for i, r in enumerate(results if isinstance(results, list) else []):
+        lid = r.get('lead_id') if isinstance(r, dict) else None
+        if lid not in assigned:
+            add('FAIL', 'LEAD_RESULT_UNASSIGNED', f'lead_results[{i}]: {lid!r} is not one of your leads ({", ".join(sorted(map(str, assigned)))})')
+            continue
+        if lid in seen:
+            add('FAIL', 'LEAD_RESULT_DUPLICATE', f'{lid}: more than one result')
+        seen.add(lid)
+        outcome_ = r.get('outcome')
+        if outcome_ not in LEAD_OUTCOMES:
+            add('FAIL', 'LEAD_RESULT_OUTCOME', f'{lid}: outcome {outcome_!r} is not found or not_found')
+            continue
+        if outcome_ == 'not_found':
+            if not str(r.get('note') or '').strip():
+                add('FAIL', 'LEAD_RESULT_NOTE', f'{lid}: not_found needs a note saying what you searched')
+            continue
+        lead, e = assigned[lid], by_id.get(r.get('event_id'))
+        if e is None:
+            add('FAIL', 'LEAD_RESULT_EVENT', f'{lid}: found, but event {r.get("event_id")!r} is not one of your events')
+            continue
+        differs = [k for k in ('title', 'date', 'side') if (e.get(k) or None) != (lead.get(k) or None)]
+        if differs:
+            add('FAIL', 'LEAD_RESULT_MISMATCH', f'{lid}: {e["id"]} differs from the lead\'s event in {", ".join(differs)} '
+                f'({"; ".join(f"{k} {lead.get(k)!r}" for k in differs)}); the merge joins them only when title, date and side match',
+                event=e['id'])
+        primary = [c for c in e.get('claim_ids') or [] if c in claims and brief.is_primary(claims[c])
+                   and risk.get(c, {}).get('quote_state') == 'FOUND']
+        if not primary:
+            add('FAIL', 'LEAD_RESULT_NO_PRIMARY', f'{lid}: {e["id"]} has no claim from a primary source; record it with add-claim, '
+                'or report the lead as not_found', event=e['id'])
+    for lid in sorted(set(map(str, assigned)) - seen):
+        add('FAIL', 'LEAD_RESULT_MISSING', f'{lid}: no result in output.json lead_results; report found or not_found')
+
+
+def check_verification(run, assignment, claims, risk, add):
+    """verification.json: a verdict for every assigned claim, each but not_found backed by the verifier's own
+    recorded claims whose quotes were found in pages it saved."""
+    doc = load(run / 'verification.json')
+    if doc is None or '_invalid' in doc or not isinstance(doc.get('results'), list):
+        add('FAIL', 'VERIFICATION_MISSING', 'verification.json missing or invalid: write {"results": [...]} (verifier.md)')
+        return
+    assigned = {t.get('claim_id') for t in assignment.get('claims') or []}
+    seen = set()
+    for r in doc['results']:
+        cid = r.get('claim_id')
+        if cid not in assigned:
+            add('FAIL', 'VERIFICATION_UNASSIGNED', f'{cid}: not one of the claims assigned to you ({", ".join(sorted(assigned))})', claim=cid)
+            continue
+        if cid in seen:
+            add('FAIL', 'VERIFICATION_DUPLICATE', f'{cid}: more than one result', claim=cid)
+        seen.add(cid)
+        verdict = r.get('verdict')
+        if verdict not in VERDICTS:
+            add('FAIL', 'VERIFICATION_VERDICT', f'{cid}: verdict {verdict!r} is not one of {", ".join(VERDICTS)}', claim=cid)
+            continue
+        if not (r.get('note') or '').strip():
+            add('FAIL', 'VERIFICATION_NOTE', f'{cid}: say in note what you checked and why you concluded {verdict}', claim=cid)
+        evidence = r.get('evidence') or []
+        if verdict != 'not_found' and not evidence:
+            add('FAIL', 'VERIFICATION_EVIDENCE', f'{cid}: {verdict} needs evidence: the IDs of claims you recorded with add-claim', claim=cid)
+        for own in evidence:
+            if own not in claims:
+                add('FAIL', 'VERIFICATION_EVIDENCE', f'{cid}: evidence {own} is not a claim in your evidence_ledger.json', claim=cid)
+            elif risk.get(own, {}).get('quote_state') != 'FOUND':
+                add('FAIL', 'VERIFICATION_EVIDENCE', f'{cid}: the quote of your claim {own} was not found in its saved page', claim=cid)
+    for cid in sorted(assigned - seen):
+        add('FAIL', 'VERIFICATION_INCOMPLETE', f'{cid}: no result; give every assigned claim a verdict (not_found if you found nothing)', claim=cid)
+
+
+def summary(run):
+    events, ledger, claims, risk, sources = brief.snapshot_state(run)
+    by = lambda d: [e['id'] for e in events['events'] if e.get('decision') == d]
+    return {'events': len(events['events']), 'include': by('include'), 'track': by('track'), 'exclude': by('exclude'),
+            'claims': len(claims), 'withdrawn': len(ledger.get('withdrawn') or []), 'sources': len(sources),
+            'sources_not_opened': sum(1 for s in sources.values() if s.get('access') != 'opened'),
+            'proposed': [e['id'] for e in events['events'] if e.get('proposed')],
+            'high_materiality': [e['id'] for e in events['events'] if e.get('materiality') == 'high']}
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('run'); ap.add_argument('--role', choices=ROLES, required=True); ap.add_argument('--json', action='store_true')
+    ap.add_argument('--lane', help='source lane (references/roles/lanes.json); default: assignment.json lane')
+    a = ap.parse_args()
+    items = check(a.run, a.role, a.lane)
+    result = {'outcome': outcome(items), 'findings': items}
+    if not any(x['code'] in ('RECORD_MISSING', 'RECORD_INVALID') for x in items):
+        result['summary'] = summary(a.run)
+    if a.json:
+        print(json.dumps(result, ensure_ascii=False))
+    else:
+        print(f"Handoff check ({a.role}): {result['outcome']}")
+        for x in items:
+            if x['status'] != 'PASS':
+                print(f"  {x['status']:10} {x['code']}: {x['message']}")
+    return {'PASS': 0, 'UNVERIFIED': 0, 'FAIL': 1}[result['outcome']]
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

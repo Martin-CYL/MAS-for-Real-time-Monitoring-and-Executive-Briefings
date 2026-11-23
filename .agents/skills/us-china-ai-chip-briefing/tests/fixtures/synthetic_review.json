@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "reviewer": "fixture-human-reviewer",
+  "actor": "human",
+  "date_checked": "2030-01-02",
+  "report_sha256": "e20254fc9ffcb91bcf6a79503f534d5be9ff3f452536f23b74422bc8096f8055",
+  "ledger_sha256": "4d9fe454d36205c039e7a16c36d83845dc160773b782c7229fcd1607a1b5bdfb",
+  "coverage": {
+    "complete": true,
+    "notes": "仅在合成测试中完整；不是实际人工签核。"
+  },
+  "claims": [
+    {
+      "claim_id": "C001",
+      "disposition": "supported",
+      "source_url": "https://fixture.invalid/source",
+      "support_quote": "演示芯片在合成测试中完成 12 次运算。",
+      "anchor": "合成来源第 1 段",
+      "rationale": "合成来源明确给出同一测试条件下的运算次数。"
+    }
+  ],
+  "signoff": {
+    "reviewer": "fixture-human-reviewer",
+    "date": "2030-01-02",
+    "decision": "hold"
+  }
+}

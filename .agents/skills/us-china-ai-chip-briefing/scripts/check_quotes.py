@@ -201,6 +201,18 @@ def read_snapshot(source, ledger_dir):
     return 'OK', page_text(data, 'text/html' if p.suffix.lower() in ('.html', '.htm') else 'text/plain') or ''
 
 
+def source_type_problems(s, domains):
+    """Why a source's evidence_type or source_role does not fit its site (also run at handoff, where it can be fixed)."""
+    host = host_of(s.get('url', ''))
+    out = []
+    if s.get('evidence_type') == 'official_document' and not is_official(host, domains):
+        out.append(f'{host} is labelled official_document but is not a recognised government domain; '
+                   'a company newsroom or investor-relations page is company_statement')
+    if is_news(host, domains) and (s.get('source_role') == 'primary' or s.get('evidence_type') in ('official_document', 'dataset')):
+        out.append(f'{host} is a news site but labelled primary/{s.get("evidence_type")}')
+    return out
+
+
 def claim_signals(c, domains):
     """Offline red flags for one claim. Returns list of (code, message)."""
     out = []
@@ -225,12 +237,7 @@ def claim_signals(c, domains):
         out.append(('NUMBER_NOT_IN_QUOTE',
                      f"Numbers {', '.join(missing)} in the claim appear in no recorded quote or recorded date; check the source or unit conversion"))
     for s in sources:
-        host = host_of(s.get('url', ''))
-        if s.get('evidence_type') == 'official_document' and not is_official(host, domains):
-            out.append(('SOURCE_TYPE_MISMATCH', f'{host} is labelled official_document but is not a recognised government domain; '
-                                                'a company newsroom or investor-relations page is company_statement'))
-        if is_news(host, domains) and (s.get('source_role') == 'primary' or s.get('evidence_type') in ('official_document', 'dataset')):
-            out.append(('SOURCE_TYPE_MISMATCH', f'{host} is a news site but labelled primary/{s.get("evidence_type")}'))
+        out += [('SOURCE_TYPE_MISMATCH', m) for m in source_type_problems(s, domains)]
     kinds = set(k for k in (c.get('kinds') or []) if isinstance(k, str))
     if not kinds & {'legal', 'list', 'negative'} and re.search(LEGAL_WORDS, c.get('text', '')):
         out.append(('KIND_UNDERSTATED', 'Wording looks legal/list/negative but the claim is not labelled so; it is treated as high risk'))

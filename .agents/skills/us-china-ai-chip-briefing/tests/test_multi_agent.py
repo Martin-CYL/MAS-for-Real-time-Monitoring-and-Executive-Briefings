@@ -3,6 +3,7 @@
 Synthetic .invalid / example sources and fictitious content only. Nothing here fetches a page.
 """
 import io
+import os
 import json
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -10,6 +11,7 @@ import re
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 SKILL = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SKILL / 'scripts'))
@@ -51,6 +53,9 @@ class Runs:
 
     def __init__(self):
         self.tmp = tempfile.TemporaryDirectory()
+        # Pages are saved (and so checked) on the fixture's report day, after the dates they show.
+        self.clock = unittest.mock.patch.dict(os.environ, {'BRIEFING_CLOCK': '2030-03-10T12:00:00+08:00'})
+        self.clock.start()
         self.root = Path(self.tmp.name) / 'run'
         call('init', self.root, *WINDOW, '--lang', 'en', '--no-cases')
 
@@ -67,8 +72,10 @@ class Runs:
         return p
 
     def event(self, run, url, text, title, quote, claim, side='us', decision='include', proposed=False, date='2030-03-06'):
-        call('fetch', run, url, '--file', self.page(text, f'{abs(hash((str(run), url)))}.txt'), '--route', 'http_tool')
+        call('fetch', run, url, '--file', self.page(f'Published {date}.\n{text}', f'{abs(hash((str(run), url)))}.txt'), '--route', 'http_tool')
         sid = jload(run / 'sources.json')['sources'][-1]['id']
+        code, out = call('source-date', run, sid, '--date', date)  # a page saved as text keeps no date metadata
+        assert code == 0, out
         call('event', run, 'add', '--title', title, '--date', date, '--side', side, '--source', sid,
              '--materiality', 'high', '--why', 'Synthetic link to US-China chip competition')
         eid = jload(run / 'events.json')['events'][-1]['id']
@@ -105,6 +112,8 @@ class Runs:
         jsave(run / 'report.json', rep)
 
     def close(self):
+        if getattr(self, 'clock', None):  # runs over a real past window keep the real clock
+            self.clock.stop()
         self.tmp.cleanup()
 
 

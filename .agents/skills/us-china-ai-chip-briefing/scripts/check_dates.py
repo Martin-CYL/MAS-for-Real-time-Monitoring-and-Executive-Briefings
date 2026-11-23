@@ -149,7 +149,13 @@ def validate_dates(raw,ledger,review=None,now=None):
         for si,s in enumerate(sources):
             if not isinstance(s,dict):continue
             loc={'claim_id':cid,'source_index':si,'url':s.get('url'),'json_path':f'claims[{ci}].sources[{si}]'}
-            pub=read(s.get('publication_date'),'publication_date',**loc)
+            undated=s.get('undated_reason') if isinstance(s.get('undated_reason'),str) and s['undated_reason'].strip() else None
+            if s.get('publication_date') is None and undated:
+                # The author recorded why the page shows no date (brief.py source-date --undated); a person judges it.
+                add('UNVERIFIED','DATE_NOT_SHOWN',f'The source shows no publication date ({undated}); confirm the claim is current and new in the window','publication_date',**loc)
+                pub=None
+            else:
+                pub=read(s.get('publication_date'),'publication_date',**loc)
             checked=read(s.get('date_checked'),'date_checked',**loc)
             if s.get('access_status') in ('opened','blocked'):
                 not_future(checked,'date_checked',**loc)

@@ -76,7 +76,8 @@ python3 scripts/save_snapshot.py --from-file PAGE.txt --url URL --run-dir RUN --
 
 Paste the printed JSON into that source's `snapshot` field. The quote check then works offline and behind any proxy. Copy the quote from the page text, never from memory.
 
-Record the run's dates at the top of the ledger: `report_date`, `timezone` (e.g. `Asia/Hong_Kong`), `cutoff` and `generated_at`. Give each source its real `publication_date` and `date_checked`. Leave unknown dates `null`; never guess them.
+Record the run's dates at the top of the ledger: `report_date`, `timezone` (e.g. `Asia/Hong_Kong`), `cutoff` and `generated_at`. Give each source its real `publication_date` and `date_checked`: `brief.py source-date RUN S### --date …` records the
+date the saved page shows, and `--undated "why"` records that it shows none. Never guess a date.
 
 Write uncertainty, units, periods, search scope and legal state in `notes` / `uncertainty`. Media-only support means the report must attribute the fact ("reportedly", "according to …").
 

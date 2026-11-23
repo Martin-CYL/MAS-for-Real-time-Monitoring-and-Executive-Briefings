@@ -364,6 +364,14 @@ def cmd_add_claim(a):
     return 0
 
 
+# ------------------------------------------------------------------ source-date
+def cmd_source_date(a):
+    changed, msgs = ev.set_source_date(a.run, a.source, a.date, a.shown, a.undated)
+    for m in msgs:
+        print(m)
+    return 0 if changed is not None else 1
+
+
 # ------------------------------------------------------------------ withdraw
 def cmd_withdraw(a):
     """Take a claim out of the report without deleting it: it moves to the ledger's `withdrawn` list with the reason."""
@@ -864,6 +872,11 @@ def main():
     p.add_argument('--type', choices=['official_document', 'company_statement', 'news', 'dataset', 'other'])
     p.add_argument('--role', choices=['primary', 'secondary']); p.add_argument('--uncertainty', default='')
     p.add_argument('--anchor'); p.add_argument('--notes', default=''); p.add_argument('--name'); p.add_argument('--pub-date')
+    p = sub.add_parser('source-date', help='record the publication date a saved page shows (or why it shows none) on it and its claims')
+    p.add_argument('run'); p.add_argument('source')
+    p.add_argument('--date', help='YYYY-MM-DD, or an ISO timestamp with its UTC offset, as the page shows it')
+    p.add_argument('--shown', help='the date exactly as the page writes it, when it is not in a common format')
+    p.add_argument('--undated', help='why the page shows no publication date (e.g. an FAQ, a data file, an index page)')
     p = sub.add_parser('withdraw'); p.add_argument('run'); p.add_argument('claim'); p.add_argument('--reason', required=True)
     p = sub.add_parser('search'); p.add_argument('run'); p.add_argument('query'); p.add_argument('--found', default='')
     p = sub.add_parser('status'); p.add_argument('run')
@@ -875,7 +888,7 @@ def main():
     p = sub.add_parser('gap-check'); p.add_argument('round'); p.add_argument('task_dir'); p.add_argument('--task', required=True)
     a = ap.parse_args()
     return {'init': cmd_init, 'fetch': cmd_fetch, 'event': cmd_event, 'add-claim': cmd_add_claim, 'search': cmd_search,
-            'withdraw': cmd_withdraw, 'status': cmd_status, 'build': cmd_build, 'verify-select': cmd_verify_select,
+            'withdraw': cmd_withdraw, 'source-date': cmd_source_date, 'status': cmd_status, 'build': cmd_build, 'verify-select': cmd_verify_select,
             'gaps': gap_round.cmd_gaps, 'gap-check': gap_round.cmd_gap_check}[a.cmd](a)
 
 

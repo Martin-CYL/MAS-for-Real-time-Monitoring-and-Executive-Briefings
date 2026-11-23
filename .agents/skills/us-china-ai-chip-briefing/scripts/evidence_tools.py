@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 
@@ -75,6 +76,13 @@ def _title(raw, text):
     return next((l.strip()[:160] for l in text.splitlines() if len(l.strip()) > 8 and not l.strip().startswith('http')), '')
 
 
+def utc_now():
+    """When a page is saved and so checked. BRIEFING_CLOCK (an ISO timestamp) replaces the real clock only for fixture
+    runs that replay a past date (tests, scripts/replay_eval.py); a briefing run never sets it."""
+    fixed = os.environ.get('BRIEFING_CLOCK')
+    return datetime.fromisoformat(fixed).astimezone(timezone.utc) if fixed else datetime.now(timezone.utc)
+
+
 def register_source(run, url, file=None, route=None, fetch=None):
     """Return (record, is_new). `fetch` is safe_http.safe_get or a test double; unused when `file` is given."""
     run = Path(run)
@@ -84,7 +92,7 @@ def register_source(run, url, file=None, route=None, fetch=None):
             return s, False
     sid = f"S{len(reg['sources']) + 1:03d}"
     rec = {'id': sid, 'url': url, 'host': host_of(url).removeprefix('www.'),
-           'registered_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
+           'registered_at': utc_now().isoformat(timespec='seconds')}
     raw_bytes, ctype = None, ''
     if file:
         raw_bytes = Path(file).read_bytes()
@@ -206,7 +214,7 @@ def add_claim(run, source_id, quote, text, kinds=None, evidence_type=None, role=
     if src.get('sha256') and sha != src['sha256']:
         return None, [f'{src["file"]} changed after it was registered; register the page again.']
     entry = {'url': src.get('final_url') or src['url'], 'source_name': source_name or src['host'],
-             'publication_date': src.get('publication_date'), 'date_checked': today or datetime.now().date().isoformat(),
+             'publication_date': src.get('publication_date'), 'date_checked': today or src.get('registered_at') or utc_now().isoformat(timespec='seconds'),
              'quote': quote, 'anchor': anchor or f'{src["file"]}, characters {norm(saved).find(norm(quote))}+',
              'source_role': srole, 'evidence_type': etype, 'access_status': 'opened', 'access_route': src.get('route', 'http_tool'),
              'notes': notes or '', 'snapshot': {'path': src['file'], 'sha256': sha, 'retrieved_at': src['registered_at'],

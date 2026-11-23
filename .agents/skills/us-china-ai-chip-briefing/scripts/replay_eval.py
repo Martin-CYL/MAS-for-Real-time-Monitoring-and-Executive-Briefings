@@ -23,6 +23,7 @@ from collections import Counter
 from contextlib import redirect_stdout
 import hashlib
 import io
+import os
 import json
 from pathlib import Path
 import re
@@ -48,14 +49,23 @@ class CaseError(ValueError):
     pass
 
 
+# The controls replay a run on 10 March 2026: its pages are saved (and so checked) that day, before the 19:00 build.
+FIXTURE_CLOCK = '2026-03-10T12:00:00+08:00'
+
+
 def _brief(*args):
-    out, old = io.StringIO(), sys.argv
+    out, old, clock = io.StringIO(), sys.argv, os.environ.get('BRIEFING_CLOCK')
     sys.argv = ['brief.py', *map(str, args)]
+    os.environ['BRIEFING_CLOCK'] = FIXTURE_CLOCK
     try:
         with redirect_stdout(out):
             code = brief.main()
     finally:
         sys.argv = old
+        if clock is None:
+            os.environ.pop('BRIEFING_CLOCK', None)
+        else:
+            os.environ['BRIEFING_CLOCK'] = clock
     return code, out.getvalue()
 
 

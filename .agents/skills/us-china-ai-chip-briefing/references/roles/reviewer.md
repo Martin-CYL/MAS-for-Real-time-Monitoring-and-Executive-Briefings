@@ -26,6 +26,21 @@ listed in your message. Saved source texts are under `RUN/sources/`.
 5. **Fact / claim / analysis.** Reported claims attributed; allegations not stated as fact; analysis marked as such.
 6. **Coherence.** Does the narrative hold together for a finance reader without chip or export-control expertise?
 
+## What the report can change
+
+`build` renders the report from the records, so ask for fixes in those terms:
+
+- **Story facts** are the event's claims, word for word; the Chief Editor chooses which claims each "What changed"
+  paragraph prints (`changes`, at most 5 per paragraph) and in what order. Ask to regroup, reorder, leave out a
+  redundant claim or add a claim; not to rewrite a claim's wording in the HTML.
+- **Status table.** An included event's row points to its chapter: its facts live in the story (one place for each
+  fact). A tracked or carried-over row prints up to three status claims with their sources, plus a one-line note.
+  Ask for a status claim when a row states a legal, list or negative-search status without one.
+- **Analysis** (`impact`, `background`, `uncertain`, judgments, deck) is free text and may be rewritten.
+
+A limit of the format itself, which the Chief Editor cannot change, is a `minor` finding in category `other` with
+the section: it goes to the human reviewer and to the Skill's maintainers, not back to the writers.
+
 ## Output
 
 Write `TASK/findings.json` and call `briefing_submit`:

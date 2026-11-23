@@ -79,8 +79,16 @@ class IssueDateTests(unittest.TestCase):
         r = PastRuns(today() - timedelta(days=1))
         self.addCleanup(r.close)
         r.ready(r.root)
+        # Built today without an issue date, the report would claim generation on the window's last day. The build
+        # stops before writing and names the fix, so nobody edits the date check to get past it.
+        code, out = call('build', r.root)
+        self.assertEqual(code, 1)
+        self.assertIn(f'pass the real issue date: brief.py build RUN --issue-date {today().isoformat()}', out)
+        self.assertFalse((r.root / 'report.html').exists())
+        # A ledger already dated by an earlier build keeps the old behaviour: the validator still catches the mismatch.
+        led = jload(r.root / 'evidence_ledger.json'); led['generated_at'] = datetime.now(ZoneInfo('UTC')).isoformat(timespec='seconds')
+        jsave(r.root / 'evidence_ledger.json', led)
         call('build', r.root)
-        # The single-agent default is unchanged: the report is dated by the window end, and generation today does not fit it.
         self.assertIn('GENERATION_REPORT_MISMATCH', codes(fails(r.root)))
 
     def test_generation_time_is_renewed_by_each_dated_build(self):

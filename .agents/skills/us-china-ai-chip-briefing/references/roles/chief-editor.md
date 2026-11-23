@@ -1,6 +1,6 @@
 ---
 role: chief-editor
-includes: references/roles/protocol.md | SKILL.md#Ground rules | SKILL.md#Step 3. Select | references/editorial-rules.md#Selection | references/editorial-rules.md#Writing | references/report-content.md
+includes: references/roles/protocol.md | SKILL.md#Ground rules | SKILL.md#Step 3. Select | references/editorial-rules.md#Selection | references/editorial-rules.md#Writing | references/report-content.md | references/editorial-rules.md#Evidence in the prose
 reads: references/active_cases.md | references/editorial-rules.md
 ---
 # Chief Editor
@@ -45,7 +45,10 @@ coordination, materiality judgment, cross-border synthesis and the final report 
 5. **Select and synthesise** in TASK with `brief.py`: settle merge conflicts and duplicates, apply Link / Size / New,
    rank by importance. Identify cross-border relationships only where the evidence supports them.
 6. **Draft.** Write `TASK/report.json` (fields in the included report-content section; write everything in English).
-   Facts appear in the report only through claims, word for word, so write analysis, not new facts. Submit with
+   Facts appear in the report only through claims, word for word, so write analysis, not new facts. Group each
+   story's claims into short paragraphs with `changes` (required above 5 claims). Before you submit, check every new
+   event on the window's first or last day for its time in the run's timezone (rule 13a): one whose source gives only
+   another timezone's date goes back to its lead or becomes tracked context. Submit with
    `briefing_submit` (kind `draft`). Nex merges, runs the handoff, provenance and report checks, renders
    `report.html` with the existing template and validator, and starts the Independent Reviewer. A refused draft
    comes back with FIX lines.

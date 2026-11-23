@@ -136,6 +136,38 @@ def evidence_status(event, claims, risk):
     return 'partial' if found else 'unresolved'
 
 
+MAX_CLAIMS_PER_PARAGRAPH = 5
+MAX_STATUS_CLAIMS = 3
+
+
+def found_claims(e, claims, risk):
+    """The event's claims whose quote was found in the saved page, in the order they were added."""
+    return [c for c in e.get('claim_ids') or [] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
+
+
+def printed_claims(events, rep, claims, risk):
+    """What the report prints, by event: an included event's story paragraphs (lists of claim IDs) and a tracked
+    event's status-table claims. The report ledger, coverage and the HTML all read this, so they cannot drift."""
+    stories = {s.get('event'): s for s in (rep or {}).get('stories') or []}
+    paragraphs, status = {}, {}
+    for e in events['events']:
+        found = found_claims(e, claims, risk)
+        if e.get('decision') == 'include':
+            chosen = (stories.get(e['id']) or {}).get('changes')
+            paragraphs[e['id']] = [[c for c in para if c in found] for para in chosen] if chosen else [found]
+            paragraphs[e['id']] = [para for para in paragraphs[e['id']] if para] or [[]]
+        elif e.get('decision') == 'track' and found:
+            # A tracked item has no story: its row carries the claims behind its status, so the row can be traced.
+            status[e['id']] = [c for c in e.get('status_claims') or [] if c in found][:MAX_STATUS_CLAIMS] or found[:2]
+    return paragraphs, status
+
+
+def printed_ids(events, rep, claims, risk):
+    paragraphs, status = printed_claims(events, rep, claims, risk)
+    return list(dict.fromkeys([c for paras in paragraphs.values() for para in paras for c in para]
+                              + [c for ids in status.values() for c in ids]))
+
+
 def snapshot_state(run):
     run = Path(run)
     events = load(run / 'events.json', {'events': [], 'window': {}})
@@ -255,9 +287,18 @@ def cmd_event(a):
         note = ' '.join((a.status_note or '').split())
         if len(note) > 240:
             print('--status-note is one short sentence for the reader (240 characters at most)'); return 1
+        status_claims = list(dict.fromkeys(a.status_claim or []))
+        if status_claims:
+            unknown = [c for c in status_claims if c not in (e.get('claim_ids') or [])]
+            if unknown:
+                print(f'--status-claim {", ".join(unknown)}: not a claim of {a.id} (add-claim it to this event first)'); return 1
+            if len(status_claims) > MAX_STATUS_CLAIMS:
+                print(f'--status-claim: at most {MAX_STATUS_CLAIMS} claims for one status row'); return 1
         e.update(decision=a.decision, reason=a.reason)
         if note:
             e['status_note'] = note
+        if status_claims:
+            e['status_claims'] = status_claims
         for key, field in (('followup', 'followup'), ('materiality', 'materiality'), ('why', 'why_it_matters'), ('side', 'side'), ('title', 'title'),
                            ('category', 'category')):
             if getattr(a, key, None):
@@ -298,10 +339,11 @@ def cmd_add_claim(a):
     unknown = [k for k in a.kind or [] if k not in KINDS]
     if unknown:  # the validator fails these later, when only the claim's author could still fix them
         print(f'unknown --kind {", ".join(unknown)}; use {", ".join(sorted(KINDS))}. Nothing was written.'); return 1
-    cfg = load(run / 'run_config.json', {})
-    today = min(datetime.now().date().isoformat(), cfg.get('report_date') or '9999')
+    # The source was checked when its page was saved; add_claim records that moment (snapshot.retrieved_at) as
+    # date_checked. A date-only stand-in capped at the report date could not be ordered against a same-day publication
+    # (run mas-20261123-114940-c5bd: every same-day source was DATE_ORDER_AMBIGUOUS, holding readiness INCOMPLETE).
     cid, msgs = ev.add_claim(run, a.source, a.quote, a.text, a.kind, a.type, a.role, e.get('date'), a.uncertainty,
-                             a.anchor, a.notes, a.name, today)
+                             a.anchor, a.notes, a.name)
     if cid and a.pub_date:
         led = load(run / 'evidence_ledger.json')
         for c in led['claims']:
@@ -407,6 +449,29 @@ def problems(run):
         for k in ('chapter', 'title', 'impact'):
             if not str(s.get(k, '')).strip():
                 out.append(('4 analysis', f'report.json story {s.get("event")}: "{k}" is empty'))
+        found = found_claims(e, claims, risk)
+        changes = s.get('changes')
+        if changes is None:
+            if len(found) > MAX_CLAIMS_PER_PARAGRAPH:
+                out.append(('4 analysis', f'report.json story {e["id"]}: {len(found)} claims would print as one "What changed" '
+                                          f'paragraph; group them with "changes" (short paragraphs of claim IDs, at most '
+                                          f'{MAX_CLAIMS_PER_PARAGRAPH} each, most important first)'))
+            continue
+        if not isinstance(changes, list) or not changes or not all(isinstance(p, list) and p for p in changes):
+            out.append(('4 analysis', f'report.json story {e["id"]}: "changes" is a list of paragraphs, each a non-empty list of claim IDs'))
+            continue
+        ids = [c for para in changes for c in para]
+        for c in dict.fromkeys(ids):
+            if c not in (e.get('claim_ids') or []):
+                out.append(('4 analysis', f'report.json story {e["id"]}: {c} in "changes" is not a claim of {e["id"]}'))
+            elif c not in found:
+                out.append(('4 analysis', f'report.json story {e["id"]}: {c} in "changes" has no quote found in its saved page, so it cannot be printed'))
+        if len(ids) != len(set(ids)):
+            out.append(('4 analysis', f'report.json story {e["id"]}: a claim appears twice in "changes"'))
+        for i, para in enumerate(changes, 1):
+            if len(para) > MAX_CLAIMS_PER_PARAGRAPH:
+                out.append(('4 analysis', f'report.json story {e["id"]}: paragraph {i} of "changes" has {len(para)} claims; '
+                                          f'split it (at most {MAX_CLAIMS_PER_PARAGRAPH})'))
     return out
 
 
@@ -539,6 +604,7 @@ def page(run, issue_date=None):
     events, ledger, claims, risk, sources = snapshot_state(run)
     verification = load_verification(run)
     evs = {e['id']: e for e in events['events']}
+    paragraphs, status_ids = printed_claims(events, rep, claims, risk)
     w = Writer()
     d = date.fromisoformat(issue_date or cfg['report_date'])
     cut = datetime.fromisoformat(cfg['cutoff'])
@@ -597,6 +663,13 @@ def page(run, issue_date=None):
                 + (' data-mixed="1"' if len(labels) > 1 else '') + (' data-verify-gap="1"' if gap else '')
             chips = ''.join(f'<span class="chip"><i class="dot {STATUS[st][0]}"></i>{L["chip"][st]}</span>' for st in labels)
             note = f'<span class="note">{w(L["join"].join(notes))}</span>' if notes else ''
+            # A tracked item's row is where its facts are printed: its status claims, word for word, with their sources.
+            backing = [claims[c] for c in status_ids.get(e['id'], [])]
+            if backing:
+                spans = (' ' if lang == 'en' else '').join(f'<span data-claim-id="{c["id"]}">{w(c["text"])}</span>' for c in backing)
+                seen = list(dict.fromkeys(src['url'] for c in backing for src in c['sources']))
+                names = {src['url']: src.get('source_name') or host_of(src['url']) for c in backing for src in c['sources']}
+                note += f'<span class="note facts">{spans}</span><span class="note src">{L["source"]}{L["join"].join(link(u, names[u]) for u in seen)}</span>'
             where = f'<a href="#ch{e["_chapter"]}">{L["chapter"].format(n=e["_chapter"])}</a>' if e.get('_chapter') else f'<span class="muted">{w(L["tracking"])}</span>'
             # One wrapper per cell: on a phone each cell is a two-column grid (label, content), so loose children
             # (a note, an abbreviation) would otherwise fall into the label column.
@@ -615,13 +688,16 @@ def page(run, issue_date=None):
         P.append(f'<section class="section" id="ch{ci}"><div class="kicker">{ci:02d} / {html.escape(ch)}</div><h2>{w(head)}</h2>')
         for s in stories:
             e = evs[s['event']]
-            cl = [claims[c] for c in e['claim_ids'] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
-            facts = (' ' if lang == 'en' else '').join(f'<span data-claim-id="{c["id"]}">{w(c["text"])}</span>' for c in cl)
+            paras = [[claims[c] for c in para] for para in paragraphs.get(e['id'], [[]])]
+            cl = [c for para in paras for c in para]
+            joiner = ' ' if lang == 'en' else ''
+            texts = [joiner.join(f'<span data-claim-id="{c["id"]}">{w(c["text"])}</span>' for c in para) for para in paras]
             sts = labels_for(e, cl, verification)
             first = cl[0]['sources'][0] if cl else {}
             eyebrow = f'{L["side"].get(e.get("side"), "")} / {first.get("source_name", "")} / {md_date(e.get("date"), lang)}'
             body = (f'<p><strong>{L["background"]}</strong>{w(s["background"])}</p>' if s.get('background') else '') \
-                + f'<p><strong>{L["change"]}</strong>{facts}</p><p><strong>{L["impact"]}</strong>{w(s["impact"])}</p>' \
+                + f'<p><strong>{L["change"]}</strong>{texts[0]}</p>' + ''.join(f'<p>{t}</p>' for t in texts[1:]) \
+                + f'<p><strong>{L["impact"]}</strong>{w(s["impact"])}</p>' \
                 + (f'<p><strong>{L["response"]}</strong>{w(s["response"])}</p>' if s.get('response') else '') \
                 + (f'<p><strong>{L["uncertain"]}</strong>{w(s["uncertain"])}</p>' if s.get('uncertain') else '')
             seen, links = set(), []
@@ -654,6 +730,7 @@ def page(run, issue_date=None):
 def export_coverage(run):
     """coverage.json in the validator's format, derived from events.json (never edited by hand)."""
     events, ledger, claims, risk, sources = snapshot_state(run)
+    printed = set(printed_ids(events, load(Path(run) / 'report.json', {}), claims, risk))
     dec = {'include': 'included', 'track': 'background', 'exclude': 'excluded'}
     cands = []
     for e in events['events']:
@@ -663,7 +740,7 @@ def export_coverage(run):
         if e.get('case_id'):
             c['case_id'] = e['case_id']
         if e.get('decision') == 'include':
-            c['claim_ids'] = [x for x in e.get('claim_ids') or [] if x in claims]
+            c['claim_ids'] = [x for x in e.get('claim_ids') or [] if x in printed]
         cands.append(c)
     save(Path(run) / 'coverage.json', {'window': events['window'], 'outlets_searched': sorted({s.get('host') for s in sources.values() if s.get('host')}),
                                        'searches': events.get('searches') or [], 'candidates': cands})
@@ -694,6 +771,16 @@ def cmd_build(a):
         if bad:
             print(f'Not ready to build:\nTODO 1 [dates]: {bad}. The coverage window and cutoff stay as recorded; pass the real issue date.')
             return 1
+    led0 = load(run / 'evidence_ledger.json', {}) or {}
+    if not a.issue_date and not led0.get('generated_at'):
+        from zoneinfo import ZoneInfo
+        today = datetime.now(ZoneInfo(cfg['timezone'])).date().isoformat()
+        if today > cfg['report_date']:
+            # Built without an issue date, the ledger would say it was generated on the report date's day, which the
+            # date check rejects (GENERATION_REPORT_MISMATCH). Name the issue date instead of editing the validator.
+            print(f'Not ready to build:\nTODO 1 [dates]: today ({today}) is after the report date ({cfg["report_date"]}); '
+                  f'pass the real issue date: brief.py build RUN --issue-date {today}')
+            return 1
     probs = problems(run)
     if probs:
         print('Not ready to build:')
@@ -714,10 +801,9 @@ def cmd_build(a):
     events, _, claims, risk, _ = snapshot_state(run)
     # evidence_ledger.json keeps every claim (tracked events included). The report ledger holds exactly the
     # claims printed in the report; it is what validation and the human sign-off are bound to.
-    shown = [c for e in events['events'] if e.get('decision') == 'include' for c in e.get('claim_ids') or []
-             if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
+    shown = printed_ids(events, load(run / 'report.json', {}), claims, risk)
     save(run / 'report_ledger.json', {**{k: v for k, v in led.items() if k != 'claims'}, **header,
-                                      'claims': [claims[c] for c in dict.fromkeys(shown)]})
+                                      'claims': [claims[c] for c in shown]})
     (run / 'report.html').write_text(page(run, a.issue_date), encoding='utf-8')
     export_coverage(run)
     from validate import run_all, print_next_steps
@@ -768,6 +854,8 @@ def main():
     p.add_argument('--reason'); p.add_argument('--followup')
     p.add_argument('--status-note', dest='status_note',
                    help='one sentence for the reader on where the item stands; shown in the status table (the reason is not)')
+    p.add_argument('--status-claim', dest='status_claim', action='append',
+                   help='claim ID behind a tracked item\'s status, printed in its status-table row (repeat, at most 3)')
     p.add_argument('--proposed', action='store_true'); p.add_argument('--unsupported', action='store_true')
     p.add_argument('--case'); p.add_argument('--link'); p.add_argument('--size'); p.add_argument('--new')
     p.add_argument('--category', help='research category id from references/roles/categories.json')

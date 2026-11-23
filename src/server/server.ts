@@ -242,6 +242,8 @@ export async function startNexServer(options: StartNexServerOptions = {}) {
   // Agents resumed after a restart must be recognised before their first turn.
   if (briefing) void briefing.loadProjects(store.listProjects().map((project) => project.localPath))
   agent.briefing = briefing
+  // A lead's app-server stays up while its run can reopen it: a resumed one can lose its briefing tools.
+  if (briefing) codexManager.setKeepAlive((chatId) => briefing.keepsSession(chatId))
   // The briefing monitor (phase 0): a timer over the Skill's incremental scan. No model, no chat. Opt-in.
   const briefingMonitor = await startBriefingMonitor()
   agent.onChatSettled = (chatId) => {

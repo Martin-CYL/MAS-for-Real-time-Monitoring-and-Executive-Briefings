@@ -110,6 +110,24 @@ describe("Codex app-server lifecycle", () => {
     manager.stopAll()
   })
 
+  test("a chat the keep-alive check holds is not reaped, and its idle time starts once it is released", async () => {
+    let clock = 0
+    let held = true
+    const processes = [codex(connected), codex(connected)]
+    const manager = new CodexAppServerManager({ spawnProcess: () => processes.shift()! as never, now: () => clock, idleStopMs: 1_000, sweepIntervalMs: 3_600_000 })
+    manager.setKeepAlive((chatId) => held && chatId === "lead")
+    await manager.startSession({ chatId: "lead", cwd: "/w", model: "m", sessionToken: null, customTools: TOOLS, restriction: ROLE })
+    await manager.startSession({ chatId: "scout", cwd: "/w", model: "m", sessionToken: null, customTools: TOOLS, restriction: ROLE })
+    manager.reapIdleSessions()
+    clock += 60 * 60_000
+    expect(manager.reapIdleSessions()).toEqual(["scout"])
+    held = false
+    expect(manager.reapIdleSessions()).toEqual([])          // released: the idle clock starts now, not an hour ago
+    clock += 1_000
+    expect(manager.reapIdleSessions()).toEqual(["lead"])
+    manager.stopAll()
+  })
+
   test("idleStopMs 0 keeps sessions forever", async () => {
     let clock = 0
     const process = codex(connected)

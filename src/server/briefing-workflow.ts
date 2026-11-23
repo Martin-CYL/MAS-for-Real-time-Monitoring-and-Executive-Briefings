@@ -74,6 +74,8 @@ const SETTLE_GRACE_MS = 5_000
 const WATCHDOG_MS = 60_000
 const PYTHON_TIMEOUT_MS = 120_000
 const DISCOVERY_TIMEOUT_MS = 240_000
+/** Roles whose chat a run reopens after its first hand-in (cross-border, gap round, rework). */
+const REOPENABLE_ROLES: ReadonlySet<BriefingRole> = new Set(["chief", "lead", "cross_border"])
 const RECORD_FILES = ["run_config.json", "events.json", "evidence_ledger.json", "sources.json", "narrative.md", "output.json"]
 
 export type BriefingStage =
@@ -3172,6 +3174,19 @@ export class BriefingWorkflow {
       ...(run.gapRound ? { gapRound: this.gapSummary(run) } : {}),
       ...(run.verification ? { verification: this.verificationSummary(run) } : {}),
     }
+  }
+
+  /**
+   * Whether this chat's app-server must stay up: it belongs to a lead (or its cross-border replies) or the chief of
+   * a run still in progress, which Nex can reopen at any time. A restarted session can lose its briefing tools and
+   * then cannot hand in (see DEFAULT_CODEX_IDLE_STOP_MS). Scouts, verifiers and reviewers are never reopened.
+   */
+  keepsSession(chatId: string) {
+    for (const run of this.runs.values()) {
+      if (run.status !== "running" || run.final) continue
+      if (run.tasks.some((task) => task.chatId === chatId && REOPENABLE_ROLES.has(task.role))) return true
+    }
+    return false
   }
 
   /** For tests and inspection. */

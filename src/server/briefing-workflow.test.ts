@@ -532,6 +532,33 @@ describe("briefing workflow", () => {
     expect(state.final!.unresolvedFindings).toHaveLength(1)
   })
 
+  test("the chats a run can reopen keep their app-server until the run ends; the others may be stopped when idle", async () => {
+    const { startRun, researchCountry, workflow, codex, projectDir } = await setup({ budgets: { max_rework_rounds: 0 } })
+    const run = await startRun()
+    const us = await researchCountry(run.usLead, run.usDir, "us-lead")
+    await researchCountry(run.cnLead, run.cnDir, "cn-lead")
+    codex.finish(run.usLead)
+    codex.finish(run.cnLead)
+    await workflow.wait(run.chief, projectDir, {})
+    // Both leads have handed in and sit idle, but a cross-border request, the gap round or a rework can reopen them.
+    expect(workflow.keepsSession(run.usLead)).toBe(true)
+    expect(workflow.keepsSession(run.cnLead)).toBe(true)
+    expect(workflow.keepsSession(run.chief)).toBe(true)
+    expect(workflow.keepsSession(us.scout.chatId!)).toBe(false)
+    expect(workflow.keepsSession(run.root)).toBe(false)
+    await writeFile(path.join(run.runDir, "report.json"), "{}")
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    const reviewer = workflow.getRun(run.runId)!.tasks.find((task) => task.role === "reviewer")!
+    expect(workflow.keepsSession(reviewer.chatId!)).toBe(false)
+    await writeFile(path.join(run.runDir, reviewer.dir, "findings.json"), JSON.stringify({
+      verdict: "rework", summary: "s", findings: [{ id: "R001", severity: "blocker", category: "omission", target: { section: "status table" }, problem: "p", evidence: "e" }],
+    }))
+    await workflow.submit(reviewer.chatId!, projectDir, {})
+    expect(workflow.getRun(run.runId)!.status).toBe("escalated")
+    expect(workflow.keepsSession(run.usLead)).toBe(false)
+    expect(workflow.keepsSession(run.chief)).toBe(false)
+  })
+
   test("a refused handoff keeps the task open; a turn that ends without an accepted one is a failed task", async () => {
     const { startRun, workflow, codex, projectDir, writeOutput } = await setup()
     const run = await startRun()

@@ -125,12 +125,16 @@ export function authorize(stage: BudgetStage, cap: number, spent: number, tasks:
 
 /**
  * Running research agents that should wrap up now: near their own cap, or
- * when what research may still spend no longer covers everyone's remaining
- * caps. Each is told once (`alreadyWarned`).
+ * when what they may still spend no longer covers everyone's remaining caps.
+ * Each is told once (`alreadyWarned`). The pool is the one their start was
+ * authorized from: during rework (`stage` "rework") only a second review is
+ * held back, as in `authorize`, not the reserves of stages already past or
+ * the rework reserve the reopened tasks are spending.
  */
-export function wrapUpCandidates(spent: number, tasks: BudgetTask[], plan: BudgetPlan, alreadyWarned: ReadonlySet<string>) {
+export function wrapUpCandidates(spent: number, tasks: BudgetTask[], plan: BudgetPlan, alreadyWarned: ReadonlySet<string>,
+  stage: "research" | "rework" = "research") {
   const research = tasks.filter((task) => task.state === "running" && RESEARCH_ROLES.has(task.role) && !alreadyWarned.has(task.id))
-  const poolLeft = plan.run - spent - reserveTotal(plan)
+  const poolLeft = plan.run - spent - heldFor(stage, plan, reserveTotal(plan)).held
   const committed = outstanding(tasks, plan, (role) => RESEARCH_ROLES.has(role))
   const poolShort = committed > poolLeft
   return research

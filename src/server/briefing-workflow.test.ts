@@ -6,7 +6,7 @@ import path from "node:path"
 import { AgentCoordinator } from "./agent"
 import { NoopAnalyticsReporter } from "./analytics"
 import { AsyncQueue } from "./async-queue"
-import { BriefingWorkflow, buildRoleInstructions, describeReadinessCodes, extractSection, InjectedCrash, keepLane, type FaultPoint, type PythonRunner } from "./briefing-workflow"
+import { BriefingWorkflow, buildRoleInstructions, describeReadinessCodes, extractSection, hashRecords, InjectedCrash, keepLane, type FaultPoint, type PythonRunner } from "./briefing-workflow"
 import type { CodexRestriction, SandboxRunner } from "./briefing-sandbox"
 import { createChatCommands } from "./chat-commands"
 import { EventStore } from "./event-store"
@@ -990,8 +990,9 @@ describe("briefing workflow", () => {
     expect((await workflow.status(run.chief, projectDir, {})).tasks.find((task) => task.taskId === "us-lead")).toMatchObject({ state: "running" })
     codex.usage(run.usLead, { input: 11_000, output: 0 })
     await usageLanded(run.usLead, 3)
+    // Stopped at the rework allowance; its accepted research hand-in stands again.
     expect((await workflow.status(run.chief, projectDir, {})).tasks.find((task) => task.taskId === "us-lead"))
-      .toMatchObject({ state: "failed", failure: "task token budget exhausted (21000 of 20000 fresh tokens)" })
+      .toMatchObject({ state: "accepted", failure: "task token budget exhausted (21000 of 20000 fresh tokens)" })
   })
 
   test("after a restart an agent's chat is still recognised and confined before its first turn", async () => {
@@ -1123,11 +1124,35 @@ describe("review lifecycle", () => {
     await rework(context, run, ["R001"])
     codex.finish(run.usLead, "Could not find a better source.")
     const waited = await workflow.wait(run.chief, projectDir, { taskIds: ["us-lead"] })
-    expect(waited.tasks[0]).toMatchObject({ taskId: "us-lead", state: "failed" })
-    expect(((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems as string[])[0]).toContain("No accepted US lead research")
-    expect(await workflow.submit(run.chief, projectDir, { kind: "draft", partialReason: "US rework failed" })).toMatchObject({ accepted: true })
+    // Its accepted research stands again, so the draft needs no partial reason; the finding is still for review to judge.
+    expect(waited.tasks[0]).toMatchObject({ taskId: "us-lead", state: "accepted", failure: "turn ended without submitting again after it was reopened for rework" })
+    expect(workflow.getRun(run.runId)!.findings!["review-1/R001"]!.status).toBe("in_rework")
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true })
     await review(context, run.runId, "rework", [], [{ key: "review-1/R001", status: "unresolved" }])
     expect(workflow.getRun(run.runId)!.final).toMatchObject({ status: "escalated", unresolvedFindings: [expect.objectContaining({ key: "review-1/R001" })] })
+  })
+
+  test("a lead whose rework ended without a hand-in can be reworked again in the next round, and its new hand-in is merged", async () => {
+    const context = await setup()
+    const { workflow, codex, projectDir } = context
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    await review(context, run.runId, "rework", [major("R001")])
+    await rework(context, run, ["R001"])
+    codex.finish(run.usLead, "Ran out of time.")
+    await workflow.wait(run.chief, projectDir, { taskIds: ["us-lead"] })
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true })
+    await review(context, run.runId, "rework", [], [{ key: "review-1/R001", status: "unresolved" }])
+    expect(workflow.getRun(run.runId)!.stage).toBe("rework")
+    await rework(context, run, ["review-1/R001"])
+    const lead = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "us-lead")!
+    expect(lead).toMatchObject({ state: "running", reworkRestore: { copy: path.join(".nex", "rework", "us-lead-2") } })
+    expect(await workflow.submit(run.usLead, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(run.usLead)
+    await workflow.wait(run.chief, projectDir, { taskIds: ["us-lead"] })
+    expect(workflow.getRun(run.runId)!.tasks.find((task) => task.id === "us-lead")).toMatchObject({ state: "accepted", merged: true })
+    expect(workflow.getRun(run.runId)!.tasks.find((task) => task.id === "us-lead")!.reworkRestore).toBeUndefined()
   })
 
   test("a reviewer that times out is relaunched once on the same version, then the run is escalated rather than left waiting", async () => {
@@ -1487,7 +1512,7 @@ describe("independent verification", () => {
     expect(workflow.getRun(run.runId)!.tasks.find((task) => task.id === "cn-lead")!.state).toBe("accepted")
   })
 
-  test("a lead reopened for rework that ends without submitting again is not reported as refused", async () => {
+  test("a lead reopened for rework that ends without submitting again gets its accepted hand-in back", async () => {
     const { context, run } = await verifiedRun()
     const { workflow, codex, projectDir } = context
     await workflow.submit(run.chief, projectDir, { kind: "draft" })
@@ -1498,11 +1523,38 @@ describe("independent verification", () => {
     await verify(context, run.runId, "verify-2", [], [{ claim_id: "C003", verdict: "not_found", note: "Nothing found." }])
     await workflow.wait(run.chief, projectDir, {})
     await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    const lead = () => workflow.getRun(run.runId)!.tasks.find((task) => task.id === "cn-lead")!
+    const accepted = lead().accepted!
+    const dir = path.join(run.runDir, lead().dir)
+    expect(Object.keys(accepted.hashes)).toContain("output.json")
+    expect(accepted.hashes["evidence_ledger.json"]).toBeUndefined()
+    const output = await readFile(path.join(dir, "output.json"), "utf8")
     await workflow.delegate(run.chief, projectDir, { role: "lead", reworkOf: "cn-lead", findings: ["verify-1/V001"] })
+    expect(lead()).toMatchObject({ state: "running", accepted: null, reworkRestore: { copy: path.join(".nex", "rework", "cn-lead-1") } })
     await until(() => codex.turnsFor(run.cnLead).length === 2, "the rework turn")
+    // Half a rework: output.json edited, a ledger and a snapshot added, then the turn ends without briefing_submit.
+    await writeFile(path.join(dir, "output.json"), "{}")
+    await writeFile(path.join(dir, "evidence_ledger.json"), JSON.stringify({ claims: [] }))
+    await mkdir(path.join(dir, "sources"), { recursive: true })
+    await writeFile(path.join(dir, "sources", "S999.txt"), "half-done")
     codex.finish(run.cnLead)
     const waited = await workflow.wait(run.chief, projectDir, { taskIds: ["cn-lead"] })
-    expect(waited.tasks[0]).toMatchObject({ state: "failed", failure: "turn ended without submitting again after it was reopened for rework" })
+    expect(waited.tasks[0]).toMatchObject({ state: "accepted", failure: "turn ended without submitting again after it was reopened for rework" })
+    expect(lead()).toMatchObject({ state: "accepted", accepted, merged: true })
+    expect(lead().reworkRestore).toBeUndefined()
+    // The accepted records are back, so the provenance check traces them again; the unsubmitted changes are kept aside.
+    expect(await readFile(path.join(dir, "output.json"), "utf8")).toBe(output)
+    expect(existsSync(path.join(dir, "evidence_ledger.json"))).toBe(false)
+    expect(existsSync(path.join(dir, "sources", "S999.txt"))).toBe(false)
+    expect(await hashRecords(dir)).toEqual(accepted.hashes)
+    const aside = path.join(run.runDir, ".nex", "rework", "cn-lead-1-unsubmitted")
+    expect(await readFile(path.join(aside, "output.json"), "utf8")).toBe("{}")
+    expect(await readFile(path.join(aside, "evidence_ledger.json"), "utf8")).toBe(JSON.stringify({ claims: [] }))
+    expect(await readFile(path.join(aside, "sources", "S999.txt"), "utf8")).toBe("half-done")
+    const log = (await readFile(path.join(run.runDir, "workflow.log.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+    expect(log.find((entry) => entry.task === "cn-lead" && entry.state === "accepted" && /new hand-in/.test(entry.note ?? ""))?.note).toBe(
+      "rework ended without a new hand-in (turn ended without submitting again after it was reopened for rework); the accepted hand-in stands, "
+      + "and its unsubmitted changes (evidence_ledger.json, output.json, sources/S999.txt) were moved to .nex/rework/cn-lead-1-unsubmitted")
   })
 
   test("a verifier that ends without a hand-in leaves its claims marked unchecked; the draft goes on", async () => {

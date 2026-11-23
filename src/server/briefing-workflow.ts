@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto"
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
-import { appendFile, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises"
+import { appendFile, copyFile, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import type { z } from "zod"
 import {
@@ -404,6 +404,11 @@ export interface BriefingTask {
   } | null
   /** Earlier acceptances, when the task was reopened for rework. */
   previous?: Array<{ at: string; hashes: Record<string, string> }>
+  /**
+   * While reopened for rework: the acceptance it replaces and where its records were copied. If the rework ends
+   * without a new acceptance, the records are put back and this acceptance stands again.
+   */
+  reworkRestore?: { accepted: NonNullable<BriefingTask["accepted"]>; merged: boolean; copy: string }
   merged?: boolean
   mergeResult?: unknown
   usage?: UsageTotals
@@ -1272,6 +1277,7 @@ export class BriefingWorkflow {
       await this.advance(run, "cross_border_synthesis")
     }
     await this.handleReviewerFailure(run)
+    await this.settleRework(run)
     await this.settleGapRound(run)
     await this.settleVerification(run)
     await this.pump(run)
@@ -1437,7 +1443,10 @@ export class BriefingWorkflow {
     if (run.status !== "running") return
     const warned = new Set(run.tasks.filter((task) => task.wrapUpSent).map((task) => task.id))
     const spent = freshTokens(run.usage?.totals ?? emptyUsage())
-    for (const candidate of wrapUpCandidates(spent, this.budgetTasks(run), budgetPlan(run), warned)) {
+    // Reopened tasks were started from the rework pool; judging them against research's reserves stopped them at once
+    // (run mas-20261123-071142-db77: all three were told to wrap up at 0 fresh tokens and none handed in again).
+    const stage = run.tasks.some((task) => task.state === "running" && task.reopenedFor === "rework") ? "rework" : "research"
+    for (const candidate of wrapUpCandidates(spent, this.budgetTasks(run), budgetPlan(run), warned, stage)) {
       const task = this.task(run, candidate.id)
       if (!task.chatId) continue
       task.wrapUpSent = iso(this.now())
@@ -1907,6 +1916,10 @@ export class BriefingWorkflow {
     this.assertCanStart(run, "lead", "rework")
     if (beforeDraft) run.verification!.reworks = 1
     target.previous = [...(target.previous ?? []), { at: target.accepted!.at, hashes: target.accepted!.hashes }]
+    target.reworkRestore = {
+      accepted: target.accepted!, merged: target.merged ?? false,
+      copy: await this.copyRecords(run, target, `${target.id}-${target.previous.length}`),
+    }
     // The rework has its own allowance: what the lead spent on its research does not count against it.
     target.usageBaseline = { ...(target.usage ?? emptyUsage()) }
     target.reopenedFor = "rework"
@@ -2055,6 +2068,8 @@ export class BriefingWorkflow {
 
   private async accept(run: BriefingRun, task: BriefingTask, output: unknown, findings: CheckFinding[], summary?: unknown) {
     task.accepted = { at: iso(this.now()), hashes: await hashRecords(this.taskDir(run, task)), output, findings, summary }
+    // A rework handed in again replaces the acceptance it was keeping for a restore.
+    task.reworkRestore = undefined
     task.delivered = false
     await writeJsonAtomic(path.join(this.taskDir(run, task), "submission.json"), {
       task_id: task.id, accepted_at: task.accepted.at, hashes: task.accepted.hashes, findings, summary,
@@ -2480,6 +2495,61 @@ export class BriefingWorkflow {
       throw new WorkflowError(`${gapId} is not one of ${lead.id}'s gaps in a running gap round.`)
     }
     return round.gaps.find((gap) => gap.gap_id === gapId)!
+  }
+
+  /** Where the controller keeps copies of accepted records while their task is reworked. Agents are not told of it. */
+  private reworkCopyDir(run: BriefingRun, name: string) {
+    return path.join(run.runDir, ".nex", "rework", name)
+  }
+
+  /** Copies the task's accepted records (the files its acceptance hashed) and returns the copy's directory. */
+  private async copyRecords(run: BriefingRun, task: BriefingTask, name: string) {
+    const from = this.taskDir(run, task)
+    const to = this.reworkCopyDir(run, name)
+    for (const rel of Object.keys(task.accepted?.hashes ?? {})) {
+      if (!existsSync(path.join(from, rel))) continue
+      await mkdir(path.dirname(path.join(to, rel)), { recursive: true })
+      await copyFile(path.join(from, rel), path.join(to, rel))
+    }
+    return path.relative(run.runDir, to)
+  }
+
+  /**
+   * A task reopened for rework that ended without a new acceptance (it stopped, failed, timed out or was cancelled)
+   * gets its accepted hand-in back: what it changed is moved to `<copy>-unsubmitted`, the accepted records are put back,
+   * and it is accepted again on those records. Its claims stay traced upstream, its findings stay open for the next
+   * review, and the chief may reopen it again. Without this the task stayed failed with no acceptance, the provenance
+   * check no longer traced its claims, and its findings could not be reworked again (run mas-20261123-071142-db77).
+   */
+  private async settleRework(run: BriefingRun) {
+    for (const task of run.tasks.filter((entry) => entry.reworkRestore && (entry.state === "failed" || entry.state === "cancelled"))) {
+      const restore = task.reworkRestore!
+      const dir = this.taskDir(run, task)
+      const copy = path.join(run.runDir, restore.copy)
+      const now = await hashRecords(dir)
+      const changed = [...new Set([...Object.keys(now), ...Object.keys(restore.accepted.hashes)])]
+        .filter((rel) => now[rel] !== restore.accepted.hashes[rel]).sort()
+      const aside = `${copy}-unsubmitted`
+      for (const rel of changed) {
+        const current = path.join(dir, rel)
+        if (existsSync(current)) {
+          await mkdir(path.dirname(path.join(aside, rel)), { recursive: true })
+          await rename(current, path.join(aside, rel))
+        }
+        if (restore.accepted.hashes[rel]) {
+          if (!existsSync(path.join(copy, rel))) throw new WorkflowError(`cannot restore ${task.id}: ${rel} is missing from ${restore.copy}`)
+          await mkdir(path.dirname(current), { recursive: true })
+          await copyFile(path.join(copy, rel), current)
+        }
+      }
+      const failure = task.failure ?? task.state
+      task.accepted = restore.accepted
+      task.merged = restore.merged
+      task.reworkRestore = undefined
+      task.delivered = false
+      await this.setTaskState(run, task, "accepted", `rework ended without a new hand-in (${failure}); the accepted hand-in stands`
+        + (changed.length > 0 ? `, and its unsubmitted changes (${changed.slice(0, 5).join(", ")}${changed.length > 5 ? ", …" : ""}) were moved to ${path.relative(run.runDir, aside)}` : ""))
+    }
   }
 
   /**

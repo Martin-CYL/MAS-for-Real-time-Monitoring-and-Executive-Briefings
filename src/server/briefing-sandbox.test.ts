@@ -146,6 +146,12 @@ class FakeCodexProcess extends EventEmitter {
         this.messages.push(message)
         if (message.method === "initialize") this.stdout.write(`${JSON.stringify({ id: message.id, result: { userAgent: "codex-test" } })}\n`)
         if (["thread/start", "thread/resume", "thread/fork"].includes(message.method)) this.stdout.write(`${JSON.stringify({ id: message.id, result: { thread: { id: `thread-${this.messages.length}` }, model: "m" } })}\n`)
+        // Reports the Nex server connected with every tool it was configured to offer (see codex-app-server.lifecycle.test.ts).
+        if (message.method === "mcpServerStatus/list") {
+          const config = this.messages.find((entry) => ["thread/start", "thread/resume", "thread/fork"].includes(entry.method))?.params.config["mcp_servers.nex"]
+          const tools = Object.fromEntries((config?.enabled_tools ?? []).map((name: string) => [name, {}]))
+          this.stdout.write(`${JSON.stringify({ id: message.id, result: { data: [{ name: "nex", runtimeStatus: "connected", tools }] } })}\n`)
+        }
       }
     })
   }

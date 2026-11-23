@@ -184,8 +184,11 @@ interface SessionContext {
  * run alone opens about fifteen chats, so without this idle processes accumulate until the container's memory or
  * pids limit kills processes mid-run (found live: 30 idle sessions held 1.08 of 1.2 GB, oom_kill 6). The next turn
  * restarts the process and resumes the thread, Nex tools included. `NEX_CODEX_IDLE_STOP_MS`; 0 keeps them forever.
+ * Ten minutes, not less: a resumed thread loses most of its prompt cache, and within a run a lead is asked again
+ * soon after it hands in (cross-border, gap round, rework). At two minutes, cross-border replies paid the whole
+ * context again and ran out of budget in two requests (159k fresh, against 98k for 56 requests before).
  */
-export const DEFAULT_CODEX_IDLE_STOP_MS = 120_000
+export const DEFAULT_CODEX_IDLE_STOP_MS = 600_000
 
 function idleStopFromEnv(value: string | undefined) {
   if (value === undefined || value.trim() === "") return DEFAULT_CODEX_IDLE_STOP_MS

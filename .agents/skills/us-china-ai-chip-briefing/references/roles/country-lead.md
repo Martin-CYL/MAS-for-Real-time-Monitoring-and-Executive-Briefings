@@ -1,6 +1,6 @@
 ---
 role: country-lead
-includes: references/roles/protocol.md | SKILL.md#Ground rules | SKILL.md#Step 3. Select | references/editorial-rules.md#Selection | references/editorial-rules.md#Background and explanation
+includes: references/roles/protocol.md | SKILL.md#Ground rules | SKILL.md#Step 3. Select | references/editorial-rules.md#Selection | references/editorial-rules.md#Background and explanation | references/editorial-rules.md#Evidence in the prose
 reads: references/roles/categories.json | references/sources.md
 ---
 # Country Lead
@@ -74,6 +74,10 @@ the kind of source to try (`suggested_source`) and a brief. Your chat keeps its 
 - For an active case, record the event with `--case A00x`; for an empty category, `--category`.
 - For every tracked or carried-over item, add `--status-note` to `event decide`: one sentence for the reader on where it
   stands now, from your sources. `--reason` is your selection note and is not shown in the report.
+- A tracked item has no story, so its status-table row is where its facts are printed. Give it the claims behind its
+  status with `--status-claim C0xx` (repeat, at most 3; without them its first two claims are printed): they appear in
+  the row word for word, with their sources. A legal, list or negative-search status ("removed from the list", "no
+  match found on 19 November") must be one of these claims, not only the status note.
 - Add to `output.json` one entry per gap you were given, in `"gap_results"`:
   ```json
   [{"gap_id": "G001", "outcome": "filled", "event_ids": ["E014"], "claim_ids": ["C031"]},
@@ -94,3 +98,7 @@ The Chief Editor may later send you a cross-border request with its own task ID 
 `output.json` with `"answer"` (what the evidence shows) and `"remaining_uncertainty"`, check with
 `--role cross_border` and submit. Report "no evidence found" with what you searched; do not supply an unsupported
 opinion.
+
+Your task and each cross-border reply are accepted and merged separately. Once one is accepted, change its files only
+when Nex reopens that task for rework (the message names the task ID and directory). Fixing a claim of `xb-01` while
+reworking your own task changes an accepted handoff, and the Chief Editor's draft is then refused.

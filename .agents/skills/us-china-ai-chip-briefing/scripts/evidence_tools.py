@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 
@@ -67,12 +68,136 @@ def detect_dates(raw, text):
     return stated, seen[:4]
 
 
+MONTH_NAMES = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October',
+               'November', 'December']
+MIN_UNDATED_REASON = 12
+
+
+def date_on_page(day, text, url=''):
+    """The text on the saved page (or in its URL) that writes `day`, or None. Formats: 2026-11-19, 2026/11/19,
+    2026.11.19, 2026年11月19日, November 19, 2026, 19 November 2026, Nov. 19, 2026, 11/19/2026, 11/19/26, 20261119."""
+    import unicodedata
+    y, m, d = day.year, day.month, day.day
+    mon = MONTH_NAMES[m - 1][:3]
+    pats = [rf'(?<!\d){y}\s*[-/.年]\s*0?{m}\s*[-/.月]\s*0?{d}(?!\d)',
+            rf'\b{mon}[a-z]*\.?\s+0?{d}(?:st|nd|rd|th)?,?\s+{y}\b',
+            rf'(?<!\d)0?{d}(?:st|nd|rd|th)?\s+{mon}[a-z]*\.?,?\s+{y}\b',
+            rf'(?<!\d)0?{m}[/.]0?{d}[/.](?:{y}|{y % 100:02d})(?!\d)',
+            rf'(?<!\d){y}{m:02d}{d:02d}(?!\d)']
+    for hay in (unicodedata.normalize('NFKC', text or ''), url or ''):
+        for pat in pats:
+            hit = re.search(pat, hay, re.I)
+            if hit:
+                return ' '.join(hit[0].split())
+    return None
+
+
+def _parse_pub_date(value):
+    """(date, None) for YYYY-MM-DD or an ISO timestamp with its UTC offset; (None, problem) otherwise."""
+    try:
+        if re.fullmatch(r'\d{4}-\d{2}-\d{2}', value):
+            return datetime.strptime(value, '%Y-%m-%d').date(), None
+        stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    except ValueError:
+        return None, f'{value!r} is neither YYYY-MM-DD nor an ISO timestamp'
+    if stamp.tzinfo is None:
+        return None, f'{value!r} has a time but no UTC offset; add the offset the source gives (e.g. -05:00), or record the date alone'
+    return stamp.date(), None
+
+
+def set_source_date(run, source_id, pub_date=None, shown=None, undated=None):
+    """Record the publication date a saved page shows, or why it shows none, on the source and on every claim citing
+    it. Returns (changed claim IDs or None, messages); writes nothing on a refusal.
+
+    A page saved from a browser keeps only its text, so register_source finds no date in its metadata (run
+    mas-20261123-165809-59cd: 19 sources had no date although most pages showed one, which held readiness
+    INCOMPLETE). The date must appear on the saved page or in its URL; it is never taken on the agent's word."""
+    run = Path(run)
+    reg = _load(run / 'sources.json', {'sources': []})
+    src = next((s for s in reg['sources'] if s.get('id') == source_id), None)
+    if src is None:
+        return None, [f'unknown source {source_id}']
+    if (pub_date is None) == (undated is None):
+        return None, ['give either --date (the date the page shows) or --undated "why the page shows none"']
+    text = (run / src['file']).read_text(encoding='utf-8') if src.get('file') and (run / src['file']).is_file() else ''
+    url = f"{src.get('url', '')} {src.get('final_url') or ''}"
+    if pub_date is not None:
+        if src.get('access') != 'opened' or not text:
+            return None, [f'{source_id} has no saved page to read the date from; register the page with brief.py fetch first']
+        day, problem = _parse_pub_date(pub_date)
+        if problem:
+            return None, [problem + '. Nothing was written.']
+        where = None
+        if shown:
+            flat = ' '.join(shown.split())
+            if flat and (flat in ' '.join(text.split()) or flat in url) and re.search(rf'(?<!\d)0?{day.day}(?!\d)', flat):
+                where = flat
+            else:
+                return None, [f'--shown {shown!r} is not on the saved page {src["file"]} or in its URL, or does not contain day '
+                              f'{day.day}; copy the date exactly as the page writes it. Nothing was written.']
+        else:
+            where = date_on_page(day, text, url)
+        if not where:
+            seen = ', '.join(src.get('date_candidates') or []) or 'none'
+            return None, [f'{day.isoformat()} is not written on the saved page {src["file"]} or in its URL (dates seen near the top: '
+                          f'{seen}). If the page writes it another way, pass that text with --shown "…"; if the page shows no '
+                          'date, use --undated "why". Nothing was written.']
+        src['publication_date'], src['publication_date_shown'] = pub_date, where
+        src.pop('undated', None)
+    else:
+        reason = ' '.join(undated.split())
+        if len(reason) < MIN_UNDATED_REASON:
+            return None, ['--undated needs a reason a reviewer can check, e.g. "FAQ page with no date; checked on the save date". '
+                          'Nothing was written.']
+        if src.get('publication_date'):
+            return None, [f'{source_id} already has publication date {src["publication_date"]}; an undated source has none. '
+                          'Nothing was written.']
+        src['undated'] = reason
+    ledger = _load(run / 'evidence_ledger.json', None)
+    if ledger is None:
+        return None, ['evidence_ledger.json missing; run brief.py init first']
+    changed = []
+    for c in ledger.get('claims') or []:
+        clean = c.get('recorded_sha') == fingerprint(c)
+        touched = False
+        for s in c.get('sources') or []:
+            if (s.get('snapshot') or {}).get('path') != src.get('file'):
+                continue
+            if pub_date is not None:
+                s['publication_date'] = pub_date
+                s.pop('undated_reason', None)
+            else:
+                s['undated_reason'] = src['undated']
+            touched = True
+        if touched:
+            # A claim edited by hand stays detectable: only a clean fingerprint is renewed.
+            if clean:
+                c['recorded_sha'] = fingerprint(c)
+            changed.append(c['id'])
+    _save(run / 'sources.json', reg)
+    _save(run / 'evidence_ledger.json', ledger)
+    note = (f'{source_id}: publication date {pub_date} (the page shows "{src["publication_date_shown"]}")' if pub_date is not None
+            else f'{source_id}: recorded as showing no publication date ({src["undated"]}); a person confirms it at sign-off')
+    msgs = [note, f'  updated {", ".join(changed) if changed else "no claims yet (new claims from it take the date)"}']
+    if undated is not None and src.get('date_candidates'):
+        msgs.append(f'  the page does show dates near the top ({", ".join(src["date_candidates"])}): if one is when it was '
+                    f'published, record it with --date instead')
+    return changed, msgs
+
+
 def _title(raw, text):
     for pat in (r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)', r'<title[^>]*>([^<]+)</title>', r'"title"\s*:\s*"([^"]+)"'):
         m = re.search(pat, raw, re.I)
         if m:
             return re.sub(r'\s+', ' ', m[1]).strip()[:160]
     return next((l.strip()[:160] for l in text.splitlines() if len(l.strip()) > 8 and not l.strip().startswith('http')), '')
+
+
+def utc_now():
+    """When a page is saved and so checked. BRIEFING_CLOCK (an ISO timestamp) replaces the real clock only for fixture
+    runs that replay a past date (tests, scripts/replay_eval.py); a briefing run never sets it."""
+    fixed = os.environ.get('BRIEFING_CLOCK')
+    return datetime.fromisoformat(fixed).astimezone(timezone.utc) if fixed else datetime.now(timezone.utc)
 
 
 def register_source(run, url, file=None, route=None, fetch=None):
@@ -84,7 +209,7 @@ def register_source(run, url, file=None, route=None, fetch=None):
             return s, False
     sid = f"S{len(reg['sources']) + 1:03d}"
     rec = {'id': sid, 'url': url, 'host': host_of(url).removeprefix('www.'),
-           'registered_at': datetime.now(timezone.utc).isoformat(timespec='seconds')}
+           'registered_at': utc_now().isoformat(timespec='seconds')}
     raw_bytes, ctype = None, ''
     if file:
         raw_bytes = Path(file).read_bytes()
@@ -206,14 +331,17 @@ def add_claim(run, source_id, quote, text, kinds=None, evidence_type=None, role=
     if src.get('sha256') and sha != src['sha256']:
         return None, [f'{src["file"]} changed after it was registered; register the page again.']
     entry = {'url': src.get('final_url') or src['url'], 'source_name': source_name or src['host'],
-             'publication_date': src.get('publication_date'), 'date_checked': today or datetime.now().date().isoformat(),
+             'publication_date': src.get('publication_date'), 'date_checked': today or src.get('registered_at') or utc_now().isoformat(timespec='seconds'),
              'quote': quote, 'anchor': anchor or f'{src["file"]}, characters {norm(saved).find(norm(quote))}+',
              'source_role': srole, 'evidence_type': etype, 'access_status': 'opened', 'access_route': src.get('route', 'http_tool'),
              'notes': notes or '', 'snapshot': {'path': src['file'], 'sha256': sha, 'retrieved_at': src['registered_at'],
                                                 'method': 'saved from reader' if src.get('route') == 'browser' else 'fetched'}}
-    if not entry['publication_date']:
-        msgs.append(f'{source_id} states no publication date in its metadata; it stays null (candidates seen in text: '
-                    f'{", ".join(src.get("date_candidates") or []) or "none"}). Add one with --pub-date only if the page shows it.')
+    if src.get('undated') and not entry['publication_date']:
+        entry['undated_reason'] = src['undated']
+    if not entry['publication_date'] and not src.get('undated'):
+        msgs.append(f'{source_id} has no publication date recorded (dates seen near the top: '
+                    f'{", ".join(src.get("date_candidates") or []) or "none"}). Record the one the page shows: brief.py source-date '
+                    f'RUN {source_id} --date YYYY-MM-DD, or --undated "why" if it shows none. The handoff check refuses it otherwise.')
     for c in ledger['claims']:
         if c.get('text') == text:  # same proposition from a second source: append, do not duplicate
             if not any(s.get('url') == entry['url'] for s in c['sources']):

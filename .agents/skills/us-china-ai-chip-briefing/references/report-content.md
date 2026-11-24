@@ -17,6 +17,7 @@ claim first. The examples below are Chinese; in English use the English equivale
 | `stories[]` | One per included event | `event` = its ID (E00x). |
 | `stories[].chapter` | Short theme, e.g. 政策与执法 / 技术与供应链 / 融资与公司 | Stories with the same text share a chapter. `chapter_title` (optional, once per chapter): its conclusion. |
 | `stories[].title` | Story headline | States the point. |
+| `stories[].changes` | The "What changed" paragraphs: a list of paragraphs, each a list of the event's claim IDs, at most 5 | Required when the event has more than 5 claims. Most important first; one point per paragraph (the approval, then the shipments, then the conditions). Claims you leave out stay in the ledger but are not printed: never leave out one that qualifies a claim you print. |
 | `stories[].background` | What the situation was before ("此前……") | Optional when the event is truly new. |
 | `stories[].impact` | Why it matters | The US-China competition, supply-chain, regulatory or financial-sector consequence (credit, compliance, financing, investment, cross-border business). Only where justified: never invent a bank link. |
 | `stories[].response` | Company or government response | Only if contested; with its date and status. |

@@ -28,7 +28,7 @@ import brief  # noqa: E402
 import evidence_tools as ev  # noqa: E402
 import gaps as gap_round  # noqa: E402
 from check_evidence import KINDS  # noqa: E402
-from check_quotes import host_of, is_official, load_domains  # noqa: E402
+from check_quotes import host_of, is_official, load_domains, source_type_problems  # noqa: E402
 from qa_common import finding, outcome  # noqa: E402
 
 ROLES = ('scout', 'lead', 'cross_border', 'chief', 'verifier')
@@ -139,6 +139,9 @@ def check(run, role, lane=None):
             add('FAIL', 'CLAIM_KINDS', f'{c["id"]}: kinds {bad or "missing"} are not accepted by the validator ({", ".join(sorted(KINDS))}); '
                 'withdraw it and add it again with valid --kind values', claim=c['id'])
 
+    if role != 'verifier':
+        source_records(run, claims, registry, add)
+
     assigned_lane = (assignment or {}).get('lane') if assignment and '_invalid' not in assignment else None
     if lane and assigned_lane and lane != assigned_lane:
         add('FAIL', 'LANE_MISMATCH', f'checked as lane {lane!r}, but assignment.json assigns lane {assigned_lane!r}')
@@ -231,6 +234,40 @@ def check(run, role, lane=None):
     if not items or all(x['status'] == 'PASS' for x in items):
         add('PASS', 'HANDOFF_RECORDS', 'records are complete for this role')
     return items
+
+
+def source_records(run, claims, registry, add):
+    """Fixes the validator would otherwise leave for the final report, where nobody can make them: a source with no
+    publication date and no reason (DATE_UNKNOWN), and a type label that does not fit its site (SOURCE_TYPE_MISMATCH).
+    Found live in run mas-20261123-165809-59cd: 19 undated sources and 2 mislabelled ones held a reviewed report
+    INCOMPLETE. A page saved from a browser keeps no metadata, so its date is recorded with brief.py source-date."""
+    by_file = {s.get('file'): s for s in (registry.get('sources') or []) if isinstance(s, dict) and s.get('file')} \
+        if isinstance(registry, dict) else {}
+    domains = load_domains()
+    undated, retype, shown = {}, {}, {}
+    for c in claims.values():
+        for s in c.get('sources') or []:
+            if s.get('access_status') != 'opened':
+                continue
+            rec = by_file.get((s.get('snapshot') or {}).get('path')) or {}
+            sid = rec.get('id') or (s.get('snapshot') or {}).get('path') or s.get('url')
+            if s.get('publication_date') is None and not (s.get('undated_reason') or '').strip():
+                undated.setdefault(sid, (rec, []))[1].append(c['id'])
+            elif s.get('undated_reason') and rec.get('date_candidates'):
+                shown.setdefault(sid, (rec, []))[1].append(c['id'])
+            for problem in source_type_problems(s, domains):
+                retype.setdefault((c['id'], problem), sid)
+    for sid, (rec, cids) in undated.items():
+        seen = ', '.join(rec.get('date_candidates') or []) or 'none'
+        add('FAIL', 'SOURCE_DATE_MISSING', f'{sid} ({rec.get("host") or "?"}) has no publication date, cited by {", ".join(cids)}. '
+            f'Record the date the page shows: brief.py source-date TASK {sid} --date YYYY-MM-DD (dates seen near the top: {seen}); '
+            'if the page shows none (an FAQ, a data file, an index page), --undated "why"', source=sid, claims=cids)
+    for sid, (rec, cids) in shown.items():
+        add('UNVERIFIED', 'UNDATED_WITH_DATES', f'{sid} is recorded as showing no publication date, but shows '
+            f'{", ".join(rec["date_candidates"])} near the top; if one is when it was published, use source-date --date', source=sid, claims=cids)
+    for (cid, problem), sid in retype.items():
+        add('FAIL', 'SOURCE_TYPE_MISMATCH', f'{cid} cites {sid}: {problem}. Withdraw it and add it again with the right --type / --role',
+            claim=cid, source=sid)
 
 
 def check_lane(run, lane, assignment, evs, claims, risk, add):

@@ -32,8 +32,10 @@ class LaneRuns(Runs):
         return run
 
     def record(self, run, url, page, quote, claim, etype, title=TITLE, date=DATE, side='us', materiality='high', decision='include'):
-        call('fetch', run, url, '--file', self.page(page, f'{abs(hash((str(run), url, claim)))}.txt'), '--route', 'http_tool')
+        call('fetch', run, url, '--file', self.page(f'Published {date}.\n{page}', f'{abs(hash((str(run), url, claim)))}.txt'), '--route', 'http_tool')
         sid = jload(run / 'sources.json')['sources'][-1]['id']
+        code, out = call('source-date', run, sid, '--date', date)  # a page saved as text keeps no date metadata
+        assert code == 0, out
         call('event', run, 'add', '--title', title, '--date', date, '--side', side, '--source', sid,
              '--materiality', materiality, '--why', 'Synthetic link to US-China chip competition')
         eid = jload(run / 'events.json')['events'][-1]['id']

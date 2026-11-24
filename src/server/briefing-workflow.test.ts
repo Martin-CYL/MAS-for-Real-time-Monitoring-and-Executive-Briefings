@@ -6,7 +6,7 @@ import path from "node:path"
 import { AgentCoordinator } from "./agent"
 import { NoopAnalyticsReporter } from "./analytics"
 import { AsyncQueue } from "./async-queue"
-import { BriefingWorkflow, buildRoleInstructions, extractSection, InjectedCrash, keepLane, type FaultPoint, type PythonRunner } from "./briefing-workflow"
+import { BriefingWorkflow, buildRoleInstructions, describeReadinessCodes, extractSection, hashRecords, InjectedCrash, keepLane, type FaultPoint, type PythonRunner } from "./briefing-workflow"
 import type { CodexRestriction, SandboxRunner } from "./briefing-sandbox"
 import { createChatCommands } from "./chat-commands"
 import { EventStore } from "./event-store"
@@ -130,8 +130,10 @@ function fakePython(calls: string[][]): PythonRunner {
       // The claims the report prints, as the real build writes them.
       const printed = path.join(run, "fixture-printed-claims.json")
       await writeFile(path.join(run, "report_ledger.json"), existsSync(printed) ? await readFile(printed, "utf8") : JSON.stringify({ claims: [] }))
-      const readiness = existsSync(path.join(run, "fixture-blocked")) ? "BLOCKED" : "READY_FOR_HUMAN_REVIEW"
-      await writeFile(path.join(run, "qa", "review_report.json"), JSON.stringify({ readiness }))
+      const incomplete = existsSync(path.join(run, "fixture-incomplete"))
+      const readiness = existsSync(path.join(run, "fixture-blocked")) ? "BLOCKED" : incomplete ? "INCOMPLETE" : "READY_FOR_HUMAN_REVIEW"
+      await writeFile(path.join(run, "qa", "review_report.json"), JSON.stringify({ readiness,
+        ...(incomplete ? { readiness_codes: { PRIMARY_LEGAL_SOURCE: 1, DATE_UNKNOWN: 3 } } : {}) }))
       const fix = readiness === "BLOCKED" ? "FIX 1: GENERATION_REPORT_MISMATCH [generated_at] → generated_at is outside report_date\n" : ""
       return { exitCode: readiness === "BLOCKED" ? 1 : 2, stdout: `Wrote report\n${fix}`, stderr: "" }
     }
@@ -427,6 +429,36 @@ describe("briefing workflow", () => {
     expect(reply.tasks[0]).toMatchObject({ taskId: "xb-01", state: "accepted", output: { answer: "None named in the window." } })
   })
 
+  test("an incomplete run names the validator codes that kept it from ready", async () => {
+    const { startRun, researchCountry, workflow, codex, projectDir } = await setup()
+    const run = await startRun()
+    await researchCountry(run.usLead, run.usDir, "us-lead")
+    await researchCountry(run.cnLead, run.cnDir, "cn-lead")
+    codex.finish(run.usLead)
+    codex.finish(run.cnLead)
+    await workflow.wait(run.chief, projectDir, {})
+    await writeFile(path.join(run.runDir, "report.json"), "{}")
+    await writeFile(path.join(run.runDir, "fixture-incomplete"), "")
+    const draft = await workflow.submit(run.chief, projectDir, { kind: "draft" }) as { accepted: boolean; next: string }
+    expect(draft.accepted).toBe(true)
+    // The chief learns what to fix while the review runs.
+    expect(draft.next).toContain("Validator readiness INCOMPLETE (DATE_UNKNOWN ×3, PRIMARY_LEGAL_SOURCE ×1)")
+    const reviewer = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "review-1")!
+    await writeFile(path.join(run.runDir, reviewer.dir, "findings.json"), JSON.stringify({ verdict: "pass", summary: "Sound.", findings: [] }))
+    expect(await workflow.submit(reviewer.chatId!, projectDir, {})).toMatchObject({ accepted: true })
+    const final = workflow.getRun(run.runId)!
+    expect(final.status).toBe("incomplete")
+    expect(final.final!.reasons).toContain("validator readiness INCOMPLETE (DATE_UNKNOWN ×3, PRIMARY_LEGAL_SOURCE ×1)")
+  })
+
+  test("readiness codes are listed most frequent first and capped", () => {
+    expect(describeReadinessCodes(undefined)).toBe("")
+    expect(describeReadinessCodes({})).toBe("")
+    expect(describeReadinessCodes({ B: 1, A: 1, C: 5 })).toBe(" (C ×5, A ×1, B ×1)")
+    const many = Object.fromEntries(["A", "B", "C", "D", "E", "F", "G", "H"].map((code, i) => [code, 10 - i]))
+    expect(describeReadinessCodes(many)).toBe(" (A ×10, B ×9, C ×8, D ×7, E ×6, F ×5, 2 more)")
+  })
+
   test.each(["sandbox", "container"] as const)("draft → review → rework → ready (%s)", async (executionMode) => {
     const { startRun, researchCountry, workflow, codex, projectDir, store } = await setup({ executionMode })
     const run = await startRun()
@@ -498,6 +530,33 @@ describe("briefing workflow", () => {
     const state = workflow.getRun(run.runId)!
     expect(state.status).toBe("escalated")
     expect(state.final!.unresolvedFindings).toHaveLength(1)
+  })
+
+  test("the chats a run can reopen keep their app-server until the run ends; the others may be stopped when idle", async () => {
+    const { startRun, researchCountry, workflow, codex, projectDir } = await setup({ budgets: { max_rework_rounds: 0 } })
+    const run = await startRun()
+    const us = await researchCountry(run.usLead, run.usDir, "us-lead")
+    await researchCountry(run.cnLead, run.cnDir, "cn-lead")
+    codex.finish(run.usLead)
+    codex.finish(run.cnLead)
+    await workflow.wait(run.chief, projectDir, {})
+    // Both leads have handed in and sit idle, but a cross-border request, the gap round or a rework can reopen them.
+    expect(workflow.keepsSession(run.usLead)).toBe(true)
+    expect(workflow.keepsSession(run.cnLead)).toBe(true)
+    expect(workflow.keepsSession(run.chief)).toBe(true)
+    expect(workflow.keepsSession(us.scout.chatId!)).toBe(false)
+    expect(workflow.keepsSession(run.root)).toBe(false)
+    await writeFile(path.join(run.runDir, "report.json"), "{}")
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    const reviewer = workflow.getRun(run.runId)!.tasks.find((task) => task.role === "reviewer")!
+    expect(workflow.keepsSession(reviewer.chatId!)).toBe(false)
+    await writeFile(path.join(run.runDir, reviewer.dir, "findings.json"), JSON.stringify({
+      verdict: "rework", summary: "s", findings: [{ id: "R001", severity: "blocker", category: "omission", target: { section: "status table" }, problem: "p", evidence: "e" }],
+    }))
+    await workflow.submit(reviewer.chatId!, projectDir, {})
+    expect(workflow.getRun(run.runId)!.status).toBe("escalated")
+    expect(workflow.keepsSession(run.usLead)).toBe(false)
+    expect(workflow.keepsSession(run.chief)).toBe(false)
   })
 
   test("a refused handoff keeps the task open; a turn that ends without an accepted one is a failed task", async () => {
@@ -820,6 +879,19 @@ describe("briefing workflow", () => {
     expect(status.tasks.find((task) => task.taskId === "us-s01")).toMatchObject({ state: "failed", failure: "task token budget exhausted (12000 of 10000 fresh tokens)" })
   })
 
+  test("one lead's further scouts leave a first scout for the other lead", async () => {
+    // Run mas-20261123-054533-ef3d: the pool fitted two scouts, the China lead took both, and the US lead got none.
+    const { startRun, workflow, projectDir } = await setup({ budgets: { gap_round: { enabled: false }, token_budget: {
+      run_fresh_tokens: 752_000, task_fresh_tokens: { lead: 100_000, scout: 100_000 }, in_flight_margin: 1_000,
+      reserve_fresh_tokens: { synthesis: 100_000, review: 100_000, rework: 100_000 },
+    } } })
+    const run = await startRun()
+    expect(await workflow.delegate(run.cnLead, projectDir, { role: "scout", topic: "first" })).toMatchObject({ taskId: "cn-s01" })
+    await expect(workflow.delegate(run.cnLead, projectDir, { role: "scout", topic: "second" }))
+      .rejects.toThrow(/only 48000 remain, keeping 401000 for synthesis, review and rework, a first scout for us-lead; running agents may release enough/)
+    expect(await workflow.delegate(run.usLead, projectDir, { role: "scout", topic: "first" })).toMatchObject({ taskId: "us-s01" })
+  })
+
   test("a run over its budget stops every agent; research the run can no longer afford is refused with the reason", async () => {
     const { startRun, workflow, codex, projectDir, usageLanded } = await setup({ budgets: { token_budget: {
       run_fresh_tokens: 100_000, task_fresh_tokens: { lead: 10_000, scout: 10_000 }, in_flight_margin: 1_000,
@@ -945,8 +1017,9 @@ describe("briefing workflow", () => {
     expect((await workflow.status(run.chief, projectDir, {})).tasks.find((task) => task.taskId === "us-lead")).toMatchObject({ state: "running" })
     codex.usage(run.usLead, { input: 11_000, output: 0 })
     await usageLanded(run.usLead, 3)
+    // Stopped at the rework allowance; its accepted research hand-in stands again.
     expect((await workflow.status(run.chief, projectDir, {})).tasks.find((task) => task.taskId === "us-lead"))
-      .toMatchObject({ state: "failed", failure: "task token budget exhausted (21000 of 20000 fresh tokens)" })
+      .toMatchObject({ state: "accepted", failure: "task token budget exhausted (21000 of 20000 fresh tokens)" })
   })
 
   test("after a restart an agent's chat is still recognised and confined before its first turn", async () => {
@@ -1078,11 +1151,35 @@ describe("review lifecycle", () => {
     await rework(context, run, ["R001"])
     codex.finish(run.usLead, "Could not find a better source.")
     const waited = await workflow.wait(run.chief, projectDir, { taskIds: ["us-lead"] })
-    expect(waited.tasks[0]).toMatchObject({ taskId: "us-lead", state: "failed" })
-    expect(((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems as string[])[0]).toContain("No accepted US lead research")
-    expect(await workflow.submit(run.chief, projectDir, { kind: "draft", partialReason: "US rework failed" })).toMatchObject({ accepted: true })
+    // Its accepted research stands again, so the draft needs no partial reason; the finding is still for review to judge.
+    expect(waited.tasks[0]).toMatchObject({ taskId: "us-lead", state: "accepted", failure: "turn ended without submitting again after it was reopened for rework" })
+    expect(workflow.getRun(run.runId)!.findings!["review-1/R001"]!.status).toBe("in_rework")
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true })
     await review(context, run.runId, "rework", [], [{ key: "review-1/R001", status: "unresolved" }])
     expect(workflow.getRun(run.runId)!.final).toMatchObject({ status: "escalated", unresolvedFindings: [expect.objectContaining({ key: "review-1/R001" })] })
+  })
+
+  test("a lead whose rework ended without a hand-in can be reworked again in the next round, and its new hand-in is merged", async () => {
+    const context = await setup()
+    const { workflow, codex, projectDir } = context
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    await review(context, run.runId, "rework", [major("R001")])
+    await rework(context, run, ["R001"])
+    codex.finish(run.usLead, "Ran out of time.")
+    await workflow.wait(run.chief, projectDir, { taskIds: ["us-lead"] })
+    expect(await workflow.submit(run.chief, projectDir, { kind: "draft" })).toMatchObject({ accepted: true })
+    await review(context, run.runId, "rework", [], [{ key: "review-1/R001", status: "unresolved" }])
+    expect(workflow.getRun(run.runId)!.stage).toBe("rework")
+    await rework(context, run, ["review-1/R001"])
+    const lead = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "us-lead")!
+    expect(lead).toMatchObject({ state: "running", reworkRestore: { copy: path.join(".nex", "rework", "us-lead-2") } })
+    expect(await workflow.submit(run.usLead, projectDir, {})).toMatchObject({ accepted: true })
+    codex.finish(run.usLead)
+    await workflow.wait(run.chief, projectDir, { taskIds: ["us-lead"] })
+    expect(workflow.getRun(run.runId)!.tasks.find((task) => task.id === "us-lead")).toMatchObject({ state: "accepted", merged: true })
+    expect(workflow.getRun(run.runId)!.tasks.find((task) => task.id === "us-lead")!.reworkRestore).toBeUndefined()
   })
 
   test("a reviewer that times out is relaunched once on the same version, then the run is escalated rather than left waiting", async () => {
@@ -1394,6 +1491,97 @@ describe("independent verification", () => {
     expect(workflow.getRun(run.runId)!.status).toBe("ready_for_human_review")
     expect(await readFile(path.join(run.runDir, "qa", "workflow_summary.md"), "utf8"))
       .toContain("Independent verification: 3 claim(s) checked (1 independent, 1 status differs, 1 not found); 1 high-risk claim(s) not selected")
+  })
+
+  test("a disputed claim from a cross-border reply is reworked in that reply, not in its lead's records", async () => {
+    // Run mas-20261123-054533-ef3d: C094 came from xb-01, rework could only reopen us-lead, the lead fixed xb-01's files,
+    // and the changed handoff was refused at every draft until the run failed.
+    const { context, run } = await verifiedRun()
+    const { workflow, codex, projectDir, writeOutput } = context
+    await writeFile(path.join(run.usDir, "events.json"), JSON.stringify({ events: [{ id: "E001", title: "US licences" }] }))
+    await workflow.crossBorder(run.chief, projectDir, { fromTaskId: "us-lead", toCountry: "cn", question: "q", eventIds: ["E001"], scope: "s", evidenceRequired: "e" })
+    await until(() => codex.turnsFor(run.cnLead).length === 2, "the cross-border request")
+    const xbDir = path.join(run.cnDir, "xb-01")
+    await writeOutput(xbDir, { task_id: "xb-01", answer: "a", remaining_uncertainty: "u" })
+    expect(await workflow.submit(run.cnLead, projectDir, { taskId: "xb-01" })).toMatchObject({ accepted: true })
+    codex.finish(run.cnLead)
+    await workflow.wait(run.chief, projectDir, { taskIds: ["xb-01"] })
+    await writeFile(path.join(run.runDir, "evidence_ledger.json"), JSON.stringify({ claims: [
+      { id: "C001", text: "One", provenance: [{ task: "us-lead", id: "C001" }] },
+      { id: "C002", text: "Two", provenance: [{ task: "xb-01", id: "C001" }] },
+    ] }))
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    await verify(context, run.runId, "verify-1", [{ id: "C002", type: "official_document", url: "https://www.example.gov/x", quote: "MI325X" }], [
+      { claim_id: "C001", verdict: "confirmed", evidence: ["C002"], note: "ok" },
+      { claim_id: "C002", verdict: "scope_differs", evidence: ["C002"], note: "The licences name MI325X, not MI308." },
+    ])
+    await verify(context, run.runId, "verify-2", [], [{ claim_id: "C003", verdict: "not_found", note: "Nothing found." }])
+    await workflow.wait(run.chief, projectDir, {})
+    expect(workflow.getRun(run.runId)!.findings!["verify-1/V001"]).toMatchObject({ responsible: ["xb-01"] })
+    expect(((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems as string[])[0]).toContain("verify-1/V001 (C002: Independent check (scope differs): The licences name MI325X, not MI308.) → xb-01")
+
+    await expect(workflow.delegate(run.chief, projectDir, { role: "lead", reworkOf: "cn-lead", findings: ["verify-1/V001"] }))
+      .rejects.toThrow("concern another task's records (verify-1/V001 → xb-01)")
+    expect(workflow.getRun(run.runId)!.tasks.find((task) => task.id === "cn-lead")!.state).toBe("accepted")
+    await workflow.delegate(run.chief, projectDir, { role: "lead", reworkOf: "xb-01", findings: ["verify-1/V001"] })
+    await until(() => codex.turnsFor(run.cnLead).length === 3, "the rework reaching the lead's chat")
+    const message = codex.turnsFor(run.cnLead)[2]!.content
+    expect(message).toContain("Rework for task xb-01 (your cross-border reply)")
+    expect(message).toContain(`in ${xbDir} and nowhere else`)
+    expect(message).toContain("Do not change the records of cn-lead")
+    expect(message).toContain("check_handoff.py --role cross_border, and call briefing_submit again with taskId xb-01")
+    await writeOutput(xbDir, { task_id: "xb-01", answer: "a, scoped to MI325X", remaining_uncertainty: "u" })
+    expect(await workflow.submit(run.cnLead, projectDir, { taskId: "xb-01" })).toMatchObject({ accepted: true })
+    codex.finish(run.cnLead)
+    await workflow.wait(run.chief, projectDir, { taskIds: ["xb-01"] })
+    const xb = workflow.getRun(run.runId)!.tasks.find((task) => task.id === "xb-01")!
+    expect(xb).toMatchObject({ state: "accepted", merged: true, accepted: { output: { answer: "a, scoped to MI325X" } } })
+    expect(workflow.getRun(run.runId)!.tasks.find((task) => task.id === "cn-lead")!.state).toBe("accepted")
+  })
+
+  test("a lead reopened for rework that ends without submitting again gets its accepted hand-in back", async () => {
+    const { context, run } = await verifiedRun()
+    const { workflow, codex, projectDir } = context
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    await verify(context, run.runId, "verify-1", [{ id: "C002", type: "official_document", url: "https://www.example.gov/x", quote: "q" }], [
+      { claim_id: "C001", verdict: "confirmed", evidence: ["C002"], note: "ok" },
+      { claim_id: "C002", verdict: "status_differs", found_status: "suspended", evidence: ["C002"], note: "Suspended." },
+    ])
+    await verify(context, run.runId, "verify-2", [], [{ claim_id: "C003", verdict: "not_found", note: "Nothing found." }])
+    await workflow.wait(run.chief, projectDir, {})
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    const lead = () => workflow.getRun(run.runId)!.tasks.find((task) => task.id === "cn-lead")!
+    const accepted = lead().accepted!
+    const dir = path.join(run.runDir, lead().dir)
+    expect(Object.keys(accepted.hashes)).toContain("output.json")
+    expect(accepted.hashes["evidence_ledger.json"]).toBeUndefined()
+    const output = await readFile(path.join(dir, "output.json"), "utf8")
+    await workflow.delegate(run.chief, projectDir, { role: "lead", reworkOf: "cn-lead", findings: ["verify-1/V001"] })
+    expect(lead()).toMatchObject({ state: "running", accepted: null, reworkRestore: { copy: path.join(".nex", "rework", "cn-lead-1") } })
+    await until(() => codex.turnsFor(run.cnLead).length === 2, "the rework turn")
+    // Half a rework: output.json edited, a ledger and a snapshot added, then the turn ends without briefing_submit.
+    await writeFile(path.join(dir, "output.json"), "{}")
+    await writeFile(path.join(dir, "evidence_ledger.json"), JSON.stringify({ claims: [] }))
+    await mkdir(path.join(dir, "sources"), { recursive: true })
+    await writeFile(path.join(dir, "sources", "S999.txt"), "half-done")
+    codex.finish(run.cnLead)
+    const waited = await workflow.wait(run.chief, projectDir, { taskIds: ["cn-lead"] })
+    expect(waited.tasks[0]).toMatchObject({ state: "accepted", failure: "turn ended without submitting again after it was reopened for rework" })
+    expect(lead()).toMatchObject({ state: "accepted", accepted, merged: true })
+    expect(lead().reworkRestore).toBeUndefined()
+    // The accepted records are back, so the provenance check traces them again; the unsubmitted changes are kept aside.
+    expect(await readFile(path.join(dir, "output.json"), "utf8")).toBe(output)
+    expect(existsSync(path.join(dir, "evidence_ledger.json"))).toBe(false)
+    expect(existsSync(path.join(dir, "sources", "S999.txt"))).toBe(false)
+    expect(await hashRecords(dir)).toEqual(accepted.hashes)
+    const aside = path.join(run.runDir, ".nex", "rework", "cn-lead-1-unsubmitted")
+    expect(await readFile(path.join(aside, "output.json"), "utf8")).toBe("{}")
+    expect(await readFile(path.join(aside, "evidence_ledger.json"), "utf8")).toBe(JSON.stringify({ claims: [] }))
+    expect(await readFile(path.join(aside, "sources", "S999.txt"), "utf8")).toBe("half-done")
+    const log = (await readFile(path.join(run.runDir, "workflow.log.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line))
+    expect(log.find((entry) => entry.task === "cn-lead" && entry.state === "accepted" && /new hand-in/.test(entry.note ?? ""))?.note).toBe(
+      "rework ended without a new hand-in (turn ended without submitting again after it was reopened for rework); the accepted hand-in stands, "
+      + "and its unsubmitted changes (evidence_ledger.json, output.json, sources/S999.txt) were moved to .nex/rework/cn-lead-1-unsubmitted")
   })
 
   test("a verifier that ends without a hand-in leaves its claims marked unchecked; the draft goes on", async () => {

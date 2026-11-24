@@ -183,9 +183,15 @@ interface SessionContext {
  * How long a chat's app-server may sit idle before it is stopped. Every chat keeps its own process, and a briefing
  * run alone opens about fifteen chats, so without this idle processes accumulate until the container's memory or
  * pids limit kills processes mid-run (found live: 30 idle sessions held 1.08 of 1.2 GB, oom_kill 6). The next turn
- * restarts the process and resumes the thread, Nex tools included. `NEX_CODEX_IDLE_STOP_MS`; 0 keeps them forever.
+ * restarts the process and resumes the thread. `NEX_CODEX_IDLE_STOP_MS`; 0 keeps them forever.
+ * A resumed briefing thread can come back without its Nex tools even when Codex reports the server connected (found
+ * live in run mas-20261123-152603-2d89: both leads, idle 12 and 16 minutes, were reopened for rework five times and
+ * never had briefing_submit). So a chat its run can still reopen is not stopped; see `setKeepAlive`.
+ * Ten minutes, not less: a resumed thread loses most of its prompt cache, and within a run a lead is asked again
+ * soon after it hands in (cross-border, gap round, rework). At two minutes, cross-border replies paid the whole
+ * context again and ran out of budget in two requests (159k fresh, against 98k for 56 requests before).
  */
-export const DEFAULT_CODEX_IDLE_STOP_MS = 120_000
+export const DEFAULT_CODEX_IDLE_STOP_MS = 600_000
 
 function idleStopFromEnv(value: string | undefined) {
   if (value === undefined || value.trim() === "") return DEFAULT_CODEX_IDLE_STOP_MS
@@ -853,6 +859,7 @@ export class CodexAppServerManager {
   private readonly sweepIntervalMs: number
   private readonly nexToolsReadyMs: number
   private sweeper: ReturnType<typeof setInterval> | null = null
+  private keepAlive: ((chatId: string) => boolean) | null = null
 
   constructor(args: {
     spawnProcess?: SpawnCodexAppServer
@@ -887,6 +894,14 @@ export class CodexAppServerManager {
    */
   setTaskActivityListener(listener: ((chatId: string, update: SubagentActivityUpdate) => void) | null) {
     this.onTaskActivity = listener
+  }
+
+  /**
+   * Chats the idle reaper must leave running: a briefing agent its run can still reopen (a lead asked for a
+   * cross-border reply, a gap or a rework). Its idle time starts once the check stops holding it.
+   */
+  setKeepAlive(check: ((chatId: string) => boolean) | null) {
+    this.keepAlive = check
   }
 
   /**
@@ -1161,7 +1176,7 @@ export class CodexAppServerManager {
     for (const [chatId, context] of this.sessions) {
       const busy = context.pendingTurn !== null || context.pendingRequests.size > 0
         || [...context.agents.values()].some((agent) => agent.turnId !== null)
-      if (busy || context.closed) {
+      if (busy || context.closed || this.keepAlive?.(chatId)) {
         context.idleSince = null
         continue
       }

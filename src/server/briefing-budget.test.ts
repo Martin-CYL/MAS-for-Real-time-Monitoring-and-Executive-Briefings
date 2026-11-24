@@ -115,6 +115,19 @@ describe("budget plan", () => {
     expect(snapshot(180, tasks, plan).outstanding).toBe(5)
   })
 
+  test("wrap-up during rework holds back only a second review, as the rework's start did", () => {
+    // Run mas-20261123-071142-db77: three reopened tasks, 1.85M of 3M spent; research's reserves left 97k for 525k of caps.
+    const plan: BudgetPlan = { run: 3_000_000, task: { scout: 300_000, lead: 400_000, cross_border: 250_000, reviewer: 250_000, verifier: 100_000, chief: 500_000 },
+      reserve: { synthesis: 250_000, review: 250_000, rework: 250_000, verification: 300_000, gap_research: 0 }, inFlightMargin: 25_000, wrapUpAt: 0.8 }
+    const reopened: BudgetTask[] = ["us-lead", "cn-lead", "xb-01"].map((id) => ({ id, role: id === "xb-01" ? "cross_border" : "lead", state: "running", fresh: 0, cap: 150_000 }))
+    expect(authorize("rework", 150_000, 1_853_000, reopened.slice(0, 2), plan).ok).toBe(true)
+    expect(wrapUpCandidates(1_853_000, reopened, plan, new Set()).map((entry) => entry.reason)).toEqual(Array(3).fill("run research budget"))
+    expect(wrapUpCandidates(1_853_000, reopened, plan, new Set(), "rework")).toEqual([])
+    // Still told to stop when the rework pool itself runs short, or near the rework allowance.
+    expect(wrapUpCandidates(2_400_000, reopened, plan, new Set(), "rework").map((entry) => entry.id)).toEqual(["us-lead", "cn-lead", "xb-01"])
+    expect(wrapUpCandidates(1_853_000, [{ ...reopened[0]!, fresh: 125_000 }], plan, new Set(), "rework")).toEqual([{ id: "us-lead", reason: "task budget" }])
+  })
+
   test("wrap-up: near its own cap, or everyone when research would reach the reserve; each agent once", () => {
     const plan: BudgetPlan = { run: 10_000, task: { scout: 1_000, lead: 2_000, cross_border: 500, reviewer: 1_000, verifier: 500, chief: 2_000 },
       reserve: { synthesis: 1_000, review: 1_000, rework: 1_000 }, inFlightMargin: 0, wrapUpAt: 0.8 }

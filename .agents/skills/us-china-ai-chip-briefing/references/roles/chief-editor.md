@@ -1,6 +1,6 @@
 ---
 role: chief-editor
-includes: references/roles/protocol.md | SKILL.md#Ground rules | SKILL.md#Step 3. Select | references/editorial-rules.md#Selection | references/editorial-rules.md#Writing | references/report-content.md
+includes: references/roles/protocol.md | SKILL.md#Ground rules | SKILL.md#Step 3. Select | references/editorial-rules.md#Selection | references/editorial-rules.md#Writing | references/report-content.md | references/editorial-rules.md#Evidence in the prose
 reads: references/active_cases.md | references/editorial-rules.md
 ---
 # Chief Editor
@@ -45,7 +45,10 @@ coordination, materiality judgment, cross-border synthesis and the final report 
 5. **Select and synthesise** in TASK with `brief.py`: settle merge conflicts and duplicates, apply Link / Size / New,
    rank by importance. Identify cross-border relationships only where the evidence supports them.
 6. **Draft.** Write `TASK/report.json` (fields in the included report-content section; write everything in English).
-   Facts appear in the report only through claims, word for word, so write analysis, not new facts. Submit with
+   Facts appear in the report only through claims, word for word, so write analysis, not new facts. Group each
+   story's claims into short paragraphs with `changes` (required above 5 claims). Before you submit, check every new
+   event on the window's first or last day for its time in the run's timezone (rule 13a): one whose source gives only
+   another timezone's date goes back to its lead or becomes tracked context. Submit with
    `briefing_submit` (kind `draft`). Nex merges, runs the handoff, provenance and report checks, renders
    `report.html` with the existing template and validator, and starts the Independent Reviewer. A refused draft
    comes back with FIX lines.
@@ -53,13 +56,17 @@ coordination, materiality judgment, cross-border synthesis and the final report 
    **Independent verification first.** Your first draft submission may instead start Independent Verifiers: Nex
    picks the high-risk claims (you do not choose them) and gives each verifier only the claim text, without your
    sources. Nothing is counted. `briefing_wait` for them, then submit the draft again. If they dispute a claim, the
-   answer lists the findings by key (`verify-1/V001`): send them to the responsible lead (`briefing_delegate`, role
-   `lead`, `reworkOf`, `findings` with those keys) once before the draft, or submit again and they go to the reviewer
-   open. Their results are in `RUN/claim_verification.json`; you cannot change them.
+   answer lists the findings by key (`verify-1/V001`), each with an arrow to the task that holds the claim: send each
+   to that task (`briefing_delegate`, role `lead`, `reworkOf` the task after the arrow, `findings` with its keys) once
+   before the draft, or submit again and they go to the reviewer open. A claim from a cross-border reply is fixed in
+   that reply (`reworkOf` `xb-01`), not in its lead's task: Nex refuses a rework sent to the wrong task, and a reply
+   changed outside its own rework is refused at every later draft. Their results are in `RUN/claim_verification.json`; you cannot change them.
 7. **Rework.** `briefing_wait` on the review task. Each finding names the affected claim, event or section and, where
    Nex can trace it, the responsible lead. Fix editorial findings yourself. Send evidence findings to the
-   responsible lead with `briefing_delegate` (role `lead`, `reworkOf` the lead task, `findings` with the finding IDs). Then submit
-   the draft again. Rework rounds are limited; unresolved findings are escalated to the human reviewer, not hidden.
+   responsible task with `briefing_delegate` (role `lead`, `reworkOf` the lead task or cross-border reply, `findings` with the finding IDs). Then submit
+   the draft again. If a rework ends without a new hand-in, Nex puts that task's accepted records back and it stays
+   accepted, with its finding still open: do not rewrite its claims yourself; send the finding to it again in the next
+   round, or leave it for the review. Rework rounds are limited; unresolved findings are escalated to the human reviewer, not hidden.
 8. Finish with a short reply: run status, the full path of RUN/report.html, what passed, what needs a person, and any
    missing input. Once the review passes the run is final: do not edit the report or records after that (a later edit
    cannot be resubmitted and leaves the report differing from what was reviewed). Name remaining fixes in the reply.

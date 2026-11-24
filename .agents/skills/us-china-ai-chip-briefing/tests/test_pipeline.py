@@ -4,6 +4,7 @@ Fixture `lightweight_model_report.html` is a real report written by a lightweigh
 regression sample of structure and wording only, never a factual source; these tests never fetch its links.
 """
 import io
+import os
 import json
 from contextlib import redirect_stdout
 from pathlib import Path
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 SKILL = Path(__file__).resolve().parents[1]
 FIX = SKILL / 'tests' / 'fixtures'
@@ -119,6 +121,10 @@ class PipelineTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.run_dir = Path(self.tmp.name) / 'run'
+        # A run replayed on 10 March 2026: pages are saved (checked) that day, before the 19:00 build.
+        patch = unittest.mock.patch.dict(os.environ, {'BRIEFING_CLOCK': '2026-03-10T12:00:00+08:00'})
+        patch.start()
+        self.addCleanup(patch.stop)
         self.call('init', str(self.run_dir), '--end', '2026-03-10', '--cutoff', '2026-03-10T18:00:00+08:00')
         led = self.j('evidence_ledger.json'); led['generated_at'] = '2026-03-10T19:00:00+08:00'; self.j('evidence_ledger.json', led)
 
@@ -190,6 +196,80 @@ class PipelineTests(unittest.TestCase):
         self.report(eid)
         _, out = self.call('build', str(self.run_dir))
         self.assertIn('changed by hand', out); self.assertIn('C001', out)
+
+    def test_a_tracked_rows_status_claims_are_printed_with_their_sources(self):
+        r = str(self.run_dir)
+        eid = self.complete()
+        self.call('add-claim', r, eid, 'S001', '--quote', '合成机构今日发布合成规则', '--text', '合成机构发布合成规则。')
+        tracked = self.j('events.json')['events'][0]['id']
+        code, out = self.call('add-claim', r, tracked, 'S001', '--quote', '该规则适用于合成产品', '--text', '该规则适用于合成产品。')
+        self.assertEqual(code, 0, out)
+        code, out = self.call('event', r, 'decide', tracked, 'track', '--reason', '合成：仍在跟踪', '--status-claim', 'C001')
+        self.assertEqual(code, 1); self.assertIn('not a claim of', out)
+        self.assertEqual(self.call('event', r, 'decide', tracked, 'track', '--reason', '合成：仍在跟踪', '--status-claim', 'C002')[0], 0)
+        self.assertEqual(self.j('events.json')['events'][0]['status_claims'], ['C002'])
+        self.report(eid)
+        code, out = self.call('build', r)
+        html = (self.run_dir / 'report.html').read_text(encoding='utf-8')
+        table = html[html.index('<table'):html.index('</table>')]
+        # The row says where the item stands in the claim's own words, with its source; the story's claim stays in the story.
+        self.assertIn('<span data-claim-id="C002">该规则适用于合成产品。</span>', table)
+        self.assertIn('https://www.example.gov/rule', table)
+        self.assertNotIn('data-claim-id="C001"', table)
+        self.assertEqual([c['id'] for c in self.j('report_ledger.json')['claims']], ['C001', 'C002'])
+        result, _, _ = run_all(self.run_dir / 'report.html', self.run_dir / 'report_ledger.json', expected_date='2026-03-10',
+                               coverage_path=self.run_dir / 'coverage.json', now='2026-03-11T00:00:00+00:00')
+        allx = [x for xs in result['checks'].values() for x in xs]
+        self.assertFalse([x for x in allx if x['status'] == 'FAIL'], [x for x in allx if x['status'] == 'FAIL'])
+        self.assertNotIn('CLAIM_UNREFERENCED', {x['code'] for x in allx})
+
+    def test_what_changed_is_split_into_the_paragraphs_the_story_names(self):
+        r = str(self.run_dir)
+        eid = self.complete()
+        for i in range(1, 7):
+            self.assertEqual(self.call('add-claim', r, eid, 'S001', '--quote', '合成机构今日发布合成规则', '--text', f'合成事实{i}。')[0], 0)
+        self.report(eid)
+        # Six claims would print as one block: the build asks for paragraphs instead.
+        code, out = self.call('build', r)
+        self.assertEqual(code, 1)
+        self.assertIn('group them with "changes"', out)
+        rep = self.j('report.json')
+        for bad, message in (([['C001', 'C002', 'C003', 'C004', 'C005', 'C006']], 'paragraph 1 of "changes" has 6 claims'),
+                             ([['C001', 'C009']], 'C009 in "changes" is not a claim of'), ([['C001'], ['C001']], 'a claim appears twice')):
+            rep['stories'][0]['changes'] = bad
+            self.j('report.json', rep)
+            code, out = self.call('build', r)
+            self.assertEqual(code, 1); self.assertIn(message, out)
+        rep['stories'][0]['changes'] = [['C002', 'C001'], ['C004']]
+        self.j('report.json', rep)
+        self.assertEqual(self.call('build', r)[0] in (0, 2), True)
+        html = (self.run_dir / 'report.html').read_text(encoding='utf-8')
+        self.assertIn('<span data-claim-id="C002">合成事实2。</span><span data-claim-id="C001">合成事实1。</span></p>'
+                      '<p><span data-claim-id="C004">合成事实4。</span></p>', html)
+        # Claims the story leaves out stay in the evidence ledger but are not printed, nor bound to the report.
+        for left_out in ('C003', 'C005', 'C006'):
+            self.assertNotIn(f'data-claim-id="{left_out}"', html)
+        self.assertEqual([c['id'] for c in self.j('report_ledger.json')['claims']], ['C002', 'C001', 'C004'])
+        included = next(c for c in self.j('coverage.json')['candidates'] if c['decision'] == 'included')
+        self.assertEqual(included['claim_ids'], ['C001', 'C002', 'C004'])
+        self.assertEqual(len(self.j('evidence_ledger.json')['claims']), 6)
+
+    def test_a_source_is_recorded_as_checked_when_its_page_was_saved(self):
+        r = str(self.run_dir)
+        eid = self.complete()
+        self.call('add-claim', r, eid, 'S001', '--quote', '合成机构今日发布合成规则', '--text', '合成机构发布合成规则。', '--pub-date', '2026-03-09')
+        source = self.j('evidence_ledger.json')['claims'][0]['sources'][0]
+        self.assertEqual(source['date_checked'], '2026-03-10T04:00:00+00:00')
+        self.assertEqual(source['date_checked'], source['snapshot']['retrieved_at'])
+        self.report(eid)
+        self.call('build', r)
+        result, _, _ = run_all(self.run_dir / 'report.html', self.run_dir / 'report_ledger.json', expected_date='2026-03-10',
+                               coverage_path=self.run_dir / 'coverage.json', now='2026-03-11T00:00:00+00:00')
+        codes_seen = {x['code'] for xs in result['checks'].values() for x in xs}
+        # Published the day before it was saved, the source is ordered by the saved time. The old stand-in (the report
+        # date, day precision) overlapped every same-day publication of a one-day run, whenever it was really checked.
+        self.assertNotIn('DATE_ORDER_AMBIGUOUS', codes_seen)
+        self.assertNotIn('CHECK_AFTER_GENERATION', codes_seen)
 
     def test_add_claim_refuses_invented_quote_and_shows_closest(self):
         eid = self.complete()

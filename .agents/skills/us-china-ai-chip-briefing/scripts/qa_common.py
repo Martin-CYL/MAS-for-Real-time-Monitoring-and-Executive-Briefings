@@ -31,7 +31,7 @@ CATEGORIES = {
                      'SYNTHETIC_FIXTURE REVIEW_SUPPORT_MISSING COVERAGE_SWEEP_MISSING'),
     'source_access': ('来源无法自动访问（不代表来源错误）', 'UNCHECKED BLOCKED NETWORK_ERROR BROKEN QUOTE_UNCHECKABLE'),
     'human_review': ('需人工判断', 'CLAIM_REVIEW_PENDING NUMBER_NOT_IN_QUOTE UNMARKED_RISK_CLAIM SNAPSHOT_LIVE_DIFFER '
-                     'CLAIM_DATE_REVIEW_PENDING CHECK_AFTER_GENERATION'),
+                     'CLAIM_DATE_REVIEW_PENDING CHECK_AFTER_GENERATION DATE_NOT_SHOWN'),
     'signoff': ('等待最终人工签核', 'HUMAN_SIGNOFF INDEPENDENT_REVIEW_MISSING COVERAGE_REVIEW SIGNOFF_INCOMPLETE'),
 }
 _CODE_CATEGORY = {code: cat for cat, (_, codes) in CATEGORIES.items() for code in codes.split()}
@@ -47,6 +47,8 @@ FIXES = {
     'VERIFIED_WORDING': 'Remove claims of verification ("verified", 已验证). Use the legend labels: "Official or company announcement" / "Media report, not independently confirmed" / "Proposed, pending approval or not yet in force".',
     'FIRST_USE': 'Explain this term at its first visible use, e.g. "the US Bureau of Industry and Security (BIS)".',
     'DATE_MISSING': 'Put the full report date in the masthead, issue line and footer.',
+    'DATE_UNKNOWN': 'Record the publication date the page shows (brief.py source-date RUN S### --date YYYY-MM-DD), or why it shows none (--undated "…").',
+    'DATE_NOT_SHOWN': 'The page shows no publication date, for the reason recorded; check from the page that the fact is current and inside the window.',
     'SOURCE_TYPE_MISMATCH': 'Fix evidence_type: government sites = official_document; company newsroom/IR = company_statement; news sites = news.',
     'NUMBER_NOT_IN_QUOTE': 'Extend the quote so it contains each number in the claim (or fix the number). A person will otherwise check it.',
     'KIND_UNDERSTATED': 'Add "legal", "list" or "negative" to the claim kinds; the wording makes a legal/list/negative statement.',

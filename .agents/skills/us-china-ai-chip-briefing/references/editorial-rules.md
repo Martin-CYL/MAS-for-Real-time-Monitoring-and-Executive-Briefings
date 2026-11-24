@@ -20,6 +20,15 @@ Lessons from repeated review rounds. Most are not machine-checkable, so the writ
 11. **Match the verb to the evidence:** announced / took effect / proposed / pending a vote / reportedly / the company said / alleged. An official's on-record statement is not "market expectation".
 12. **Include company responses** to any contested designation or allegation, with date and current status (statement, appeal, lawsuit).
 13. **Exact deadlines.** If a suspension ends on the 9th, action is needed "by the 9th", not on the 10th.
+13a. **New means inside the window, in the run's timezone.** A source dated in another timezone without a time (a
+    Washington release dated 19 November) can fall on either side of a Hong Kong day boundary. For an event on the
+    window's first or last day, find the time (page metadata, feed or filing timestamp) and record it with
+    `brief.py source-date TASK S### --date 2026-11-19T12:28:44-08:00` (with `--shown` when the page writes the time
+    another way), or decide the event as tracked context. Do not convert a bare
+    date into the run's timezone by assumption.
+13b. **State a legal test whole.** When a claim gives a rule's test or threshold, record in the same event the
+    exceptions, exclusions, transition period and effective date the instrument sets for it, or say in `uncertain`
+    which of them were not checked. A test without its exceptions reads as unconditional.
 
 ## Writing
 0. **Write in plain, concise English** for finance readers: short sentences, no jargon without explanation, no literal translation of Chinese phrasing.

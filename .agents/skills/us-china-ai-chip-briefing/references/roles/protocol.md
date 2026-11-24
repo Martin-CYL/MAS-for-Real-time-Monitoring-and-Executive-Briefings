@@ -22,6 +22,11 @@ your task ID, your task directory (TASK) and the skill directory (SKILL).
   `brief.py add-claim` (the quote must be found in the saved page). Never edit the JSON records by hand; to correct
   a claim, `brief.py withdraw` it with a reason and add the corrected one. Run commands from SKILL:
   `python3 scripts/brief.py <command> TASK …`. The run is already initialised in English (`--lang en`).
+- Every source you cite needs its publication date. A page saved from a browser keeps no date metadata, so `fetch`
+  usually finds none: record the date the page shows with `brief.py source-date TASK S### --date YYYY-MM-DD` (it must
+  be written on the saved page or in its URL; `--shown "…"` gives it as the page writes it). If the page shows no
+  date (an FAQ, a data file, an index or search page), say why with `--undated "…"`; a person confirms it. The
+  handoff check refuses a cited source with neither.
 - Claim text is English, written exactly as it will appear in the report: explain each abbreviation or product code
   inside the claim at first use ("the US Department of Justice (DOJ)"). Quotes stay verbatim in the page's own
   language (Chinese sources are quoted in Chinese). News-only facts are attributed: "According to Reuters, …".

@@ -334,8 +334,17 @@ describe("provider catalog normalization", () => {
     expect(cursor?.defaultModel).toBe("auto")
   })
 
+  test("uses the live default until GPT-6.2 Astra becomes available", () => {
+    const sol = { model: "gpt-6.2-sol", displayName: "GPT-6.2 Sol", isDefault: true }
+    applyCodexModels([sol])
+    expect(normalizeServerModel("codex")).toBe(sol.model)
+    applyCodexModels([sol, { model: "gpt-6.2-astra", displayName: "GPT-6.2 Astra" }])
+    expect(normalizeServerModel("codex")).toBe("gpt-6.2-astra")
+    expect(normalizeServerModel("codex", sol.model)).toBe(sol.model)
+  })
+
   test("normalizes server model ids through the shared alias catalog", () => {
-    expect(normalizeServerModel("codex")).toBe("gpt-6-sol")
+    expect(normalizeServerModel("codex")).toBe("gpt-6.2-astra")
     expect(normalizeServerModel("claude", "fable")).toBe("fable")
     expect(normalizeServerModel("claude", "opus")).toBe("opus")
     // Version-pinned ids persisted by older Nex versions fold into the alias.

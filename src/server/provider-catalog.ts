@@ -20,6 +20,7 @@ import {
   isRetiredCodexModel,
   codexReasoningEffortLabel,
   deriveModelLabel,
+  getProviderCatalog,
   withPiFaveModels,
   normalizeClaudeContextWindow,
   normalizeClaudeFastMode,
@@ -204,7 +205,7 @@ export function applyCodexModels(models: ReadonlyArray<CodexAppServerModelInfo>)
   const codexProvider = SERVER_PROVIDERS[codexIndex]
   if (!codexProvider) return false
 
-  const staticModels = PROVIDERS.find((provider) => provider.id === "codex")?.models ?? []
+  const staticCatalog = getProviderCatalog("codex")
   const nextModels: ProviderModelOption[] = []
   for (const model of models) {
     const id = model.model.trim()
@@ -225,7 +226,7 @@ export function applyCodexModels(models: ReadonlyArray<CodexAppServerModelInfo>)
     // deprecated additionalSpeedTiers.
     const supportsFastMode = (model.additionalSpeedTiers ?? []).includes("fast")
       || (model.serviceTiers ?? []).some((tier) => tier.id === "fast" || tier.id === "priority")
-    const staticOption = staticModels.find((option) => option.id === id)
+    const staticOption = staticCatalog.models.find((option) => option.id === id)
     nextModels.push({
       id,
       label: codexModelLabel(model),
@@ -241,8 +242,9 @@ export function applyCodexModels(models: ReadonlyArray<CodexAppServerModelInfo>)
   // Keep Nex's default when the account still has it; otherwise the
   // server-marked default, then the first listed model.
   const serverDefault = models.find((model) => model.isDefault)?.model.trim()
-  const defaultModel = nextModels.some((model) => model.id === codexProvider.defaultModel)
-    ? codexProvider.defaultModel
+  const preferredModel = staticCatalog.defaultModel
+  const defaultModel = nextModels.some((model) => model.id === preferredModel)
+    ? preferredModel
     : nextModels.find((model) => model.id === serverDefault)?.id ?? nextModels[0]!.id
 
   if (

@@ -59,7 +59,7 @@ function expectedSettingsSnapshot(filePath: string, overrides: Partial<AppSettin
         autoPlan: false,
       },
       codex: {
-        model: "gpt-6-sol",
+        model: "gpt-6.2-astra",
         modelOptions: {
           reasoningEffort: "medium",
           fastMode: false,

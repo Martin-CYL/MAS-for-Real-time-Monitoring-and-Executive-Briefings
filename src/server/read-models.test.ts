@@ -463,6 +463,8 @@ describe("read models", () => {
     expect(chat?.queuedMessages.map((message) => message.content)).toEqual(["follow up"])
     expect(chat?.availableProviders.length).toBeGreaterThan(1)
     expect(chat?.availableProviders.find((provider) => provider.id === "codex")?.models.map((model) => model.id)).toEqual([
+      "gpt-6.2-astra",
+      "gpt-6.2-sol",
       "gpt-6-sol",
       "gpt-5.5",
       "gpt-5.4",

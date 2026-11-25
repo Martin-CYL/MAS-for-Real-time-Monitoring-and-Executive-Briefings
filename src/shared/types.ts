@@ -713,11 +713,23 @@ const COMPATIBILITY_PROVIDERS: ProviderCatalogEntry[] = [
     // Keep the aliases here: they migrate persisted ids ("gpt-5.6" → sol).
     id: "codex",
     label: "Codex",
-    defaultModel: "gpt-6-sol",
+    defaultModel: "gpt-6.2-astra",
     defaultEffort: "medium",
     supportsPlanMode: true,
     supportsAutoPlanMode: false,
     models: [
+      {
+        id: "gpt-6.2-astra",
+        label: "GPT-6.2 Astra",
+        supportsEffort: true,
+        defaultReasoningEffort: "medium",
+      },
+      {
+        id: "gpt-6.2-sol",
+        label: "GPT-6.2 Sol",
+        supportsEffort: true,
+        defaultReasoningEffort: "medium",
+      },
       {
         id: "gpt-6-sol",
         label: "GPT-6 Sol",
@@ -915,7 +927,7 @@ export function normalizeClaudeModelId(modelId?: string, fallbackModelId = "opus
   return normalizeProviderModelId("claude", modelId, fallbackModelId)
 }
 
-export function normalizeCodexModelId(modelId?: string, fallbackModelId = "gpt-6-sol"): string {
+export function normalizeCodexModelId(modelId?: string, fallbackModelId?: string): string {
   return normalizeProviderModelId("codex", modelId, fallbackModelId)
 }
 

@@ -35,7 +35,8 @@ your task ID, your task directory (TASK) and the skill directory (SKILL).
   ```
   Steps run in order and stop at the first failure; the earlier steps stay recorded, so fix that step and run it and
   the rest again. Allowed: fetch, event, add-claim, source-date, withdraw, search. Chain other related shell
-  commands with `&&` in one call too.
+  commands with `&&` in one call too. When you need several searches or page reads that do not depend on each
+  other, request them together in one turn rather than one after another.
 - Every source you cite needs its publication date. A page saved from a browser keeps no date metadata, so `fetch`
   usually finds none: record the date the page shows with `brief.py source-date TASK S### --date YYYY-MM-DD` (it must
   be written on the saved page or in its URL; `--shown "…"` gives it as the page writes it). If the page shows no

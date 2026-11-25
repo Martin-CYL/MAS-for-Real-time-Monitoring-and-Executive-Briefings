@@ -18,7 +18,7 @@ COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 
 FROM base AS runtime
-ARG CODEX_VERSION=0.162.0-alpha.2
+ARG CODEX_VERSION=0.174.0-alpha.5
 RUN npm install --global @openai/codex@${CODEX_VERSION} && npm cache clean --force \
     && groupadd --gid 10001 nex && useradd --uid 10001 --gid 10001 --create-home --shell /bin/bash nex \
     && mkdir -p /home/nex/.nex /home/nex/.codex /workspace/projects \

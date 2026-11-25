@@ -48,7 +48,10 @@ coordination, materiality judgment, cross-border synthesis and the final report 
    Facts appear in the report only through claims, word for word, so write analysis, not new facts. Group each
    story's claims into short paragraphs with `changes` (required above 5 claims). Before you submit, check every new
    event on the window's first or last day for its time in the run's timezone (rule 13a): one whose source gives only
-   another timezone's date goes back to its lead or becomes tracked context. Submit with
+   another timezone's date goes back to its lead or becomes tracked context. **Then run
+   `python3 SKILL/scripts/brief.py precheck TASK --issue-date YYYY-MM-DD`** (today in the run's timezone): it runs
+   the handoff rules and the build a submission runs and lists every FIX / TODO that would get the draft refused.
+   Fix them and run it again until it says to submit; each refused submission costs far more. Submit with
    `briefing_submit` (kind `draft`). Nex merges, runs the handoff, provenance and report checks, renders
    `report.html` with the existing template and validator, and starts the Independent Reviewer. A refused draft
    comes back with FIX lines.

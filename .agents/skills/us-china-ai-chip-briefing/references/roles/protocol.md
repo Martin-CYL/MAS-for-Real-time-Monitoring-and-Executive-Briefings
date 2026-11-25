@@ -22,6 +22,20 @@ your task ID, your task directory (TASK) and the skill directory (SKILL).
   `brief.py add-claim` (the quote must be found in the saved page). Never edit the JSON records by hand; to correct
   a claim, `brief.py withdraw` it with a reason and add the corrected one. Run commands from SKILL:
   `python3 scripts/brief.py <command> TASK …`. The run is already initialised in English (`--lang en`).
+- **Record in batches.** Each command you run costs a full round trip to the model, so do not record one fact per
+  call. Once you have read a source, write its steps to a JSON file and run them together:
+  `python3 scripts/brief.py batch TASK steps.json`. Each step is the usual command's words without TASK; `"@N"` is
+  the ID that step N created:
+  ```json
+  [["fetch", "https://…", "--file", "TASK/page.txt"],
+   ["source-date", "@1", "--date", "2026-11-20"],
+   ["event", "add", "--title", "…", "--date", "2026-11-20", "--side", "us", "--source", "@1", "--materiality", "high"],
+   ["add-claim", "@3", "@1", "--quote", "words from the page", "--text", "The claim as printed.", "--kind", "statistic"],
+   ["event", "decide", "@3", "include", "--reason", "…", "--link", "…", "--size", "…", "--new", "…"]]
+  ```
+  Steps run in order and stop at the first failure; the earlier steps stay recorded, so fix that step and run it and
+  the rest again. Allowed: fetch, event, add-claim, source-date, withdraw, search. Chain other related shell
+  commands with `&&` in one call too.
 - Every source you cite needs its publication date. A page saved from a browser keeps no date metadata, so `fetch`
   usually finds none: record the date the page shows with `brief.py source-date TASK S### --date YYYY-MM-DD` (it must
   be written on the saved page or in its URL; `--shown "…"` gives it as the page writes it). If the page shows no

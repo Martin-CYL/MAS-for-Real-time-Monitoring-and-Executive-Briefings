@@ -19,6 +19,8 @@ Commands (run from the skill folder):
   brief.py add-claim RUN E001 S001 --quote "exact words from the page" --text "中文句子" [--kind legal] [--type news]
   brief.py withdraw RUN C001 --reason TEXT
   brief.py search RUN "query" [--found "what it turned up"]
+  brief.py batch RUN OPS.json                (run many fetch/event/add-claim/source-date/withdraw/search commands at once)
+  brief.py precheck RUN [--issue-date YYYY-MM-DD]   (multi-agent chief: the checks a draft submission runs, before submitting)
   brief.py status RUN
   brief.py build RUN [--network] [--issue-date YYYY-MM-DD]
   brief.py verify-select RUN [--max 12]      (multi-agent: the claims an independent verifier checks, as JSON)
@@ -847,7 +849,7 @@ def cmd_build(a):
     return exit_code(allx)
 
 
-def main():
+def build_parser():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest='cmd', required=True)
     p = sub.add_parser('init'); p.add_argument('run'); p.add_argument('--days', type=int, default=7)
@@ -886,10 +888,120 @@ def main():
     p = sub.add_parser('gaps'); p.add_argument('run'); p.add_argument('--lead', action='append', help='us=TASK_DIR or cn=TASK_DIR')
     p.add_argument('--max', type=int, default=20); p.add_argument('--discovery-top', type=int, default=10)
     p = sub.add_parser('gap-check'); p.add_argument('round'); p.add_argument('task_dir'); p.add_argument('--task', required=True)
-    a = ap.parse_args()
-    return {'init': cmd_init, 'fetch': cmd_fetch, 'event': cmd_event, 'add-claim': cmd_add_claim, 'search': cmd_search,
-            'withdraw': cmd_withdraw, 'source-date': cmd_source_date, 'status': cmd_status, 'build': cmd_build, 'verify-select': cmd_verify_select,
-            'gaps': gap_round.cmd_gaps, 'gap-check': gap_round.cmd_gap_check}[a.cmd](a)
+    p = sub.add_parser('batch', help='run many record commands from a JSON file in one call')
+    p.add_argument('run'); p.add_argument('ops', help='JSON file (or - for stdin): a list of commands, each a list of words without RUN')
+    p = sub.add_parser('precheck', help='the checks a chief draft submission runs, without submitting')
+    p.add_argument('run'); p.add_argument('--issue-date')
+    return ap
+
+
+HANDLERS = {}
+
+
+def main():
+    a = build_parser().parse_args()
+    HANDLERS.update({'init': cmd_init, 'fetch': cmd_fetch, 'event': cmd_event, 'add-claim': cmd_add_claim, 'search': cmd_search,
+                     'withdraw': cmd_withdraw, 'source-date': cmd_source_date, 'status': cmd_status, 'build': cmd_build,
+                     'verify-select': cmd_verify_select, 'gaps': gap_round.cmd_gaps, 'gap-check': gap_round.cmd_gap_check,
+                     'batch': cmd_batch, 'precheck': cmd_precheck})
+    return HANDLERS[a.cmd](a)
+
+
+BATCH_COMMANDS = ('fetch', 'event', 'add-claim', 'source-date', 'withdraw', 'search')
+
+
+def _record_ids(run):
+    """IDs in the record files, to name what each batch step created."""
+    out = set()
+    for name, key in (('sources.json', 'sources'), ('events.json', 'events'), ('evidence_ledger.json', 'claims')):
+        data = load(run / name, {}) or {}
+        items = data.get(key) if isinstance(data, dict) else None
+        if isinstance(items, dict):
+            out |= set(items)
+        elif isinstance(items, list):
+            out |= {x.get('id') for x in items if isinstance(x, dict) and x.get('id')}
+    return out
+
+
+def _done(n):
+    return 'Nothing was recorded.' if n == 1 else f'Steps 1–{n - 1} are recorded; step {n} and later were not run.'
+
+
+def cmd_batch(a):
+    """One call for many record commands: each step is the usual command's words without RUN, e.g.
+    ["event", "add", "--title", "…", "--date", "2026-11-20", "--side", "us"] or ["add-claim", "@1", "S004", "--quote", "…", "--text", "…"].
+    "@N" stands for the ID step N created (1-based), so a claim can name the event added two steps earlier.
+    Steps run in order and stop at the first failure; the steps before it stay recorded, so rerun only the rest."""
+    run = Path(a.run)
+    try:
+        raw = sys.stdin.read() if a.ops == '-' else Path(a.ops).read_text(encoding='utf-8')
+        ops = json.loads(raw)
+    except (OSError, json.JSONDecodeError) as e:
+        print(f'batch: cannot read {a.ops} as JSON: {e}'); return 1
+    if not isinstance(ops, list) or not all(isinstance(op, list) and op and all(isinstance(w, str) for w in op) for op in ops):
+        print('batch: the file must be a JSON list of commands, each a list of strings, e.g. [["search", "query"], ["event", "add", "--title", "…"]]')
+        return 1
+    parser, created = build_parser(), {}
+    for n, op in enumerate(ops, 1):
+        if op[0] not in BATCH_COMMANDS:
+            print(f'step {n}: "{op[0]}" cannot run in a batch (allowed: {", ".join(BATCH_COMMANDS)}). {_done(n)}')
+            return 1
+        words = []
+        for w in op[1:]:
+            m = re.fullmatch(r'@(\d+)', w)
+            if m:
+                ref = created.get(int(m[1]))
+                if not ref:
+                    print(f'step {n}: {w} names step {m[1]}, which created no ID. {_done(n)}')
+                    return 1
+                w = ref
+            words.append(w)
+        try:
+            args = parser.parse_args([op[0], str(run), *words])
+        except SystemExit:
+            print(f'step {n}: the words do not form a valid "{op[0]}" command (usage above). {_done(n)}')
+            return 1
+        before = _record_ids(run)
+        print(f'[{n}] ', end='')
+        code = HANDLERS[op[0]](args)
+        if code:
+            print(f'step {n} failed. {_done(n)} Fix step {n} and run it and the steps after it again.')
+            return code
+        new = sorted(_record_ids(run) - before)
+        if len(new) == 1:
+            created[n] = new[0]
+    print(f'batch: all {len(ops)} steps done.')
+    return 0
+
+
+def cmd_precheck(a):
+    """What a chief draft submission checks first (handoff rules, then build and validation), run before submitting,
+    so a refusal costs one local run instead of a submission. Merges Nex has not done yet are not included."""
+    run = Path(a.run)
+    import subprocess
+    r = subprocess.run([sys.executable, str(SCRIPTS / 'check_handoff.py'), str(run), '--role', 'chief', '--json'],
+                       capture_output=True, text=True)
+    try:
+        handoff = json.loads(r.stdout.strip().splitlines()[-1])
+    except (IndexError, json.JSONDecodeError):
+        print('precheck: check_handoff.py gave no result:', (r.stderr or r.stdout)[-500:]); return 1
+    fails = [f for f in handoff.get('findings', []) if f.get('status') == 'FAIL']
+    if fails:
+        print(f'Handoff check: {len(fails)} problem(s) a submission would be refused for:')
+        for f in fails:
+            print(f'FIX {f.get("code")}: {f.get("message")}')
+        print('NEXT: fix these, then run precheck again. Build was not run.')
+        return 1
+    print('Handoff check: no refusals.')
+    if not (run / 'report.json').exists():
+        print('report.json is missing in RUN: write it, then run precheck again.'); return 1
+    code = cmd_build(argparse.Namespace(run=str(run), network=False, issue_date=a.issue_date))
+    qa = load(run / 'qa' / 'review_report.json', {}) or {}
+    if code == 1 or qa.get('readiness') == 'BLOCKED':
+        print('precheck: a submission would be refused. Fix the FIX / TODO lines above, then run precheck again.')
+        return 1
+    print(f'precheck: no refusal found (validator readiness {qa.get("readiness")}). Submit the draft.')
+    return 0
 
 
 def verification_targets(run, limit):

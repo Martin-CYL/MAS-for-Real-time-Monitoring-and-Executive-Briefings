@@ -624,6 +624,18 @@ describe("briefing workflow", () => {
     await until(() => workflow.getRun(run.runId)!.tasks.find((task) => task.id === "cn-s01")!.state === "running", "the China scout to start")
   })
 
+  test("scouts wait in the queue once the run keeps seven Codex processes alive, whatever the scout limit says", async () => {
+    // Run mas-20261125-145626-6c33: eight processes (chief, two leads, five scouts) and three scouts were killed.
+    const { startRun, workflow, projectDir } = await setup({ budgets: { max_concurrent_scouts: 6, max_scouts_per_lead: 3,
+      token_budget: { run_fresh_tokens: 20_000_000 } } })
+    const run = await startRun()
+    const started = []
+    for (const [lead, topic] of [[run.usLead, "u1"], [run.cnLead, "c1"], [run.usLead, "u2"], [run.cnLead, "c2"], [run.usLead, "u3"], [run.cnLead, "c3"]] as const) {
+      started.push((await workflow.delegate(lead, projectDir, { role: "scout", topic })).state)
+    }
+    expect(started).toEqual(["running", "running", "running", "running", "queued", "queued"])
+  })
+
   test("roles and depth are enforced", async () => {
     const { startRun, workflow, projectDir, orchestrator } = await setup()
     const run = await startRun()
@@ -2024,5 +2036,74 @@ describe("source lanes", () => {
     const text = "# Scout\n\nshared\n\n## Lane: a\n\nA\n\n### detail\n\nA2\n\n## Lane: b\n\nB\n\n## After\n\nafter"
     expect(keepLane(text, "a")).toBe("# Scout\n\nshared\n\n## Lane: a\n\nA\n\n### detail\n\nA2\n\n## After\n\nafter")
     expect(keepLane(text, "b")).toBe("# Scout\n\nshared\n\n## Lane: b\n\nB\n\n## After\n\nafter")
+  })
+})
+
+/**
+ * The verifiers start when the gap check lists the gaps, so they work while the chief decides the gaps and the
+ * leads pursue them (run mas-20261125-162743-f42f spent 3.5 minutes waiting for verification after the gap round).
+ */
+describe("verification alongside the gap round", () => {
+  const BUDGETS = {
+    gap_round: { enabled: true, max_gaps_pursued: 2, max_gap_scouts_per_lead: 1, lead_fresh_tokens: 50_000, scout_fresh_tokens: 40_000, lead_minutes: 20, scout_minutes: 10 },
+    verification: { enabled: true, claims_per_verifier: 2, max_concurrent: 3, max_rework_rounds: 1 },
+  }
+  const LISTED = { not_listed: 0, gaps: [
+    { gap_id: "G001", type: "case_unfollowed", side: "us", priority: 6, target: { case_id: "A001" }, why: "A001 has no event", suggested_source: "official_document" },
+  ] }
+  const SELECTED = { not_selected: 0, claims: [
+    { claim_id: "C001", text: "One", kinds: ["legal"], risk_score: 5, event_id: "E001", asserted_status: "official" },
+    { claim_id: "C002", text: "Two", kinds: ["list"], risk_score: 5, event_id: "E002", asserted_status: "official" },
+  ] }
+
+  async function confirm(context: Awaited<ReturnType<typeof setup>>, runId: string, taskId: string, claims: string[]) {
+    const task = context.workflow.getRun(runId)!.tasks.find((entry) => entry.id === taskId)!
+    const dir = path.join(context.workflow.getRun(runId)!.runDir, task.dir)
+    await writeFile(path.join(dir, "evidence_ledger.json"), JSON.stringify({ claims: claims.map((id) => ({
+      id, text: "own", sources: [{ url: `https://www.example.gov/${id}`, evidence_type: "official_document", quote: "the text says so" }] })) }))
+    await writeFile(path.join(dir, "verification.json"), JSON.stringify({ results: claims.map((id) => ({ claim_id: id, verdict: "confirmed", evidence: [id], note: "Matches." })) }))
+    const result = await context.workflow.submit(task.chatId!, context.projectDir, {})
+    if (result.accepted) context.codex.finish(task.chatId!)
+    return result
+  }
+
+  test("the gap list starts the verifiers; the draft after the gap round goes on without starting them again", async () => {
+    const context = await setup({ budgets: BUDGETS })
+    const { workflow, projectDir } = context
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await writeFile(path.join(run.runDir, "fixture-gaps.json"), JSON.stringify(LISTED))
+    await writeFile(path.join(run.runDir, "fixture-verify-select.json"), JSON.stringify(SELECTED))
+
+    const listed = await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    expect(listed.problems as string[]).toContainEqual(expect.stringContaining("Independent verification has started alongside the gap round (verify-1)"))
+    let state = workflow.getRun(run.runId)!
+    expect(state).toMatchObject({ stage: "gap_review", draftAttempts: 0, gapRound: { state: "planning" }, verification: { state: "running", tasks: ["verify-1"] } })
+    expect(state.tasks.find((task) => task.id === "verify-1")).toMatchObject({ role: "verifier", state: "running" })
+
+    // The chief decides the gaps while the verifier works.
+    await writeFile(path.join(run.runDir, "gap_plan.json"), JSON.stringify({ decisions: [{ gap_id: "G001", action: "skip", reason: "Covered by E001" }] }))
+    await workflow.submit(run.chief, projectDir, { kind: "gap_plan" })
+    expect(((await workflow.submit(run.chief, projectDir, { kind: "draft" })).problems as string[]).join(" ")).toMatch(/gap round has ended|Still running: verify-1/)
+
+    expect(await confirm(context, run.runId, "verify-1", ["C001", "C002"])).toMatchObject({ accepted: true })
+    await workflow.wait(run.chief, projectDir, {})
+    await workflow.submit(run.chief, projectDir, { kind: "draft" })
+    state = workflow.getRun(run.runId)!
+    expect(state.verification).toMatchObject({ state: "done", tasks: ["verify-1"] })
+    expect(state.tasks.filter((task) => task.role === "verifier").map((task) => task.id)).toEqual(["verify-1"])
+    expect(state.history.some((entry) => entry.stage === "claim_verification")).toBe(true)
+    expect(JSON.parse(await readFile(path.join(run.runDir, "claim_verification.json"), "utf8")).claims.C001.status).toBe("independent")
+  })
+
+  test("no early start when the gap check finds nothing: verification starts with the draft as before", async () => {
+    const context = await setup({ budgets: BUDGETS })
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await writeFile(path.join(run.runDir, "fixture-gaps.json"), JSON.stringify({ not_listed: 0, gaps: [] }))
+    await writeFile(path.join(run.runDir, "fixture-verify-select.json"), JSON.stringify(SELECTED))
+    const first = await context.workflow.submit(run.chief, context.projectDir, { kind: "draft" })
+    expect((first.problems as string[])[0]).toContain("Independent verification of 2 high-risk claim(s) started (verify-1)")
+    expect(context.workflow.getRun(run.runId)!.stage).toBe("claim_verification")
   })
 })

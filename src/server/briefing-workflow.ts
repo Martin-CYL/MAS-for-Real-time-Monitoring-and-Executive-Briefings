@@ -76,6 +76,12 @@ const PYTHON_TIMEOUT_MS = 120_000
 const DISCOVERY_TIMEOUT_MS = 240_000
 /** Roles whose chat a run reopens after its first hand-in (cross-border, gap round, rework). */
 const REOPENABLE_ROLES: ReadonlySet<BriefingRole> = new Set(["chief", "lead", "cross_border"])
+/**
+ * Codex processes one run may keep alive at once: the chief's and the leads' (kept for reopening) and every
+ * running agent's. Seven ran cleanly (run mas-20261124-001719-2198); with eight, three scout processes were
+ * killed, possibly out of memory (run mas-20261125-145626-6c33). Scouts and verifiers wait in the queue beyond it.
+ */
+const MAX_LIVE_AGENT_PROCESSES = 7
 const RECORD_FILES = ["run_config.json", "events.json", "evidence_ledger.json", "sources.json", "narrative.md", "output.json"]
 
 export type BriefingStage =
@@ -1165,6 +1171,7 @@ export class BriefingWorkflow {
         const limit = task.role === "scout" ? run.budgets.maxConcurrentScouts : run.budgets.verification?.maxConcurrent ?? 1
         const running = run.tasks.filter((entry) => entry.role === task.role && entry.state === "running").length
         if (running >= limit) continue
+        if (this.liveAgentProcesses(run) >= MAX_LIVE_AGENT_PROCESSES) continue
       }
       try {
         await this.launch(run, task)
@@ -1175,6 +1182,16 @@ export class BriefingWorkflow {
         await this.setTaskState(run, task, "failed", `could not start: ${message}`)
       }
     }
+  }
+
+  /** Codex processes the run keeps alive now: reopenable roles keep theirs between turns; others while running. */
+  private liveAgentProcesses(run: BriefingRun) {
+    const chats = new Set<string>()
+    for (const task of run.tasks) {
+      if (!task.chatId) continue
+      if (task.state === "running" || (REOPENABLE_ROLES.has(task.role) && task.state !== "queued")) chats.add(task.chatId)
+    }
+    return chats.size
   }
 
   // ── Execution policy ───────────────────────────────────────────────────
@@ -2298,7 +2315,22 @@ export class BriefingWorkflow {
   private async coverageGate(run: BriefingRun, chief: BriefingTask): Promise<Record<string, unknown> | null> {
     const config = run.budgets.gapRound
     if (!config?.enabled || run.gapRound?.state === "done") return null
-    if (!run.gapRound) return this.startGapReview(run, chief, config)
+    if (!run.gapRound) {
+      const listed = await this.startGapReview(run, chief, config)
+      // The verifiers check the merged research while the chief decides the gaps and the leads pursue them,
+      // instead of after the round. Claims the gap round adds are not candidates; every other check still applies.
+      const listedRound = run.gapRound as BriefingRun["gapRound"]  // set by startGapReview
+      if (listed && listedRound?.state === "planning" && run.budgets.verification?.enabled && !run.verification) {
+        await this.startVerification(run, chief, run.budgets.verification, { early: true })
+        const verification = run.verification as BriefingRun["verification"]
+        if (verification?.state === "running") {
+          const problems = Array.isArray(listed.problems) ? listed.problems as string[] : []
+          listed.problems = [...problems, `Independent verification has started alongside the gap round (${verification.tasks.join(", ")}); `
+            + "it does not wait for your gap plan."]
+        }
+      }
+      return listed
+    }
     const round = run.gapRound
     if (round.state === "planning") {
       return this.refuse([`Decide every gap of the gap check first (${path.join(run.runDir, "gaps.json")}): write gap_plan.json, `
@@ -2649,6 +2681,7 @@ export class BriefingWorkflow {
       return this.refuse([`Independent verification is still running (${run.verification.tasks.join(", ")}). briefing_wait for it, then submit the draft again.`])
     }
     run.verification.state = "done"
+    if (run.stage !== "claim_verification") await this.advance(run, "claim_verification", "checked alongside the gap round")
     const open = this.verificationFindings(run).filter((finding) => finding.status === "open")
     await this.record(run, { verification: "done", findings: open.length })
     if (open.length === 0) return null
@@ -2664,7 +2697,14 @@ export class BriefingWorkflow {
     ], next: "No draft was counted." }
   }
 
-  private async startVerification(run: BriefingRun, chief: BriefingTask, config: VerificationBudget): Promise<Record<string, unknown> | null> {
+  /**
+   * Picks the claims and starts the verifiers. `early`: started alongside the gap round. It is only an earlier
+   * start: when the budget or the process limit would not let the verifiers run now, nothing is recorded and the
+   * draft submission after the gap round starts verification as before.
+   */
+  private async startVerification(run: BriefingRun, chief: BriefingTask, config: VerificationBudget,
+    options: { early?: boolean } = {}): Promise<Record<string, unknown> | null> {
+    if (options.early && (this.launchBlocked(run, "verifier", "verification") || this.liveAgentProcesses(run) >= MAX_LIVE_AGENT_PROCESSES)) return null
     await this.mergeInto(run, chief)
     const selected = this.parseJson<{ claims: Array<Record<string, unknown>>; not_selected: number }>(
       await this.py(run, ["brief.py", "verify-select", run.runDir, "--max", String(config.maxClaims)]))
@@ -2702,7 +2742,12 @@ export class BriefingWorkflow {
       for (const claim of claims) state.claims[String(claim.claim_id)] = { status: "unverified", by: task.id, note: "check not finished" }
       await this.record(run, { task: task.id, role: "verifier", delegated_by: "workflow", claims: claims.map((claim) => claim.claim_id) })
     }
-    await this.advance(run, "claim_verification", `${selected.claims.length} claim(s), ${state.tasks.length} verifier(s)`)
+    if (options.early) {
+      state.note = "started alongside the gap round"
+      await this.record(run, { verification: "started alongside the gap round", claims: selected.claims.length, verifiers: state.tasks.length })
+    } else {
+      await this.advance(run, "claim_verification", `${selected.claims.length} claim(s), ${state.tasks.length} verifier(s)`)
+    }
     await this.writeVerification(run)
     await this.pump(run)
     return this.refuse([`Independent verification of ${selected.claims.length} high-risk claim(s) started (${state.tasks.join(", ")}). `

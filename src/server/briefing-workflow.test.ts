@@ -2051,7 +2051,7 @@ describe("verification alongside the gap round", () => {
   const LISTED = { not_listed: 0, gaps: [
     { gap_id: "G001", type: "case_unfollowed", side: "us", priority: 6, target: { case_id: "A001" }, why: "A001 has no event", suggested_source: "official_document" },
   ] }
-  const SELECTED = { not_selected: 0, claims: [
+  const SELECTED = { not_selected: 0, scope: "printed", claims: [
     { claim_id: "C001", text: "One", kinds: ["legal"], risk_score: 5, event_id: "E001", asserted_status: "official" },
     { claim_id: "C002", text: "Two", kinds: ["list"], risk_score: 5, event_id: "E002", asserted_status: "official" },
   ] }
@@ -2096,6 +2096,17 @@ describe("verification alongside the gap round", () => {
     expect(JSON.parse(await readFile(path.join(run.runDir, "claim_verification.json"), "utf8")).claims.C001.status).toBe("independent")
   })
 
+  test("no early start before report.json says what it prints: the draft after the gap round picks the claims", async () => {
+    const context = await setup({ budgets: BUDGETS })
+    const run = await context.startRun()
+    await researchBoth(context, run)
+    await writeFile(path.join(run.runDir, "fixture-gaps.json"), JSON.stringify(LISTED))
+    await writeFile(path.join(run.runDir, "fixture-verify-select.json"), JSON.stringify({ ...SELECTED, scope: "shown_events" }))
+    const listed = await context.workflow.submit(run.chief, context.projectDir, { kind: "draft" })
+    expect((listed.problems as string[]).join(" ")).not.toContain("alongside the gap round")
+    expect(context.workflow.getRun(run.runId)!.verification).toBeUndefined()
+  })
+
   test("no early start when the gap check finds nothing: verification starts with the draft as before", async () => {
     const context = await setup({ budgets: BUDGETS })
     const run = await context.startRun()
@@ -2105,5 +2116,26 @@ describe("verification alongside the gap round", () => {
     const first = await context.workflow.submit(run.chief, context.projectDir, { kind: "draft" })
     expect((first.problems as string[])[0]).toContain("Independent verification of 2 high-risk claim(s) started (verify-1)")
     expect(context.workflow.getRun(run.runId)!.stage).toBe("claim_verification")
+  })
+})
+
+describe("after the run ends", () => {
+  test("the report and its records are read-only; qa stays writable for the sign-off", async () => {
+    const { mkdtemp, stat: statFile, chmod: chmodFile } = await import("node:fs/promises")
+    const { tmpdir } = await import("node:os")
+    const dir = await mkdtemp(path.join(tmpdir(), "nex-lock-"))
+    await writeFile(path.join(dir, "report.html"), "<p>r</p>")
+    await writeFile(path.join(dir, "evidence_ledger.json"), "{}")
+    await mkdir(path.join(dir, "qa"), { recursive: true })
+    const records: Array<Record<string, unknown>> = []
+    const fake = { record: async (_run: unknown, event: Record<string, unknown>) => { records.push(event) } }
+    await (BriefingWorkflow.prototype as unknown as { lockFinalFiles: (this: unknown, run: { runDir: string }) => Promise<void> })
+      .lockFinalFiles.call(fake, { runDir: dir })
+    expect((await statFile(path.join(dir, "report.html"))).mode & 0o222).toBe(0)
+    expect((await statFile(path.join(dir, "evidence_ledger.json"))).mode & 0o222).toBe(0)
+    expect((await statFile(path.join(dir, "qa"))).mode & 0o200).not.toBe(0)
+    expect(records).toEqual([{ read_only: ["report.html", "evidence_ledger.json"] }])
+    await chmodFile(path.join(dir, "report.html"), 0o644)
+    await chmodFile(path.join(dir, "evidence_ledger.json"), 0o644)
   })
 })

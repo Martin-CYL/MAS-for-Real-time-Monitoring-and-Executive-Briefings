@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto"
 import { existsSync } from "node:fs"
 import { homedir } from "node:os"
-import { appendFile, copyFile, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises"
+import { appendFile, chmod, copyFile, mkdir, readFile, readdir, rename, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import type { z } from "zod"
 import {
@@ -83,6 +83,9 @@ const REOPENABLE_ROLES: ReadonlySet<BriefingRole> = new Set(["chief", "lead", "c
  */
 const MAX_LIVE_AGENT_PROCESSES = 7
 const RECORD_FILES = ["run_config.json", "events.json", "evidence_ledger.json", "sources.json", "narrative.md", "output.json"]
+/** What a person signs off, locked once the run ends (`lockFinalFiles`). */
+const FINAL_FILES = ["report.html", "report.json", "report_ledger.json", "evidence_ledger.json", "events.json", "sources.json",
+  "coverage.json", "claim_verification.json", "gap_report.json"]
 
 export type BriefingStage =
   | "request_received"
@@ -2706,9 +2709,12 @@ export class BriefingWorkflow {
     options: { early?: boolean } = {}): Promise<Record<string, unknown> | null> {
     if (options.early && (this.launchBlocked(run, "verifier", "verification") || this.liveAgentProcesses(run) >= MAX_LIVE_AGENT_PROCESSES)) return null
     await this.mergeInto(run, chief)
-    const selected = this.parseJson<{ claims: Array<Record<string, unknown>>; not_selected: number }>(
+    const selected = this.parseJson<{ claims: Array<Record<string, unknown>>; not_selected: number; scope?: string }>(
       await this.py(run, ["brief.py", "verify-select", run.runDir, "--max", String(config.maxClaims)]))
     if (!selected) throw new WorkflowError("brief.py verify-select gave no result")
+    // An early start is worth it only when report.json already says what will be printed; otherwise the picks would
+    // be claims the report never shows, so the draft after the gap round chooses them instead.
+    if (options.early && selected.scope !== "printed") return null
     const at = iso(this.now())
     const state: NonNullable<BriefingRun["verification"]> = run.verification = { state: "done", at, tasks: [], notSelected: selected.not_selected, claims: {}, reworks: 0 }
     if (selected.claims.length === 0) {
@@ -3019,8 +3025,30 @@ export class BriefingWorkflow {
     const chief = run.tasks.find((task) => task.role === "chief")
     if (chief && !isTerminal(chief.state)) await this.accept(run, chief, run.final, [])
     await this.writeSummary(run)
+    await this.lockFinalFiles(run)
     await this.record(run, { status, reasons })
     await this.fault("finalize:done")
+  }
+
+  /**
+   * The report and the records a person signs off become read-only when the run ends: an edit after that skips every
+   * check of the workflow (run mas-20261125-162743-f42f: after it was escalated, the requesting chat added claims,
+   * rebuilt the report and called it ready). Open findings go to the person or into a new run. The qa/ folder stays
+   * writable for the sign-off.
+   */
+  private async lockFinalFiles(run: BriefingRun) {
+    const locked: string[] = []
+    for (const name of FINAL_FILES) {
+      const file = path.join(run.runDir, name)
+      if (!existsSync(file)) continue
+      try {
+        await chmod(file, 0o444)
+        locked.push(name)
+      } catch {
+        // A file that cannot be made read-only stays as it is; the run's own state already records its outcome.
+      }
+    }
+    if (locked.length > 0) await this.record(run, { read_only: locked })
   }
 
   /** Per lane: scouts, fresh tokens and records; the leads media raised and what follow-ups found; joins across lanes. */
@@ -3064,6 +3092,7 @@ export class BriefingWorkflow {
       ...(run.verification ? [`- Independent verification: ${this.verificationLine(run)}`] : []),
       ...(run.partialReason ? [`- Missing input: ${run.partialReason}`] : []),
       "- Human sign-off is still required: qa/signoff.md. Mechanical checks and the agent review do not establish factual accuracy.",
+      ...(run.final ? ["- The report and its records are read-only since the run ended. Do not edit or rebuild them: an open finding goes to the person, or into a new run."] : []),
       "",
       `- Tokens reported by the provider: ${freshTokens(run.usage?.totals ?? emptyUsage())} fresh (uncached input + output) of a ${(run.budgets.tokens ?? DEFAULT_BUDGETS.tokens).run} budget; `
         + `${run.usage?.totals.cachedInput ?? 0} cached input; ${run.usage?.totals.requests ?? 0} requests. Best-effort figures: a request in flight is not counted.`,

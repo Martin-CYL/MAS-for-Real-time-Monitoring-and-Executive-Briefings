@@ -58,7 +58,8 @@ coordination, materiality judgment, cross-border synthesis and the final report 
 
    **Independent verification first.** Nex picks the high-risk claims (you do not choose them) and gives each
    verifier only the claim text, without your sources. When the gap check lists gaps, the verifiers start at the
-   same time and work while you decide the gaps; otherwise your first draft submission starts them. Nothing is
+   same time and work while you decide the gaps; otherwise your first draft submission starts them. They are picked
+   from the claims your report.json prints, so write its stories before your first submission. Nothing is
    counted. `briefing_wait` for them, then submit the draft again. If they dispute a claim, the
    answer lists the findings by key (`verify-1/V001`), each with an arrow to the task that holds the claim: send each
    to that task (`briefing_delegate`, role `lead`, `reworkOf` the task after the arrow, `findings` with its keys) once

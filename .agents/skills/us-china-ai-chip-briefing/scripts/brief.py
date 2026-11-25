@@ -1009,11 +1009,17 @@ def verification_targets(run, limit):
     and the claims that decide a shown event's status label. Each entry says what the report asserts, never where
     the author found it: the verifier looks for its own source."""
     events, _, claims, risk, _ = snapshot_state(run)
+    # Once report.json names its stories, check what the report will print: an event keeps many claims the report
+    # never shows (runs mas-20261124-001719-2198 and mas-20261125-162743-f42f verified 12 claims, 2 and 3 printed).
+    rep = load(Path(run) / 'report.json', {}) or {}
+    real = {e['id'] for e in events['events']}
+    printed = set(printed_ids(events, rep, claims, risk)) if any(s.get('event') in real for s in rep.get('stories') or []) else None
     picked = {}
     for e in events['events']:
         if e.get('decision') not in ('include', 'track'):
             continue
-        shown = [claims[c] for c in e.get('claim_ids') or [] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
+        shown = [claims[c] for c in e.get('claim_ids') or []
+                 if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND' and (printed is None or c in printed)]
         label = label_for(e)
         for c in shown:
             r = risk.get(c['id'], {})
@@ -1027,12 +1033,12 @@ def verification_targets(run, limit):
                 'asserted_status': 'proposed' if e.get('proposed') else 'official' if is_primary(c) else 'reported',
             }
     ranked = sorted(picked.values(), key=lambda t: (-t['risk_score'], t['asserted_status'] != 'official', t['claim_id']))
-    return ranked[:limit], max(0, len(ranked) - limit)
+    return ranked[:limit], max(0, len(ranked) - limit), 'printed' if printed is not None else 'shown_events'
 
 
 def cmd_verify_select(a):
-    targets, left = verification_targets(Path(a.run), a.max)
-    print(json.dumps({'claims': targets, 'not_selected': left}, ensure_ascii=False))
+    targets, left, scope = verification_targets(Path(a.run), a.max)
+    print(json.dumps({'claims': targets, 'not_selected': left, 'scope': scope}, ensure_ascii=False))
     return 0
 
 

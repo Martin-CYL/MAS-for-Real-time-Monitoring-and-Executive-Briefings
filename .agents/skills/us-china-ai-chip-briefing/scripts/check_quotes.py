@@ -35,7 +35,9 @@ SKILL = Path(__file__).resolve().parents[1]
 HIGH_RISK_KINDS = {'legal': 5, 'list': 5, 'negative': 4, 'statistic': 3, 'company_response': 3}
 HIGH_RISK_THRESHOLD = 3
 # Generic legal/list/negative wording (not issue-specific). Used only to stop under-labelling.
-LEGAL_WORDS = r'export controls?|indict|charged|pleaded guilty|licen[cs]e requirement|名单|清单|制裁|禁令|禁止|生效|列入|移出|许可证|出口管制|法规|规则|条例|起诉|裁定|未发现|未列入|并未|尚未达成|sanction|entity list|\bban\b|prohibit'
+LEGAL_WORDS = r'export controls?|indict|charged|pleaded guilty|licen[cs]e requirement|名单|清单|制裁|禁令|禁止|生效|列入|移出|许可证|出口管制|法规|规则|条例|起诉|裁定|未发现|未列入|并未|尚未达成|sanction|entity list|\bban\b|prohibit|alleg|accus|espionage|\bspy\b|\bspies\b|subpoena|investigat|\bprobe\b|lawsuit|\bsued\b|fraud|misled|misconduct|涉嫌|指控|调查|间谍|传票|诉讼|欺诈'
+# The last group: allegations and inquiries about a person or company. Run mas-20261125-162743-f42f printed a claim
+# about an alleged spy labelled only "factual"; it passed automatically and never reached the sign-off sheet.
 MAX_BYTES = 3_000_000
 
 
@@ -239,8 +241,8 @@ def claim_signals(c, domains):
     for s in sources:
         out += [('SOURCE_TYPE_MISMATCH', m) for m in source_type_problems(s, domains)]
     kinds = set(k for k in (c.get('kinds') or []) if isinstance(k, str))
-    if not kinds & {'legal', 'list', 'negative'} and re.search(LEGAL_WORDS, c.get('text', '')):
-        out.append(('KIND_UNDERSTATED', 'Wording looks legal/list/negative but the claim is not labelled so; it is treated as high risk'))
+    if not kinds & {'legal', 'list', 'negative'} and re.search(LEGAL_WORDS, c.get('text', ''), re.I):
+        out.append(('KIND_UNDERSTATED', 'Wording looks legal/list/negative or makes an allegation, but the claim is not labelled so; it is treated as high risk'))
     if sources and all(is_news(host_of(s.get('url', '')), domains) or s.get('evidence_type') == 'news' for s in sources):
         out.append(('MEDIA_ONLY', 'Supported only by media reporting; wording must attribute it ("reportedly", "according to Reuters" / 据报)'))
     return out

@@ -36,7 +36,7 @@ class SelectionTests(unittest.TestCase):
         listed['kinds'] = ['list']
         listed['recorded_sha'] = brief.ev.fingerprint(listed)
         jsave(run / 'evidence_ledger.json', led)
-        targets, left = brief.verification_targets(run, 12)
+        targets, left, _ = brief.verification_targets(run, 12)
         by = {t['claim_id']: t for t in targets}
         self.assertEqual(left, 0)
         self.assertEqual(targets[0]['claim_id'], listed['id'])  # highest risk first
@@ -45,8 +45,32 @@ class SelectionTests(unittest.TestCase):
         self.assertNotIn('According to Reuters', json.dumps(targets))
         for t in targets:
             self.assertFalse({'sources', 'quote', 'url', 'anchor'} & set(t), t)
-        capped, rest = brief.verification_targets(run, 1)
+        capped, rest, _ = brief.verification_targets(run, 1)
         self.assertEqual((len(capped), rest), (1, len(targets) - 1))
+
+    def test_once_the_report_names_its_stories_only_printed_claims_are_chosen(self):
+        # Live runs verified 12 claims of which only 2-3 were printed: an event keeps claims the report never shows.
+        run = self.r.root
+        eid = self.r.event(run, 'https://www.example.gov/list', ENACTED_RULE, 'Synthetic agency adds foundry to entity list',
+                           'adds Synthetic Foundry to the synthetic entity list',
+                           'The Synthetic Agency added Synthetic Foundry to the synthetic entity list.')
+        sid = jload(run / 'sources.json')['sources'][-1]['id']
+        code, out = call('add-claim', run, eid, sid, '--quote', 'adds Synthetic Foundry to the synthetic entity list',
+                         '--text', 'Synthetic Foundry is now on the synthetic entity list.', '--kind', 'list')
+        self.assertEqual(code, 0, out)
+        led = jload(run / 'evidence_ledger.json')
+        first, second = led['claims'][0]['id'], led['claims'][1]['id']
+        before, _, scope = brief.verification_targets(run, 12)
+        self.assertEqual(scope, 'shown_events')  # the skeleton's placeholder story names no real event
+        self.assertIn(second, {t['claim_id'] for t in before})
+        self.r.report_json(run, eid)
+        rep = jload(run / 'report.json')
+        rep['stories'][0]['changes'] = [[first]]  # the story prints only the first claim
+        jsave(run / 'report.json', rep)
+        after, _, scope = brief.verification_targets(run, 12)
+        self.assertEqual(scope, 'printed')
+        self.assertNotIn(second, {t['claim_id'] for t in after})
+        self.assertEqual(json.loads(call('verify-select', run)[1])['scope'], 'printed')
 
     def test_cli_prints_json(self):
         self.r.rule(self.r.root)

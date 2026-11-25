@@ -87,6 +87,14 @@ class EnglishClaimTests(unittest.TestCase):
     def test_figure_in_english_claim_still_needs_quote(self):
         self.assertIn('NUMBER_NOT_IN_QUOTE', self.sig('On October 8, 2026 the company raised $10 billion.', 'the company announced financing'))
 
+    def test_allegation_about_a_person_raises_risk(self):
+        # Run mas-20261125-162743-f42f: labelled "factual", it passed automatically and missed the sign-off sheet.
+        text = "The attorney general said the subpoena related to news of the former chief executive's reported affair with a person alleged to be a Chinese spy."
+        self.assertIn('KIND_UNDERSTATED', self.sig(text, 'related to the news of the affair with an alleged spy'))
+        self.assertIn('KIND_UNDERSTATED', self.sig('The company is under investigation for possible chip transfers.', 'is under investigation'))
+        self.assertIn('KIND_UNDERSTATED', self.sig('Investigators subpoenaed the company on Thursday.', 'subpoenaed the company'))
+        self.assertNotIn('KIND_UNDERSTATED', self.sig('The company shipped a new accelerator in October 2026.', 'shipped a new accelerator'))
+
     def test_english_legal_wording_raises_risk(self):
         self.assertIn('KIND_UNDERSTATED', self.sig('A contractor pleaded guilty to violating export controls.', 'pleaded guilty to violating export controls'))
 

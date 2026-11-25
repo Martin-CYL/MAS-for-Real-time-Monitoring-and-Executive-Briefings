@@ -22,7 +22,15 @@ The goal is a report a person can release after a short sign-off of the riskiest
 Use it only when the user explicitly asks for the multi-agent briefing and the Nex tool `briefing_start` is
 available. Call `briefing_start` with the user's request and window, report the run ID and status it returns, and
 stop: Nex runs the Chief Editor, country leads, scouts, independent verifiers and reviewer as separate chats, using the role files in
-`references/roles/` and the records and checks of `scripts/brief.py`. Otherwise follow the steps below.
+`references/roles/` and the records and checks of `scripts/brief.py`.
+
+When Nex says the run has ended, report its final status exactly as Nex gives it (for example `escalated`), the
+report path, the open findings and what needs a person, and stop again. **Never edit, rebuild or re-validate a run's
+files after it ends, not even to fix a reviewer's finding**: the person signs off the report the workflow reviewed,
+and a later edit skips every check of the workflow (Nex makes the report and records read-only when the run ends).
+A finding still open goes to the person, or into a new run.
+
+Otherwise follow the steps below.
 
 ## Files
 

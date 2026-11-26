@@ -64,7 +64,7 @@ LABELS = {
         'thesis_sep': '，', 'readpath': '3 分钟阅读：本期三个判断 → 事件状态表 → 管理层参考',
         'questions': '管理层关注的三个问题', 'public_only': '公开资料情报简报；不使用任何金融机构的内部客户信息、授信记录或敞口数据。',
         'judgments': '本期三个判断', 'panel': 'MONITORING STATUS / 事件状态', 'panel_title': '哪些事项已确认，下一步看什么？',
-        'columns': ('事项', '证据状态', '下一节点', '位置'), 'carried': '延续跟踪的事项', 'new': '本期新增', 'join': '；',
+        'columns': ('事项', '证据状态', '下一节点', '位置'), 'carried': '延续跟踪的事项', 'new': '本期新增', 'earlier': '此前事项（继续跟踪）', 'join': '；',
         'chapter': '见第 {n} 章', 'tracking': '仅跟踪', 'key': '标记',
         'chip': {'confirmed': '官方', 'reported': '媒体报道', 'pending': '拟议', 'unverified': '暂无来源'},
         'background': '背景：', 'change': '本次变化：', 'impact': '影响：', 'response': '企业回应：', 'uncertain': '尚不确定：',
@@ -83,7 +83,7 @@ LABELS = {
         'questions': 'Three questions for management',
         'public_only': 'Public-source intelligence briefing; uses no internal client, credit or exposure data of any financial institution.',
         'judgments': 'Three key judgments', 'panel': 'MONITORING STATUS / Event status', 'panel_title': 'What is confirmed, and what comes next?',
-        'columns': ('Item', 'Evidence status', 'Next milestone', 'Where'), 'carried': 'Carried-over cases', 'new': 'New this period', 'join': '; ',
+        'columns': ('Item', 'Evidence status', 'Next milestone', 'Where'), 'carried': 'Carried-over cases', 'new': 'New this period', 'earlier': 'Earlier developments, still tracked', 'join': '; ',
         'chapter': 'Chapter {n}', 'tracking': 'Tracking only', 'key': 'Key',
         'chip': {'confirmed': 'Official', 'reported': 'Media report', 'pending': 'Proposed', 'unverified': 'No source yet'},
         'background': 'Background: ', 'change': 'What changed: ', 'impact': 'Why it matters: ', 'response': 'Company response: ',
@@ -267,6 +267,10 @@ def cmd_event(a):
         url = a.url or (reg[srcs[0]]['url'] if srcs else '')
         dup = [e for e in evs if (url and url == e.get('url')) or SequenceMatcher(None, e['title'].lower(), a.title.lower()).ratio() > 0.8]
         eid = f"E{len(evs) + 1:03d}"
+        if a.case and any(x.get('case_id') == a.case for x in evs):
+            used = ', '.join(x['id'] for x in evs if x.get('case_id') == a.case)
+            print(f'--case {a.case} is already the case of {used}: one event per case. A development that updates the case '
+                  f'belongs in that event (add-claim to it); anything else is its own event without --case'); return 1
         evs.append({'id': eid, 'title': a.title, 'case_id': a.case, 'date': a.date, 'side': a.side, 'sources': srcs,
                     'url': url, 'materiality': a.materiality or '', 'why_it_matters': a.why or '',
                     'decision': None, 'reason': '', 'claim_ids': [], 'followup': '',
@@ -297,6 +301,16 @@ def cmd_event(a):
             if len(status_claims) > MAX_STATUS_CLAIMS:
                 print(f'--status-claim: at most {MAX_STATUS_CLAIMS} claims for one status row'); return 1
         e.update(decision=a.decision, reason=a.reason)
+        if a.case:
+            # --case A00x links the event to an active case; --case none removes a wrong link. One event per case.
+            if a.case.lower() == 'none':
+                e.pop('case_id', None)
+            else:
+                taken = [x['id'] for x in evs if x is not e and x.get('case_id') == a.case]
+                if taken:
+                    print(f'--case {a.case}: already the case of {", ".join(taken)}. One event per case: record this '
+                          f'development as its own event without --case, or clear the other with --case none'); return 1
+                e['case_id'] = a.case
         if note:
             e['status_note'] = note
         if status_claims:
@@ -578,6 +592,17 @@ def verify_gap(shown, verification):
                for c in shown)
 
 
+def printed_view(e, ids, claims, risk):
+    """The event as its printed claims show it: labels and evidence come from what the reader sees, not from every
+    claim the event holds (run mas-20261125-234529-61ef: a row printing one Reuters forecast showed Official because
+    official claims of other developments sat in the same event). Falls back to the whole event when nothing prints."""
+    if not ids:
+        return e
+    view = dict(e, claim_ids=list(ids))
+    view['evidence_status'] = evidence_status(view, claims, risk)
+    return view
+
+
 def is_primary(claim):
     return any(s.get('evidence_type') in PRIMARY for s in claim.get('sources') or [])
 
@@ -651,7 +676,13 @@ def page(run, issue_date=None):
     watch = {s['event']: s.get('watch') for s in rep['stories'] if s.get('watch')}
     visible = [e for e in evs.values() if e.get('decision') in ('include', 'track')]
     order = sorted(visible, key=lambda e: (e['decision'] != 'include', not e.get('case_id'), e['id']))
-    groups = [(L['new'], [e for e in visible if not e.get('case_id')]), (L['carried'], [e for e in visible if e.get('case_id')])]
+    # New = no active case and dated inside the window. A development dated before the window is earlier context
+    # even without a case (run mas-20261125-234529-61ef listed a 19 November rule under "new this period").
+    start = cfg['window']['start']
+    fresh = lambda e: not e.get('date') or str(e['date'])[:10] >= start
+    groups = [(L['new'], [e for e in visible if not e.get('case_id') and fresh(e)]),
+              (L['earlier'], [e for e in visible if not e.get('case_id') and not fresh(e)]),
+              (L['carried'], [e for e in visible if e.get('case_id')])]
     rows = []
     c1, c2, c3, c4 = L['columns']
     for heading, members in groups:
@@ -659,6 +690,8 @@ def page(run, issue_date=None):
             continue
         rows.append(f'<tr class="group"><th colspan="4" scope="colgroup">{heading}</th></tr>')
         for e in sorted(members, key=lambda e: (e['decision'] != 'include', e['id'])):
+            printed = status_ids.get(e['id']) or [c for para in paragraphs.get(e['id'], []) for c in para]
+            e = printed_view(e, printed, claims, risk)
             shown = [claims[c] for c in e.get('claim_ids') or [] if c in claims and risk.get(c, {}).get('quote_state') == 'FOUND']
             labels = labels_for(e, shown, verification)
             gap = verify_gap(shown, verification)
@@ -702,7 +735,7 @@ def page(run, issue_date=None):
             cl = [c for para in paras for c in para]
             joiner = ' ' if lang == 'en' else ''
             texts = [joiner.join(f'<span data-claim-id="{c["id"]}">{w(c["text"])}</span>' for c in para) for para in paras]
-            sts = labels_for(e, cl, verification)
+            sts = labels_for(printed_view(e, [c['id'] for c in cl], claims, risk), cl, verification)
             first = cl[0]['sources'][0] if cl else {}
             eyebrow = f'{L["side"].get(e.get("side"), "")} / {first.get("source_name", "")} / {md_date(e.get("date"), lang)}'
             body = (f'<p><strong>{L["background"]}</strong>{w(s["background"])}</p>' if s.get('background') else '') \
@@ -1000,7 +1033,18 @@ def cmd_precheck(a):
     if code == 1 or qa.get('readiness') == 'BLOCKED':
         print('precheck: a submission would be refused. Fix the FIX / TODO lines above, then run precheck again.')
         return 1
-    print(f'precheck: no refusal found (validator readiness {qa.get("readiness")}). Submit the draft.')
+    # Items the author can fix now (a term explained at first use, a missing date, repetition, …) do not get a draft
+    # refused, but they reach the reviewer and the person if left: fix them here, with the validator's own feedback
+    # (run mas-20261125-234529-61ef ended with five unexplained terms). Evidence gaps stay for the reviewer.
+    from qa_common import category
+    fixable = [x for xs in (qa.get('checks') or {}).values() for x in xs if x.get('status') != 'PASS' and category(x) == 'author_fix']
+    if fixable:
+        print(f'precheck: {len(fixable)} item(s) you can fix now; fix them before submitting:')
+        for x in fixable[:20]:
+            print(f'FIX {x.get("code")}: {x.get("message")}')
+        print('NEXT: fix these, then run precheck again.')
+        return 1
+    print(f'precheck: no refusal and nothing left to fix now (validator readiness {qa.get("readiness")}). Submit the draft.')
     return 0
 
 

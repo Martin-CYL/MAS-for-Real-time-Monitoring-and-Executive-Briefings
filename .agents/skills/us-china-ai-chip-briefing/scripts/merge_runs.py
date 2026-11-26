@@ -118,7 +118,7 @@ def days_apart(a, b):
 def same_event(a, b):
     """'same', 'possible' or None. Conservative: only clear signals join events; the rest is left to a person."""
     if a.get('case_id') and a.get('case_id') == b.get('case_id'):
-        return 'same'
+        return 'case'
     if a.get('url') and a.get('url') == b.get('url'):
         return 'same'
     ratio = SequenceMatcher(None, (a.get('title') or '').lower(), (b.get('title') or '').lower()).ratio()
@@ -310,7 +310,16 @@ def merge(target, task_id, source):
             continue
         # Two events of the same task are the task's own decision, never joined here.
         kind_t = [(same_event(t, mapped), t) for t in evs_t['events'] if t['id'] not in out['added']['events']]
+        # A shared case ID is a strong but not a sure sign (Fellegi & Sunter 1969: one agreeing field is not a match):
+        # it joins one event of this task to the case's event; a second one from the same task stays apart as a
+        # possible duplicate, without the case, for the receiving agent to settle.
+        case_joined = entry.setdefault('case_joined', [])
+        kind_t = [('same' if k == 'case' and t['id'] not in case_joined else 'possible' if k == 'case' else k, t) for k, t in kind_t]
         twin = next((t for k, t in kind_t if k == 'same'), None)
+        if twin and twin.get('case_id') and twin.get('case_id') == mapped.get('case_id'):
+            case_joined.append(twin['id'])
+        if not twin and mapped.get('case_id') and any(t.get('case_id') == mapped.get('case_id') for _, t in kind_t):
+            mapped = {k: v for k, v in mapped.items() if k != 'case_id'}
         if twin:
             _join(twin, mapped, task_id, out)
             entry['events'][e['id']] = twin['id']

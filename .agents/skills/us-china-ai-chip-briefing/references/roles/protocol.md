@@ -50,6 +50,12 @@ your task ID, your task directory (TASK) and the skill directory (SKILL).
   `--materiality` and the three selection answers: `--link "…" --size "…" --new "…"`. A material event you could not
   source is `track`, never dropped. A tracked event's title and reason are printed in the report's status table, so
   write them for the reader, without record IDs (E013, C004) or working notes; name duplicates only in exclude reasons.
+- `--case A00x` goes on **one** event only: the one that updates that active case. Other developments you found while
+  checking the case are their own events without `--case` (a wrong one is cleared with `event decide … --case none`).
+  Nex joins every record of a case into one status row, so a case on the wrong event mislabels that row.
+- A status note that says something was **not** found, approved or done needs a claim of kind `negative` behind it,
+  printed with `--status-claim`: the dated search, what was searched and where ("A 20 November search of the MOFCOM
+  licence notices found no approval for …"). Otherwise write only what the printed claims show.
 - Mark proposed, pending or not-yet-effective measures with `--proposed`. Never describe a proposal as enacted, a
   report as confirmed, or an allegation as fact.
 

@@ -65,6 +65,9 @@ def lanes(path=LANES_FILE):
     return {lane['id']: lane for lane in doc.get('lanes') or [] if isinstance(lane, dict) and lane.get('id')}
 
 
+NEGATIVE_NOTE = re.compile(r"\b(no|not|none|never|without|nothing)\b|n't|未|没有|尚无|并无|无新", re.I)
+
+
 def check(run, role, lane=None):
     run = Path(run)
     items = []
@@ -119,6 +122,33 @@ def check(run, role, lane=None):
         elif hashlib.sha256(saved.read_bytes()).hexdigest() != s['sha256']:
             add('FAIL', 'SOURCE_SNAPSHOT_CHANGED', f'{s.get("id")}: {s["file"]} changed after it was registered. Saved pages are never edited: '
                 'register the page again with brief.py fetch (it gets a new ID) and re-add its claims from it', field=s['file'])
+    # One event per active case. Run mas-20261125-234529-61ef: a scout tagged six different events with one case, the
+    # merge joined them all into that case's row, and the row showed an Official label for a media-only forecast.
+    by_case = {}
+    for e in evs:
+        if e.get('case_id'):
+            by_case.setdefault(e['case_id'], []).append(e['id'])
+    for case, ids in sorted(by_case.items()):
+        if len(ids) > 1:
+            add('FAIL', 'CASE_SHARED', f'{", ".join(ids)} all carry case {case}: one event per case. Keep the case on the event '
+                'that updates it and clear it on the others with brief.py event TASK decide E00x <decision> --reason … --case none',
+                field=case)
+    # A status note that says something was not found, not established or did not happen is a negative statement:
+    # it needs a "negative" claim (the dated search and what it covered, quoted from the page searched) among the
+    # claims the row prints. Not finding something is "not enough information", not a refutation (FEVER, NAACL 2018),
+    # and a "nothing found" conclusion must state its search (PRISMA 2020). Run mas-20261125-234529-61ef escalated on
+    # "No China approval or completed delivery was established by the cutoff" backed only by a media forecast.
+    for e in evs:
+        note = e.get('status_note') or ''
+        if e.get('decision') not in ('include', 'track') or not NEGATIVE_NOTE.search(note):
+            continue
+        backing = (e.get('status_claims') or e.get('claim_ids') or []) if e.get('decision') == 'track' else (e.get('claim_ids') or [])
+        if any('negative' in (claims.get(c, {}).get('kinds') or []) for c in backing):
+            continue
+        add('FAIL' if role == 'chief' else 'UNVERIFIED', 'NEGATIVE_NOTE_UNSUPPORTED',
+            f'{e["id"]}: its status note says something was not found or has not happened ("{note[:90]}"), but no claim of kind '
+            '"negative" backs it. Record the dated search as a negative claim (what was searched, where, until when) and print it '
+            'as a --status-claim, or reword the note to what the printed claims show', field=e['id'])
     for cid in ev.hand_edited(ledger):
         add('FAIL', 'CLAIM_EDITED_BY_HAND', f'{cid} was changed after add-claim; withdraw it and record the corrected claim with add-claim', claim=cid)
     for cid, r in risk.items():

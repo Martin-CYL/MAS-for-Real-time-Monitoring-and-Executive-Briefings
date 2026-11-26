@@ -152,6 +152,24 @@ class NegativeNoteTests(unittest.TestCase):
         call('event', run, 'decide', eid, 'track', '--reason', 'r', '--status-claim', claim)
         self.assertNotIn('NEGATIVE_NOTE_UNSUPPORTED', codes(check_handoff.check(run, 'chief')))
 
+    def test_a_search_that_found_nothing_is_not_an_event(self):
+        run = self.r.task('scout')
+        self.r.news(run, decision='track')
+        call('event', run, 'add', '--title', 'Public searches found no synthetic licence decision', '--date', '2030-03-06', '--side', 'us')
+        sid = jload(run / 'sources.json')['sources'][-1]['id']
+        for i in range(2):
+            code, out = call('add-claim', run, 'E002', sid, '--quote', 'halted shipments of synthetic wafers', '--kind', 'negative',
+                             '--text', f'According to reuters.com, search {i + 1} of the synthetic register on March 10 found no licence decision.')
+            self.assertEqual(code, 0, out)
+        call('event', run, 'decide', 'E002', 'track', '--reason', 'r')
+        self.r.narrative(run)
+        self.assertEqual([x['status'] for x in check_handoff.check(run, 'scout') if x['code'] == 'SEARCH_RECORDED_AS_EVENT'], ['UNVERIFIED'])
+        found = [x for x in check_handoff.check(run, 'chief') if x['code'] == 'SEARCH_RECORDED_AS_EVENT']
+        self.assertEqual([x['status'] for x in found], ['FAIL'])
+        self.assertIn('search result recorded on', found[0]['message'])
+        call('event', run, 'decide', 'E002', 'exclude', '--reason', 'search result recorded on E001')
+        self.assertNotIn('SEARCH_RECORDED_AS_EVENT', codes(check_handoff.check(run, 'chief')))
+
     def test_a_positive_note_is_not_flagged(self):
         run = self.r.task('scout')
         eid = self.r.news(run, decision='track')

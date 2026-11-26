@@ -149,6 +149,19 @@ def check(run, role, lane=None):
             f'{e["id"]}: its status note says something was not found or has not happened ("{note[:90]}"), but no claim of kind '
             '"negative" backs it. Record the dated search as a negative claim (what was searched, where, until when) and print it '
             'as a --status-claim, or reword the note to what the printed claims show', field=e['id'])
+    # A search that found nothing is evidence about another event, not an event: it belongs as a negative claim on the
+    # event it concerns. Run mas-20261126-020317-d91e printed rows like "Public searches found no BIS or Nscale
+    # decision" under "new this period", one of them beside the Nscale story it was about.
+    for e in evs:
+        ids = [c for c in e.get('claim_ids') or [] if c in claims]
+        if e.get('case_id') or e.get('decision') not in ('include', 'track') or not ids:
+            continue
+        negative = [c for c in ids if 'negative' in (claims[c].get('kinds') or [])]
+        if len(negative) * 2 >= len(ids):
+            add('FAIL' if role == 'chief' else 'UNVERIFIED', 'SEARCH_RECORDED_AS_EVENT',
+                f'{e["id"]} ("{(e.get("title") or "")[:70]}") is mostly "nothing found" claims ({", ".join(negative)}): a search result '
+                'is not a development. Add those claims to the event they are about (add-claim to it, then --status-claim there), '
+                'and exclude this event with the reason "search result recorded on E0xx"', field=e['id'])
     for cid in ev.hand_edited(ledger):
         add('FAIL', 'CLAIM_EDITED_BY_HAND', f'{cid} was changed after add-claim; withdraw it and record the corrected claim with add-claim', claim=cid)
     for cid, r in risk.items():

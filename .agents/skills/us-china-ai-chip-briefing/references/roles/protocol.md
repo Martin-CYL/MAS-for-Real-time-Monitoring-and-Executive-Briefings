@@ -55,7 +55,8 @@ your task ID, your task directory (TASK) and the skill directory (SKILL).
   Nex joins every record of a case into one status row, so a case on the wrong event mislabels that row.
 - A status note that says something was **not** found, approved or done needs a claim of kind `negative` behind it,
   printed with `--status-claim`: the dated search, what was searched and where ("A 20 November search of the MOFCOM
-  licence notices found no approval for …"). Otherwise write only what the printed claims show.
+  licence notices found no approval for …"). Otherwise write only what the printed claims show. Record that claim on the
+  event it is about: a search that found nothing is never an event of its own.
 - Mark proposed, pending or not-yet-effective measures with `--proposed`. Never describe a proposal as enacted, a
   report as confirmed, or an allegation as fact.
 

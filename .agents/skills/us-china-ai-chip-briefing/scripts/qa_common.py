@@ -30,7 +30,7 @@ CATEGORIES = {
                      'ONE_SIDED_SWEEP CASE_NOT_FOLLOWED QUOTE_UNCHECKED QUOTE_CHECK_SKIPPED PUBLICATION_AFTER_CUTOFF '
                      'SYNTHETIC_FIXTURE REVIEW_SUPPORT_MISSING COVERAGE_SWEEP_MISSING'),
     'source_access': ('来源无法自动访问（不代表来源错误）', 'UNCHECKED BLOCKED NETWORK_ERROR BROKEN QUOTE_UNCHECKABLE'),
-    'human_review': ('需人工判断', 'CLAIM_REVIEW_PENDING NUMBER_NOT_IN_QUOTE UNMARKED_RISK_CLAIM SNAPSHOT_LIVE_DIFFER '
+    'human_review': ('需人工判断', 'CLAIM_REVIEW_PENDING NUMBER_NOT_IN_QUOTE UNMARKED_RISK_CLAIM SNAPSHOT_LIVE_DIFFER ALLEGATION '
                      'CLAIM_DATE_REVIEW_PENDING CHECK_AFTER_GENERATION DATE_NOT_SHOWN'),
     'signoff': ('等待最终人工签核', 'HUMAN_SIGNOFF INDEPENDENT_REVIEW_MISSING COVERAGE_REVIEW SIGNOFF_INCOMPLETE'),
 }
@@ -51,7 +51,8 @@ FIXES = {
     'DATE_NOT_SHOWN': 'The page shows no publication date, for the reason recorded; check from the page that the fact is current and inside the window.',
     'SOURCE_TYPE_MISMATCH': 'Fix evidence_type: government sites = official_document; company newsroom/IR = company_statement; news sites = news.',
     'NUMBER_NOT_IN_QUOTE': 'Extend the quote so it contains each number in the claim (or fix the number). A person will otherwise check it.',
-    'KIND_UNDERSTATED': 'Add "legal", "list" or "negative" to the claim kinds; the wording makes a legal/list/negative statement or an allegation (allegations and inquiries are "legal").',
+    'KIND_UNDERSTATED': 'Add "legal", "list" or "negative" to the claim kinds; the wording makes a legal/list/negative statement.',
+    'ALLEGATION': 'Check the allegation is attributed to who makes it, fair to the accused and carries any response; no legal instrument is needed.',
     'SUPPORT_MISSING': 'Open the source and copy a verbatim quote, or keep the claim attributed ("reportedly", "according to …") with access_status "blocked" and say so in the report.',
     'SOURCE_MISSING': 'Add at least one source you actually opened, or remove the claim.',
     'PRIMARY_LEGAL_SOURCE': 'Add the official instrument or list record (Federal Register, court filing, ministry notice) as a primary source. If it cannot be obtained, keep the claim attributed ("reportedly", "according to …"), say in the report that the original was not obtained, and leave this for the reviewer.',

@@ -46,6 +46,8 @@ your task ID, your task directory (TASK) and the skill directory (SKILL).
   inside the claim at first use ("the US Department of Justice (DOJ)"). Quotes stay verbatim in the page's own
   language (Chinese sources are quoted in Chinese). News-only facts are attributed: "According to Reuters, …".
   `--kind` takes only `factual`, `technical`, `legal`, `list`, `negative`, `statistic` or `company_response`.
+  `legal` is for what a law, rule, court or official list says; a reported allegation or inquiry keeps its own kind
+  (`factual`, `company_response`): the checks send it to the person anyway.
 - Decide every event (`include` / `track` / `exclude`) with a one-line reason. For include and track also give
   `--materiality` and the three selection answers: `--link "…" --size "…" --new "…"`. A material event you could not
   source is `track`, never dropped. A tracked event's title and reason are printed in the report's status table, so

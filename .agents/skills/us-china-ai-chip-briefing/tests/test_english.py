@@ -87,13 +87,30 @@ class EnglishClaimTests(unittest.TestCase):
     def test_figure_in_english_claim_still_needs_quote(self):
         self.assertIn('NUMBER_NOT_IN_QUOTE', self.sig('On October 8, 2026 the company raised $10 billion.', 'the company announced financing'))
 
-    def test_allegation_about_a_person_raises_risk(self):
-        # Run mas-20261125-162743-f42f: labelled "factual", it passed automatically and missed the sign-off sheet.
+    def test_allegation_about_a_person_goes_to_a_person_without_becoming_legal(self):
+        # Run f42f: an alleged-spy claim labelled "factual" passed automatically. Runs d91e and d66f: counting these words
+        # as legal asked media-reported allegations for an official legal source and left the runs incomplete.
         text = "The attorney general said the subpoena related to news of the former chief executive's reported affair with a person alleged to be a Chinese spy."
-        self.assertIn('KIND_UNDERSTATED', self.sig(text, 'related to the news of the affair with an alleged spy'))
-        self.assertIn('KIND_UNDERSTATED', self.sig('The company is under investigation for possible chip transfers.', 'is under investigation'))
-        self.assertIn('KIND_UNDERSTATED', self.sig('Investigators subpoenaed the company on Thursday.', 'subpoenaed the company'))
-        self.assertNotIn('KIND_UNDERSTATED', self.sig('The company shipped a new accelerator in October 2026.', 'shipped a new accelerator'))
+        for claim, quote in ((text, 'related to the news of the affair with an alleged spy'),
+                             ('The company is under investigation for possible chip transfers.', 'is under investigation'),
+                             ('Investigators subpoenaed the company on Thursday.', 'subpoenaed the company'),
+                             ('Malay Mail said the New York Times reported unnamed sources alleging that some chips bound for data centers were smuggled into China.',
+                              'alleging that some chips bound for data centers were smuggled into China')):
+            got = self.sig(claim, quote)
+            self.assertIn('ALLEGATION', got, claim)
+            self.assertNotIn('KIND_UNDERSTATED', got, claim)
+        self.assertNotIn('ALLEGATION', self.sig('The company shipped a new accelerator in October 2026.', 'shipped a new accelerator'))
+        from check_quotes import risk_score
+        from qa_common import category
+        c = {'id': 'C1', 'text': 'Investigators subpoenaed the company on Thursday.', 'kinds': ['factual'],
+             'sources': [{'url': 'https://www.reuters.com/a', 'quote': 'subpoenaed the company', 'evidence_type': 'news'}]}
+        from check_quotes import claim_signals
+        score, reasons = risk_score(c, claim_signals(c, self.D), 'FOUND')
+        self.assertGreaterEqual(score, 3)  # high tier: on the sign-off sheet
+        self.assertIn('ALLEGATION', reasons)
+        self.assertEqual(category({'status': 'UNVERIFIED', 'code': 'ALLEGATION'}), 'human_review')  # not an evidence gap
+        from evidence_tools import infer_kinds
+        self.assertNotIn('legal', infer_kinds('Sources alleged that chips were smuggled.', ['factual']))
 
     def test_english_legal_wording_raises_risk(self):
         self.assertIn('KIND_UNDERSTATED', self.sig('A contractor pleaded guilty to violating export controls.', 'pleaded guilty to violating export controls'))

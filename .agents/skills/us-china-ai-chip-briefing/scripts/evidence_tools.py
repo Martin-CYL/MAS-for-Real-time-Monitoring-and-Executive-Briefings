@@ -277,7 +277,7 @@ def classify(url, domains):
 
 def infer_kinds(text, given):
     kinds = list(dict.fromkeys(given or ['factual']))
-    if re.search(LEGAL_WORDS, text, re.I) and not set(kinds) & {'legal', 'list', 'negative'}:
+    if re.search(LEGAL_WORDS, text) and not set(kinds) & {'legal', 'list', 'negative'}:
         kinds.append('legal')
     t = re.sub(r'\d{4}\s*年|\d{1,2}\s*[月日号]', '', text)
     if any(n for n, _ in claim_numbers(t)) and 'statistic' not in kinds:
